@@ -48,6 +48,7 @@ class VariationalBrowserExecutionAdapter:
         symbol: str,
         side: str,
         amount: str,
+        clip_usd: float | None = None,
         market: str | None = None,
         account: str | None = None,
         timeout_ms: int | None = None,

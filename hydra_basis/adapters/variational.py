@@ -9,6 +9,7 @@ from hydra_basis.funding_engine.models import FundingPoint
 
 VARIATIONAL_BASE_URL = "https://omni-client-api.prod.ap-northeast-1.variational.io"
 LORIS_HISTORICAL_URL = "https://api.loris.tools/funding/historical"
+_VARIATIONAL_STATS_CACHE: dict[int, dict[str, dict[str, float]]] = {}
 
 
 def parse_stats_listings(data: dict) -> dict[str, dict[str, float]]:
@@ -63,8 +64,13 @@ def parse_loris_historical_series(
 
 
 async def fetch_variational_stats(session) -> dict[str, dict[str, float]]:
+    cached = _VARIATIONAL_STATS_CACHE.get(id(session))
+    if cached is not None:
+        return cached
     data = await fetch_json(session, "GET", f"{VARIATIONAL_BASE_URL}/metadata/stats")
-    return parse_stats_listings(data)
+    parsed = parse_stats_listings(data)
+    _VARIATIONAL_STATS_CACHE[id(session)] = parsed
+    return parsed
 
 
 async def list_symbols(session) -> set[str]:

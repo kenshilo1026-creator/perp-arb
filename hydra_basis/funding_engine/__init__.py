@@ -1,0 +1,1 @@
+"""Funding analysis engine."""

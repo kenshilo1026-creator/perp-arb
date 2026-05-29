@@ -1,0 +1,86 @@
+from __future__ import annotations
+
+from hydra_basis.formatting import fmt_pct
+
+
+def select_best_alerts_by_symbol(
+    opportunities: list[dict],
+    *,
+    min_annualized_avg: float,
+) -> list[dict]:
+    best_by_symbol: dict[str, dict] = {}
+
+    for opportunity in opportunities:
+        if not opportunity["stats"]["signal"]:
+            continue
+        if opportunity["stats"]["annualized_avg"] <= min_annualized_avg:
+            continue
+
+        symbol = opportunity["symbol"]
+        current_best = best_by_symbol.get(symbol)
+        if current_best is None or opportunity["stats"]["annualized_avg"] > current_best["stats"]["annualized_avg"]:
+            best_by_symbol[symbol] = opportunity
+
+    return sorted(best_by_symbol.values(), key=lambda item: item["symbol"])
+
+
+def select_best_spot_perp_alerts_by_symbol(
+    opportunities: list[dict],
+    *,
+    min_annualized_avg: float,
+) -> list[dict]:
+    best_by_symbol: dict[str, dict] = {}
+
+    for opportunity in opportunities:
+        if not opportunity["stats"]["signal"]:
+            continue
+        if opportunity["stats"]["annualized_avg"] <= min_annualized_avg:
+            continue
+
+        symbol = opportunity["symbol"]
+        current_best = best_by_symbol.get(symbol)
+        if current_best is None or opportunity["stats"]["annualized_avg"] > current_best["stats"]["annualized_avg"]:
+            best_by_symbol[symbol] = opportunity
+
+    return sorted(best_by_symbol.values(), key=lambda item: item["symbol"])
+
+
+def build_ranked_alert_digest(
+    *,
+    cross_exchange_alerts: list[dict],
+    spot_perp_alerts: list[dict],
+) -> str:
+    rows: list[tuple[float, str]] = []
+
+    for alert in cross_exchange_alerts:
+        rows.append(
+            (
+                float(alert["stats"]["annualized_avg"]),
+                (
+                    f"跨所 | {alert['symbol']} | 做空 {alert['short_venue']} / 做多 {alert['long_venue']} | "
+                    f"年化 {fmt_pct(alert['stats']['annualized_avg'])} | "
+                    f"正收益占比 {alert['stats']['positive_ratio']:.1%}"
+                ),
+            )
+        )
+
+    for alert in spot_perp_alerts:
+        rows.append(
+            (
+                float(alert["stats"]["annualized_avg"]),
+                (
+                    f"SPOT-PERP | {alert['symbol']} | 做空永續 {alert['venue']} / 買入現貨 | "
+                    f"年化 {fmt_pct(alert['stats']['annualized_avg'])} | "
+                    f"正收益占比 {alert['stats']['positive_ratio']:.1%}"
+                ),
+            )
+        )
+
+    rows.sort(key=lambda item: item[0], reverse=True)
+    if not rows:
+        return ""
+
+    lines = ["<b>套利訊號總表</b>"]
+    for index, (_, line) in enumerate(rows, start=1):
+        lines.append(f"#{index} {line}")
+    return "\n".join(lines)

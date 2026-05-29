@@ -102,7 +102,7 @@ async def run_backfill() -> None:
         for batch_index, batch in enumerate(batches, start=1):
             print(f"backfill loris-batch {batch_index}/{len(batches)} size={len(batch)}")
             tasks = [FETCHERS[venue](session, symbol) for venue, symbol in batch]
-            results = await gather_limited(tasks, limit=FETCH_CONCURRENCY_LIMIT, return_exceptions=True)
+            results = await gather_limited(tasks, limit=1, return_exceptions=True)
 
             for key, result in zip(batch, results):
                 if isinstance(result, Exception):

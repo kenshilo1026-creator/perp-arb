@@ -6,6 +6,8 @@ from hydra_basis.adapters.hyperliquid import ms_days_ago
 from hydra_basis.funding_engine.models import FundingPoint
 from hydra_basis.funding_engine.normalization import infer_interval_hours_from_timestamps
 
+MEXC_EMPTY_HISTORY_RETRIES = 2
+
 
 def mexc_contract_symbol(symbol: str) -> str:
     normalized_symbol = symbol.upper()
@@ -81,13 +83,31 @@ async def resolve_funding_interval_hours(session, venue: str, symbol: str, histo
     raise RuntimeError(f"unable to determine funding interval from api/history for {venue}:{symbol}")
 
 
+def extract_mexc_history_rows(data: dict) -> list[dict]:
+    payload = data.get("data")
+    if isinstance(payload, dict):
+        rows = payload.get("resultList") or []
+        return rows if isinstance(rows, list) else []
+    if isinstance(payload, list):
+        return payload
+    return []
+
+
 async def fetch_mexc_funding(session, symbol: str) -> list[FundingPoint]:
     mexc_symbol = mexc_contract_symbol(symbol)
     url = "https://contract.mexc.com/api/v1/contract/funding_rate/history"
     params = {"symbol": mexc_symbol, "page_num": 1, "page_size": 1000}
-    data = await fetch_json(session, "GET", url, params=params)
-
-    rows = data.get("data", {}).get("resultList") or data.get("data", []) or []
+    rows: list[dict] = []
+    raw_data: dict = {}
+    for _attempt in range(MEXC_EMPTY_HISTORY_RETRIES + 1):
+        raw_data = await fetch_json(session, "GET", url, params=params)
+        rows = extract_mexc_history_rows(raw_data)
+        if rows:
+            break
+    if not rows:
+        print(f"mexc empty history for {mexc_symbol}: {raw_data}")
+        await resolve_funding_interval_hours(session, "mexc", symbol, rows)
+        return []
     interval_hours = await resolve_funding_interval_hours(session, "mexc", symbol, rows)
     cutoff = ms_days_ago(LOOKBACK_DAYS)
     points: list[FundingPoint] = []

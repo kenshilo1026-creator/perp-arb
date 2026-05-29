@@ -115,17 +115,22 @@ class FundingHistoryStore:
 
     def save(self, funding_points: dict[tuple[str, str], list[FundingPoint]]) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        serialized = {
-            f"{venue}::{symbol}": [
-                {
-                    "venue": point.venue,
-                    "symbol": point.symbol,
-                    "ts_ms": point.ts_ms,
-                    "raw_rate": point.raw_rate,
-                    "interval_hours": point.interval_hours,
-                }
-                for point in points
-            ]
-            for (venue, symbol), points in funding_points.items()
-        }
+        serialized: dict[str, list[dict]] = {}
+        for (venue, symbol), points in funding_points.items():
+            key = f"{venue}::{symbol}"
+            rows = []
+            for point in points:
+                try:
+                    row = {
+                        "venue": point.venue,
+                        "symbol": point.symbol,
+                        "ts_ms": point.ts_ms,
+                        "raw_rate": point.raw_rate,
+                        "interval_hours": point.interval_hours,
+                    }
+                    json.dumps(row)  # validate before adding
+                    rows.append(row)
+                except Exception as exc:
+                    print(f"history_store skipping unserializable point {key} ts={getattr(point, 'ts_ms', '?')}: {exc!r}")
+            serialized[key] = rows
         self.path.write_text(json.dumps(serialized, ensure_ascii=True, indent=2), encoding="utf-8")

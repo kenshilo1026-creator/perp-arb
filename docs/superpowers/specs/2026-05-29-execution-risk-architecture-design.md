@@ -100,12 +100,19 @@ Execution 只讀 `monitor_signals.json`。
 - `priority` 較大的一方 = `maker leg`
 - `priority` 較小的一方 = `taker leg`
 
-若兩邊 priority 相同，第一版可採固定 tie-break：
+若兩邊 priority 相同，改用即時 spread 作 tie-break：
+
+1. 先拉兩邊即時 order book
+2. 比較兩邊 spread %
+3. `spread 較小` 的 venue = `taker leg`
+4. 另一邊 = `maker leg`
+
+若 spread 完全相同，再採固定 tie-break：
 
 1. 優先保留 `short_venue` 為 maker
 2. `long_venue` 為 taker
 
-這個 tie-break 必須明確寫在程式與測試中。
+這個 tie-break 順序必須明確寫在程式與測試中。
 
 ## User Input
 

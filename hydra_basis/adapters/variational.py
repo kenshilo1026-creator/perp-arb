@@ -3,6 +3,8 @@ from __future__ import annotations
 import datetime as dt
 
 from hydra_basis.adapters.base import fetch_json
+from hydra_basis.adapters.request_limiters import run_serialized
+from hydra_basis.config import VARIATIONAL_REQUEST_DELAY_SECONDS
 from hydra_basis.funding_engine.analysis import now_ms
 from hydra_basis.funding_engine.models import FundingPoint
 
@@ -85,15 +87,19 @@ async def fetch_variational_funding(session, symbol: str) -> list[FundingPoint]:
         return []
     end_ms = now_ms()
     start_ms = end_ms - 7 * 24 * 60 * 60 * 1000
-    data = await fetch_json(
-        session,
-        "GET",
-        LORIS_HISTORICAL_URL,
-        params={
-            "symbol": symbol.upper(),
-            "start": isoformat_z(start_ms),
-            "end": isoformat_z(end_ms),
-        },
+    data = await run_serialized(
+        "variational",
+        lambda: fetch_json(
+            session,
+            "GET",
+            LORIS_HISTORICAL_URL,
+            params={
+                "symbol": symbol.upper(),
+                "start": isoformat_z(start_ms),
+                "end": isoformat_z(end_ms),
+            },
+        ),
+        delay_seconds=VARIATIONAL_REQUEST_DELAY_SECONDS,
     )
     return parse_loris_historical_series(
         data,

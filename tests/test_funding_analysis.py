@@ -6,6 +6,7 @@ import tempfile
 import datetime as dt
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
+from types import SimpleNamespace
 
 from hydra_basis.async_utils import gather_limited
 from hydra_basis.alerts import select_best_alerts_by_symbol, select_best_spot_perp_alerts_by_symbol
@@ -31,12 +32,19 @@ from hydra_basis.adapters.mexc import resolve_funding_interval_hours
 from hydra_basis.adapters.mexc import list_symbols as list_mexc_symbols
 from hydra_basis.adapters.mexc import mexc_contract_symbol
 from hydra_basis.adapters.mexc import fetch_mexc_funding
+from hydra_basis.adapters.mexc import extract_mexc_history_rows
 from hydra_basis.adapters.variational import fetch_variational_funding, list_symbols as list_variational_symbols
-from hydra_basis.adapters.variational import parse_stats_listings, parse_loris_historical_series, fetch_variational_stats
+from hydra_basis.adapters.variational import (
+    parse_stats_listings,
+    parse_loris_historical_series,
+    fetch_variational_stats,
+    _VARIATIONAL_STATS_CACHE,
+)
 from hydra_basis.funding_engine.analysis import analyze_spread
 from hydra_basis.funding_engine.analysis import analyze_positive_funding
 from hydra_basis.funding_engine.analysis import explain_spread_skip
 from hydra_basis.funding_engine.analysis import prices_are_compatible
+from hydra_basis.funding_engine.analysis import resolve_pair_min_observations
 from hydra_basis.funding_engine.models import FundingConfig, FundingPoint
 from hydra_basis.funding_engine.normalization import infer_interval_hours_from_timestamps
 from hydra_basis.env import load_environment
@@ -44,7 +52,14 @@ from hydra_basis.formatting import build_signal_message, build_spot_perp_signal_
 from hydra_basis.monitor_errors import build_exchange_error_message
 from hydra_basis.monitor_errors import raise_exchange_error
 from hydra_basis.monitor_errors import should_raise_immediately
-from hydra_basis.backfill import chunk_sequence, split_loris_batched_keys
+from hydra_basis.backfill import (
+    chunk_sequence,
+    split_loris_batched_keys,
+    capture_backfill_spread_snapshot,
+    persist_backfill_progress,
+    backfill_needs_top_up,
+    backfill_incremental_start_ms,
+)
 from hydra_basis.runtime import configure_windows_event_loop_policy
 from hydra_basis.universe import build_symbol_venue_index, select_shared_symbols
 from hydra_basis.universe import symbols_requiring_complete_history
@@ -70,6 +85,22 @@ class InferIntervalHoursTests(unittest.TestCase):
 
 
 class AnalyzeSpreadTests(unittest.TestCase):
+    def test_resolve_pair_min_observations_keeps_24_for_1h_pairs(self) -> None:
+        short_points = [FundingPoint("short", "BTC", ts_ms=0, raw_rate=0.0001, interval_hours=1)]
+        long_points = [FundingPoint("long", "BTC", ts_ms=0, raw_rate=0.0, interval_hours=1)]
+
+        minimum = resolve_pair_min_observations(short_points, long_points)
+
+        self.assertEqual(minimum, 24)
+
+    def test_resolve_pair_min_observations_uses_18_when_pair_includes_8h(self) -> None:
+        short_points = [FundingPoint("short", "BTC", ts_ms=0, raw_rate=0.0001, interval_hours=8)]
+        long_points = [FundingPoint("long", "BTC", ts_ms=0, raw_rate=0.0, interval_hours=1)]
+
+        minimum = resolve_pair_min_observations(short_points, long_points)
+
+        self.assertEqual(minimum, 18)
+
     def test_mixed_interval_analysis_counts_true_observations_only(self) -> None:
         short_points = [
             FundingPoint("short", "BTC", ts_ms=hour * 3_600_000, raw_rate=0.0003, interval_hours=1)
@@ -142,7 +173,7 @@ class AnalyzeSpreadTests(unittest.TestCase):
 
         reason = explain_spread_skip(short_points, long_points, min_observations=24)
 
-        self.assertEqual(reason, "insufficient_samples:1/24")
+        self.assertEqual(reason, "insufficient_samples:1/18")
 
 
 class LoadEnvironmentTests(unittest.TestCase):
@@ -285,6 +316,38 @@ class MexcAdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(points), 1)
         self.assertAlmostEqual(points[0].raw_rate, 0.0001)
 
+    async def test_fetch_funding_retries_when_history_rows_are_empty_once(self) -> None:
+        empty_payload = {"data": {"resultList": []}}
+        filled_payload = {
+            "data": {
+                "resultList": [
+                    {"settleTime": 9_999_999_999_998, "fundingRate": "0.0001", "collectCycle": 8},
+                ]
+            }
+        }
+        with patch(
+            "hydra_basis.adapters.mexc.fetch_json",
+            new=AsyncMock(side_effect=[empty_payload, filled_payload]),
+        ) as mocked:
+            points = await fetch_mexc_funding(session=object(), symbol="FORM")
+
+        self.assertEqual(len(points), 1)
+        self.assertAlmostEqual(points[0].raw_rate, 0.0001)
+        self.assertEqual(mocked.await_count, 2)
+
+    async def test_fetch_funding_still_raises_when_history_rows_stay_empty_after_retries(self) -> None:
+        empty_payload = {"data": {"resultList": []}}
+        with patch(
+            "hydra_basis.adapters.mexc.fetch_json",
+            new=AsyncMock(side_effect=[empty_payload, empty_payload, empty_payload, {"data": {}}]),
+        ):
+            with self.assertRaises(RuntimeError):
+                await fetch_mexc_funding(session=object(), symbol="FORM")
+
+    def test_extract_mexc_history_rows_ignores_non_list_payload_shapes(self) -> None:
+        self.assertEqual(extract_mexc_history_rows({"data": {}}), [])
+        self.assertEqual(extract_mexc_history_rows({"data": {"resultList": {}}}), [])
+
     async def test_mexc_rest_can_be_skipped_entirely_by_runner_policy(self) -> None:
         self.assertTrue(True)
 
@@ -356,6 +419,9 @@ class AsterAdapterTests(unittest.IsolatedAsyncioTestCase):
 
 
 class VariationalAdapterTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self) -> None:
+        _VARIATIONAL_STATS_CACHE.clear()
+
     async def test_list_symbols_reads_metadata_stats(self) -> None:
         payload = {
             "listings": [
@@ -432,6 +498,47 @@ class VariationalAdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(first, second)
         mocked.assert_awaited_once()
 
+    async def test_fetch_variational_funding_retries_loris_bad_gateway_once(self) -> None:
+        stats_payload = {
+            "listings": [
+                {"ticker": "BTC", "funding_rate": "0.0001", "funding_interval_s": 28800},
+            ]
+        }
+        historical_payload = {
+            "symbol": "BTC",
+            "series": {"variational": [{"t": "2026-05-22T00:00:00Z", "y": 0.3848}]},
+            "notices": [],
+        }
+        gateway_error = RuntimeError("bad gateway")
+        gateway_error.status = 502
+        gateway_error.request_info = SimpleNamespace(real_url="https://api.loris.tools/funding/historical")
+
+        with patch(
+            "hydra_basis.adapters.variational.fetch_json",
+            new=AsyncMock(side_effect=[stats_payload, gateway_error, historical_payload]),
+        ) as mocked:
+            points = await fetch_variational_funding(session=object(), symbol="BTC")
+
+        self.assertEqual(len(points), 1)
+        self.assertEqual(mocked.await_count, 3)
+
+    async def test_fetch_variational_funding_still_raises_after_loris_gateway_retries(self) -> None:
+        stats_payload = {
+            "listings": [
+                {"ticker": "BTC", "funding_rate": "0.0001", "funding_interval_s": 28800},
+            ]
+        }
+        gateway_error = RuntimeError("bad gateway")
+        gateway_error.status = 502
+        gateway_error.request_info = SimpleNamespace(real_url="https://api.loris.tools/funding/historical")
+
+        with patch(
+            "hydra_basis.adapters.variational.fetch_json",
+            new=AsyncMock(side_effect=[stats_payload, gateway_error, gateway_error, gateway_error]),
+        ):
+            with self.assertRaises(RuntimeError):
+                await fetch_variational_funding(session=object(), symbol="BTC")
+
 
 class UniverseTests(unittest.TestCase):
     def test_selects_symbols_shared_by_at_least_two_venues(self) -> None:
@@ -496,6 +603,61 @@ class BackfillUtilsTests(unittest.TestCase):
         )
         self.assertEqual(immediate, [("hyperliquid", "BTC"), ("mexc", "ETH")])
         self.assertEqual(batched, [("variational", "BTC")])
+
+    def test_complete_history_still_needs_top_up_when_new_interval_has_passed(self) -> None:
+        now_value = 1_700_000_000_000
+        points = [
+            FundingPoint("lighter", "BTC", now_value - 7 * 24 * 3_600_000, 0.0001, 1.0),
+            FundingPoint("lighter", "BTC", now_value - 2 * 3_600_000, 0.0002, 1.0),
+        ]
+
+        self.assertTrue(backfill_needs_top_up(points, now_ms=now_value))
+        self.assertEqual(backfill_incremental_start_ms(points), points[-1].ts_ms + 1)
+
+    def test_complete_history_does_not_need_top_up_when_within_same_interval(self) -> None:
+        now_value = 1_700_000_000_000
+        points = [
+            FundingPoint("lighter", "BTC", now_value - 7 * 24 * 3_600_000, 0.0001, 1.0),
+            FundingPoint("lighter", "BTC", now_value - 30 * 60_000, 0.0002, 1.0),
+        ]
+
+        self.assertFalse(backfill_needs_top_up(points, now_ms=now_value))
+
+
+class BackfillSpreadSnapshotTests(unittest.IsolatedAsyncioTestCase):
+    async def test_missing_orderbook_does_not_fail_backfill(self) -> None:
+        spreads: dict[tuple[str, str], dict[str, float | int]] = {}
+
+        with patch(
+            "hydra_basis.backfill.fetch_orderbook_snapshot",
+            new=AsyncMock(side_effect=RuntimeError("missing lighter orderbook for BOT")),
+        ):
+            stored = await capture_backfill_spread_snapshot(
+                session=object(),
+                spreads=spreads,
+                venue="lighter",
+                symbol="BOT",
+                clip_usd=1000.0,
+            )
+
+        self.assertFalse(stored)
+        self.assertEqual(spreads, {("lighter", "BOT"): {"status": "no_orderbook"}})
+
+    def test_persist_backfill_progress_saves_both_json_stores_immediately(self) -> None:
+        history_store = unittest.mock.Mock()
+        spread_store = unittest.mock.Mock()
+        points = {("mexc", "BTC"): []}
+        spreads = {("mexc", "BTC"): {"bid": 1.0, "ask": 1.1, "spread_pct": 0.1, "ts_ms": 1}}
+
+        persist_backfill_progress(
+            history_store=history_store,
+            spread_store=spread_store,
+            funding_points=points,
+            spreads=spreads,
+        )
+
+        history_store.save.assert_called_once_with(points)
+        spread_store.save.assert_called_once_with(spreads)
 
 
 class FormattingTests(unittest.TestCase):
@@ -602,6 +764,38 @@ class AlertsTests(unittest.TestCase):
         self.assertEqual(selected[0]["symbol"], "BTC")
         self.assertEqual(selected[0]["short_venue"], "c")
         self.assertEqual(selected[0]["long_venue"], "d")
+
+    def test_skips_cross_exchange_alert_when_both_venues_have_wide_spread(self) -> None:
+        opportunities = [
+            {
+                "symbol": "BTC",
+                "short_venue": "lighter",
+                "long_venue": "mexc",
+                "stats": {"signal": True, "annualized_avg": 0.50},
+            },
+            {
+                "symbol": "ETH",
+                "short_venue": "aster",
+                "long_venue": "hyperliquid",
+                "stats": {"signal": True, "annualized_avg": 0.45},
+            },
+        ]
+
+        spreads = {
+            ("lighter", "BTC"): {"bid": 99.0, "ask": 101.0, "spread_pct": 0.0020, "ts_ms": 1},
+            ("mexc", "BTC"): {"bid": 99.0, "ask": 101.0, "spread_pct": 0.0015, "ts_ms": 1},
+            ("aster", "ETH"): {"bid": 99.0, "ask": 101.0, "spread_pct": 0.0020, "ts_ms": 1},
+            ("hyperliquid", "ETH"): {"bid": 99.9, "ask": 100.0, "spread_pct": 0.0010, "ts_ms": 1},
+        }
+
+        selected = select_best_alerts_by_symbol(
+            opportunities,
+            min_annualized_avg=0.25,
+            spreads_by_venue_symbol=spreads,
+        )
+
+        self.assertEqual(len(selected), 1)
+        self.assertEqual(selected[0]["symbol"], "ETH")
 
     def test_selects_only_highest_spot_perp_signal_per_symbol_above_threshold(self) -> None:
         opportunities = [

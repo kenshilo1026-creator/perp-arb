@@ -1,2 +1,3 @@
 data/funding_history.json
-__pycache__/
+**/__pycache__/
+*.pyc

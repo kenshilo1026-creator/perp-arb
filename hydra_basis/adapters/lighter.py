@@ -42,18 +42,21 @@ async def list_symbols(session) -> set[str]:
 
 
 async def fetch_lighter_funding(session, symbol: str) -> list[FundingPoint]:
+    return await fetch_lighter_funding_since(session, symbol, start_time_ms=ms_days_ago(LOOKBACK_DAYS))
+
+
+async def fetch_lighter_funding_since(session, symbol: str, start_time_ms: int) -> list[FundingPoint]:
     market_map = await fetch_lighter_market_map(session)
     market_id = market_map.get(symbol.upper())
     if market_id is None:
         return []
 
     end_timestamp_ms = ms_days_ago(0)
-    start_timestamp_ms = ms_days_ago(LOOKBACK_DAYS)
     url = "https://mainnet.zklighter.elliot.ai/api/v1/fundings"
     params = {
         "market_id": market_id,
         "resolution": "1h",
-        "start_timestamp": start_timestamp_ms // 1000,
+        "start_timestamp": start_time_ms // 1000,
         "end_timestamp": end_timestamp_ms // 1000,
         "count_back": LOOKBACK_DAYS * 24,
     }

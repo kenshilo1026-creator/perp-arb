@@ -32,7 +32,7 @@ from hydra_basis.adapters.mexc import list_symbols as list_mexc_symbols
 from hydra_basis.adapters.mexc import mexc_contract_symbol
 from hydra_basis.adapters.mexc import fetch_mexc_funding
 from hydra_basis.adapters.variational import fetch_variational_funding, list_symbols as list_variational_symbols
-from hydra_basis.adapters.variational import parse_stats_listings, parse_loris_historical_series
+from hydra_basis.adapters.variational import parse_stats_listings, parse_loris_historical_series, fetch_variational_stats
 from hydra_basis.funding_engine.analysis import analyze_spread
 from hydra_basis.funding_engine.analysis import analyze_positive_funding
 from hydra_basis.funding_engine.analysis import explain_spread_skip
@@ -421,6 +421,16 @@ class VariationalAdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(points[0].symbol, "BTC")
         self.assertEqual(points[0].interval_hours, 8.0)
         self.assertAlmostEqual(points[0].raw_rate, 0.00003848)
+
+    async def test_fetch_variational_stats_is_cached_per_session(self) -> None:
+        payload = {"listings": [{"ticker": "BTC", "funding_rate": "0.1", "funding_interval_s": 28800}]}
+        with patch("hydra_basis.adapters.variational.fetch_json", new=AsyncMock(return_value=payload)) as mocked:
+            session = object()
+            first = await fetch_variational_stats(session)
+            second = await fetch_variational_stats(session)
+
+        self.assertEqual(first, second)
+        mocked.assert_awaited_once()
 
 
 class UniverseTests(unittest.TestCase):

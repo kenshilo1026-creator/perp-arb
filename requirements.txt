@@ -1,2 +1,3 @@
 aiohttp
 python-dotenv
+lighter-sdk==1.0.4

@@ -1,8 +1,11 @@
 import unittest
 import json
 import tempfile
+import os
 from pathlib import Path
 from aiohttp import web
+from decimal import Decimal
+from unittest import mock
 
 from hydra_basis.config import EXECUTION_VENUES_PATH, MONITOR_SIGNALS_PATH
 from hydra_basis.execution_engine.interfaces import FakeExecutionAdapter
@@ -15,7 +18,16 @@ from hydra_basis.execution_engine.risk import compute_spread_pct, orderbook_is_a
 from hydra_basis.execution_engine.signal_store import load_best_signal_for_symbol, save_monitor_signals
 from hydra_basis.execution_engine.state_machine import ExecutionStateMachine
 from hydra_basis.execution_engine.variational_browser import VariationalBrowserExecutionAdapter, build_place_order_payload
+from hydra_basis.execution_engine.lighter_adapter import (
+    build_lighter_market_order_request,
+    compute_base_quantity_from_clip_usd,
+    LighterExecutionAdapter,
+)
+from hydra_basis.execution_engine.lighter_live import build_lighter_client_factory_from_env
+from hydra_basis.execution_engine.executor import execute_single_clip
+from hydra_basis.execution_engine.executor import execution_sides_for_signal
 from scripts.run_execution_preview import compute_batch_count
+from scripts.run_execution_once import compute_batch_count as compute_single_clip_batch_count
 
 
 class ExecutionConfigTests(unittest.TestCase):
@@ -349,10 +361,204 @@ class VariationalBrowserAdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["market"], "BTC-PERP")
 
 
+class LighterExecutionAdapterTests(unittest.IsolatedAsyncioTestCase):
+    async def test_compute_base_quantity_from_clip_usd_uses_mid_price(self) -> None:
+        quantity = compute_base_quantity_from_clip_usd(
+            clip_usd=1000.0,
+            orderbook={"bid": 99.0, "ask": 101.0, "ts_ms": 1},
+        )
+
+        self.assertEqual(quantity, Decimal("10"))
+
+    async def test_build_lighter_market_order_request_uses_aggressive_limit_price(self) -> None:
+        request = build_lighter_market_order_request(
+            side="buy",
+            quantity=Decimal("10"),
+            orderbook={"bid": 99.0, "ask": 101.0, "ts_ms": 1},
+            base_amount_multiplier=1000,
+            price_multiplier=100,
+            slippage_bps=100.0,
+            market_index=7,
+            client_order_index=123,
+        )
+
+        self.assertEqual(request["market_index"], 7)
+        self.assertEqual(request["client_order_index"], 123)
+        self.assertEqual(request["base_amount"], 10000)
+        self.assertEqual(request["price"], 10201)
+        self.assertFalse(request["is_ask"])
+
+    async def test_place_market_order_calls_create_order_with_expected_fields(self) -> None:
+        class FakeSignerClient:
+            ORDER_TYPE_LIMIT = "limit"
+            ORDER_TIME_IN_FORCE_GOOD_TILL_TIME = "gtt"
+
+            def __init__(self) -> None:
+                self.calls = []
+
+            async def create_order(self, **kwargs):
+                self.calls.append(kwargs)
+                return None, "tx-hash", None
+
+        adapter = LighterExecutionAdapter(
+            signer_client_factory=lambda: FakeSignerClient(),
+            market_config_loader=lambda symbol: (7, 1000, 100),
+            orderbook_loader=lambda symbol: {"bid": 99.0, "ask": 101.0, "ts_ms": 1},
+        )
+
+        result = await adapter.place_market_order(symbol="BTC", side="BUY", amount="10", clip_usd=1000.0)
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["tx_hash"], "tx-hash")
+        call = adapter.client.calls[0]
+        self.assertEqual(call["market_index"], 7)
+        self.assertEqual(call["base_amount"], 10000)
+        self.assertEqual(call["price"], 10201)
+        self.assertFalse(call["is_ask"])
+
+    async def test_place_market_order_accepts_async_market_and_orderbook_loaders(self) -> None:
+        class FakeSignerClient:
+            ORDER_TYPE_LIMIT = "limit"
+            ORDER_TIME_IN_FORCE_GOOD_TILL_TIME = "gtt"
+
+            def __init__(self) -> None:
+                self.calls = []
+
+            async def create_order(self, **kwargs):
+                self.calls.append(kwargs)
+                return None, "tx-hash", None
+
+        async def load_market(symbol):
+            return (9, 100, 10)
+
+        async def load_orderbook(symbol):
+            return {"bid": 10.0, "ask": 10.1, "ts_ms": 1}
+
+        adapter = LighterExecutionAdapter(
+            signer_client_factory=lambda: FakeSignerClient(),
+            market_config_loader=load_market,
+            orderbook_loader=load_orderbook,
+        )
+
+        result = await adapter.place_market_order(symbol="ETH", side="SELL", amount="2", clip_usd=20.0)
+
+        self.assertTrue(result["ok"])
+        call = adapter.client.calls[0]
+        self.assertEqual(call["market_index"], 9)
+        self.assertTrue(call["is_ask"])
+
+
+class LighterLiveFactoryTests(unittest.TestCase):
+    def test_build_lighter_client_factory_reads_env_and_checks_client(self) -> None:
+        class FakeSignerClient:
+            def __init__(self, **kwargs) -> None:
+                self.kwargs = kwargs
+
+            def check_client(self):
+                return None
+
+        with mock.patch.dict(
+            os.environ,
+            {
+                "LIGHTER_ACCOUNT_INDEX": "11",
+                "LIGHTER_API_KEY_INDEX": "7",
+                "LIGHTER_PRIVATE_KEY": "demo-private-key",
+            },
+            clear=False,
+        ):
+            with mock.patch(
+                "hydra_basis.execution_engine.lighter_live.import_lighter_signer_client",
+                return_value=FakeSignerClient,
+            ):
+                factory = build_lighter_client_factory_from_env(base_url="https://lighter.test")
+                client = factory()
+
+        self.assertEqual(client.kwargs["url"], "https://lighter.test")
+        self.assertEqual(client.kwargs["account_index"], 11)
+        self.assertEqual(client.kwargs["api_private_keys"], {7: "demo-private-key"})
+
+
+class SingleClipExecutorTests(unittest.IsolatedAsyncioTestCase):
+    async def test_execute_single_clip_retries_hedge_once_then_completes(self) -> None:
+        calls: list[tuple[str, str]] = []
+
+        class MakerAdapter:
+            async def place_limit_order(self, **kwargs):
+                calls.append(("maker", kwargs["side"]))
+                return {"ok": True, "orderId": "var-1"}
+
+        class TakerAdapter:
+            def __init__(self) -> None:
+                self.attempt = 0
+
+            async def place_market_order(self, **kwargs):
+                self.attempt += 1
+                calls.append(("taker", kwargs["side"]))
+                if self.attempt == 1:
+                    raise RuntimeError("temporary failure")
+                return {"ok": True, "orderId": "lighter-1"}
+
+        state_machine = ExecutionStateMachine()
+        result = await execute_single_clip(
+            symbol="BTC",
+            clip_usd=1000.0,
+            quantity=Decimal("10"),
+            maker_venue="variational",
+            taker_venue="lighter",
+            short_venue="variational",
+            long_venue="lighter",
+            maker_adapter=MakerAdapter(),
+            taker_adapter=TakerAdapter(),
+            max_hedge_retries=2,
+            state_machine=state_machine,
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(state_machine.state, "completed")
+        self.assertEqual(calls, [("maker", "SELL"), ("taker", "BUY"), ("taker", "BUY")])
+
+    async def test_execute_single_clip_enters_emergency_exit_after_hedge_failures(self) -> None:
+        class MakerAdapter:
+            async def place_limit_order(self, **kwargs):
+                return {"ok": True, "orderId": "var-1"}
+
+        class TakerAdapter:
+            async def place_market_order(self, **kwargs):
+                raise RuntimeError("permanent failure")
+
+        state_machine = ExecutionStateMachine()
+        with self.assertRaises(RuntimeError):
+            await execute_single_clip(
+                symbol="BTC",
+                clip_usd=1000.0,
+                quantity=Decimal("10"),
+                maker_venue="variational",
+                taker_venue="lighter",
+                short_venue="variational",
+                long_venue="lighter",
+                maker_adapter=MakerAdapter(),
+                taker_adapter=TakerAdapter(),
+                max_hedge_retries=1,
+                state_machine=state_machine,
+            )
+
+        self.assertEqual(state_machine.state, "emergency_exit")
+
+    def test_execution_sides_for_signal_match_short_maker_case(self) -> None:
+        maker_side, taker_side = execution_sides_for_signal(
+            maker_venue="variational",
+            short_venue="variational",
+            long_venue="lighter",
+        )
+        self.assertEqual(maker_side, "SELL")
+        self.assertEqual(taker_side, "BUY")
+
+
 class ExecutionPreviewCliTests(unittest.TestCase):
     def test_compute_batch_count_rounds_up(self) -> None:
         self.assertEqual(compute_batch_count(10000.0, 500.0), 20)
         self.assertEqual(compute_batch_count(10250.0, 500.0), 21)
+        self.assertEqual(compute_single_clip_batch_count(10250.0, 500.0), 21)
 
 
 if __name__ == "__main__":

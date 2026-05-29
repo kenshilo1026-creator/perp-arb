@@ -49,6 +49,10 @@ async def list_symbols(session) -> set[str]:
 
 
 async def fetch_aster_funding(session, symbol: str) -> list[FundingPoint]:
+    return await fetch_aster_funding_since(session, symbol, start_time_ms=ms_days_ago(LOOKBACK_DAYS))
+
+
+async def fetch_aster_funding_since(session, symbol: str, start_time_ms: int) -> list[FundingPoint]:
     symbol_metadata = await fetch_aster_symbol_metadata(session)
     metadata = symbol_metadata.get(symbol.upper())
     if metadata is None:
@@ -57,11 +61,14 @@ async def fetch_aster_funding(session, symbol: str) -> list[FundingPoint]:
     url = "https://fapi.asterdex.com/fapi/v1/fundingRate"
     params = {
         "symbol": metadata["raw_symbol"],
-        "startTime": ms_days_ago(LOOKBACK_DAYS),
+        "startTime": start_time_ms,
         "endTime": ms_days_ago(0),
         "limit": 1000,
     }
     rows = await fetch_json(session, "GET", url, params=params)
+    if not isinstance(rows, list):
+        print(f"aster unexpected response for {symbol}: {rows!r}")
+        return []
 
     points: list[FundingPoint] = []
     for row in rows:

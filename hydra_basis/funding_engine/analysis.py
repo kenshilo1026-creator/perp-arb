@@ -12,6 +12,7 @@ DEFAULT_MIN_POSITIVE_RATIO = 0.75
 DEFAULT_MIN_LAST_24H_POSITIVE_RATIO = 0.70
 DEFAULT_MAX_STD_MULTIPLE_OF_AVG = 2.5
 DEFAULT_MIN_OBSERVATIONS = 24
+DEFAULT_MIXED_8H_MIN_OBSERVATIONS = 18
 DEFAULT_MAX_SINGLE_INTERVAL_HOURLY_RATE = 0.001
 DEFAULT_MAX_MARK_PRICE_RELATIVE_DIFF = 0.2
 
@@ -28,6 +29,29 @@ def positive_ratio(values: list[float]) -> float:
 
 def annualized_from_hourly(hourly: float) -> float:
     return hourly * 24 * 365
+
+
+def resolve_pair_min_observations(
+    short_venue_points: list[FundingPoint],
+    long_venue_points: list[FundingPoint],
+    *,
+    default_min_observations: int = DEFAULT_MIN_OBSERVATIONS,
+    mixed_8h_min_observations: int = DEFAULT_MIXED_8H_MIN_OBSERVATIONS,
+) -> int:
+    if default_min_observations != DEFAULT_MIN_OBSERVATIONS:
+        return default_min_observations
+    if not short_venue_points or not long_venue_points:
+        return default_min_observations
+
+    interval_hours = {
+        float(short_venue_points[0].interval_hours),
+        float(long_venue_points[0].interval_hours),
+    }
+    if interval_hours == {1.0}:
+        return default_min_observations
+    if 8.0 in interval_hours:
+        return mixed_8h_min_observations
+    return default_min_observations
 
 
 def prices_are_compatible(
@@ -102,9 +126,14 @@ def analyze_spread(
     all_points = short_venue_points + long_venue_points
     if any(p.hourly_rate < -max_single_interval_hourly_rate for p in all_points):
         return None
+    effective_min_observations = resolve_pair_min_observations(
+        short_venue_points,
+        long_venue_points,
+        default_min_observations=min_observations,
+    )
     pairs = align_on_coarser_interval(short_venue_points, long_venue_points)
     spreads = [short_point.hourly_rate - long_point.hourly_rate for short_point, long_point in pairs]
-    if len(spreads) < min_observations:
+    if len(spreads) < effective_min_observations:
         return None
 
     average = statistics.mean(spreads)
@@ -156,11 +185,16 @@ def explain_spread_skip(
 ) -> str:
     if not short_venue_points or not long_venue_points:
         return "missing_points"
+    effective_min_observations = resolve_pair_min_observations(
+        short_venue_points,
+        long_venue_points,
+        default_min_observations=min_observations,
+    )
     pairs = align_on_coarser_interval(short_venue_points, long_venue_points)
     if not pairs:
         return "no_aligned_pairs"
-    if len(pairs) < min_observations:
-        return f"insufficient_samples:{len(pairs)}/{min_observations}"
+    if len(pairs) < effective_min_observations:
+        return f"insufficient_samples:{len(pairs)}/{effective_min_observations}"
     return "filtered_by_signal_rules"
 
 

@@ -7,6 +7,8 @@ def select_best_alerts_by_symbol(
     opportunities: list[dict],
     *,
     min_annualized_avg: float,
+    spreads_by_venue_symbol: dict[tuple[str, str], dict[str, float | int]] | None = None,
+    max_spread_pct: float = 0.001,
 ) -> list[dict]:
     best_by_symbol: dict[str, dict] = {}
 
@@ -15,6 +17,16 @@ def select_best_alerts_by_symbol(
             continue
         if opportunity["stats"]["annualized_avg"] <= min_annualized_avg:
             continue
+        if spreads_by_venue_symbol is not None:
+            short_spread = spreads_by_venue_symbol.get((opportunity["short_venue"], opportunity["symbol"]))
+            long_spread = spreads_by_venue_symbol.get((opportunity["long_venue"], opportunity["symbol"]))
+            if (
+                short_spread is not None
+                and long_spread is not None
+                and float(short_spread["spread_pct"]) > max_spread_pct
+                and float(long_spread["spread_pct"]) > max_spread_pct
+            ):
+                continue
 
         symbol = opportunity["symbol"]
         current_best = best_by_symbol.get(symbol)

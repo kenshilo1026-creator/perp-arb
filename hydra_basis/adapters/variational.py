@@ -12,6 +12,14 @@ from hydra_basis.funding_engine.models import FundingPoint
 VARIATIONAL_BASE_URL = "https://omni-client-api.prod.ap-northeast-1.variational.io"
 LORIS_HISTORICAL_URL = "https://api.loris.tools/funding/historical"
 _VARIATIONAL_STATS_CACHE: dict[int, dict[str, dict[str, float]]] = {}
+LORIS_GATEWAY_RETRIES = 2
+
+
+def is_retryable_loris_gateway_error(exc: Exception) -> bool:
+    status = getattr(exc, "status", None)
+    request_info = getattr(exc, "request_info", None)
+    real_url = getattr(request_info, "real_url", "")
+    return status in {502, 503, 504} and "api.loris.tools/funding/historical" in str(real_url)
 
 
 def parse_stats_listings(data: dict) -> dict[str, dict[str, float]]:
@@ -81,28 +89,40 @@ async def list_symbols(session) -> set[str]:
 
 
 async def fetch_variational_funding(session, symbol: str) -> list[FundingPoint]:
+    end_ms = now_ms()
+    start_ms = end_ms - 7 * 24 * 60 * 60 * 1000
+    return await fetch_variational_funding_since(session, symbol, start_time_ms=start_ms, end_time_ms=end_ms)
+
+
+async def fetch_variational_funding_since(session, symbol: str, start_time_ms: int, end_time_ms: int | None = None) -> list[FundingPoint]:
     stats = await fetch_variational_stats(session)
     entry = stats.get(symbol.upper())
     if entry is None:
         return []
-    end_ms = now_ms()
-    start_ms = end_ms - 7 * 24 * 60 * 60 * 1000
-    data = await run_serialized(
-        "variational",
-        lambda: fetch_json(
-            session,
-            "GET",
-            LORIS_HISTORICAL_URL,
-            params={
-                "symbol": symbol.upper(),
-                "start": isoformat_z(start_ms),
-                "end": isoformat_z(end_ms),
-            },
-        ),
-        delay_seconds=VARIATIONAL_REQUEST_DELAY_SECONDS,
-    )
+    end_ms = end_time_ms if end_time_ms is not None else now_ms()
+    data = None
+    for attempt in range(LORIS_GATEWAY_RETRIES + 1):
+        try:
+            data = await run_serialized(
+                "variational",
+                lambda: fetch_json(
+                    session,
+                    "GET",
+                    LORIS_HISTORICAL_URL,
+                    params={
+                        "symbol": symbol.upper(),
+                        "start": isoformat_z(start_time_ms),
+                        "end": isoformat_z(end_ms),
+                    },
+                ),
+                delay_seconds=VARIATIONAL_REQUEST_DELAY_SECONDS,
+            )
+            break
+        except Exception as exc:
+            if not is_retryable_loris_gateway_error(exc) or attempt >= LORIS_GATEWAY_RETRIES:
+                raise
     return parse_loris_historical_series(
-        data,
+        data or {},
         symbol=symbol,
         venue="variational",
         interval_hours=float(entry["interval_hours"]),

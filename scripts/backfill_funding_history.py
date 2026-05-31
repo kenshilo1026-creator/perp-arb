@@ -45,6 +45,7 @@ load_environment()
 
 BACKFILL_BATCH_SIZE = 30
 BACKFILL_BATCH_SLEEP_SECONDS = 15
+PERSIST_EVERY_N = 50
 
 
 async def run_backfill() -> None:
@@ -107,6 +108,7 @@ async def run_backfill() -> None:
                     tasks.append(FETCHERS[venue](session, symbol))
             results = await gather_limited(tasks, limit=FETCH_CONCURRENCY_LIMIT, return_exceptions=True)
 
+            dirty = 0
             for key, result in zip(immediate_keys, results):
                 if isinstance(result, Exception):
                     if should_raise_immediately(result):
@@ -138,13 +140,22 @@ async def run_backfill() -> None:
                     symbol=key[1],
                     clip_usd=BACKFILL_SPREAD_CLIP_USD,
                 )
+                dirty += 1
+                if dirty % PERSIST_EVERY_N == 0:
+                    persist_backfill_progress(
+                        history_store=store,
+                        spread_store=spread_store,
+                        funding_points=all_points,
+                        spreads=all_spreads,
+                    )
+            if dirty % PERSIST_EVERY_N != 0:
                 persist_backfill_progress(
                     history_store=store,
                     spread_store=spread_store,
                     funding_points=all_points,
                     spreads=all_spreads,
                 )
-                #print(f"backfill stored {key}: {len(all_points[key])} points")
+            #print(f"backfill stored {key}: {len(all_points[key])} points")
 
         batches = chunk_sequence(loris_batched_keys, chunk_size=BACKFILL_BATCH_SIZE)
         for batch_index, batch in enumerate(batches, start=1):
@@ -158,6 +169,7 @@ async def run_backfill() -> None:
                     tasks.append(FETCHERS[venue](session, symbol))
             results = await gather_limited(tasks, limit=1, return_exceptions=True)
 
+            dirty = 0
             for key, result in zip(batch, results):
                 if isinstance(result, Exception):
                     if should_raise_immediately(result):
@@ -189,13 +201,22 @@ async def run_backfill() -> None:
                     symbol=key[1],
                     clip_usd=BACKFILL_SPREAD_CLIP_USD,
                 )
+                dirty += 1
+                if dirty % PERSIST_EVERY_N == 0:
+                    persist_backfill_progress(
+                        history_store=store,
+                        spread_store=spread_store,
+                        funding_points=all_points,
+                        spreads=all_spreads,
+                    )
+            if dirty % PERSIST_EVERY_N != 0:
                 persist_backfill_progress(
                     history_store=store,
                     spread_store=spread_store,
                     funding_points=all_points,
                     spreads=all_spreads,
                 )
-                #print(f"backfill stored {key}: {len(all_points[key])} points")
+            #print(f"backfill stored {key}: {len(all_points[key])} points")
             if batch_index < len(batches):
                 print(f"backfill sleep {BACKFILL_BATCH_SLEEP_SECONDS}s")
                 await asyncio.sleep(BACKFILL_BATCH_SLEEP_SECONDS)

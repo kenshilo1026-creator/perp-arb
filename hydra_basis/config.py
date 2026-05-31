@@ -23,6 +23,8 @@ SYMBOL_ALIASES: dict[str, dict[str, str]] = {
 
 FUNDING_INTERVAL_OVERRIDES: dict[tuple[str, str], float] = {}
 MIN_SHARED_VENUES = 2
+ASSUMED_LEVERAGE = 3
+FILTER_NEGATIVE_FUNDING_SPIKE = False
 FETCH_CONCURRENCY_LIMIT = 6
 FUNDING_HISTORY_PATH = Path("data/funding_history.json")
 MONITOR_SIGNALS_PATH = Path("data/monitor_signals.json")

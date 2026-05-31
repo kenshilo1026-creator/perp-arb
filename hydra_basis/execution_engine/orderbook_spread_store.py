@@ -32,5 +32,6 @@ class OrderbookSpreadStore:
                 "ts_ms": int(value["ts_ms"]),
             }
             for (venue, symbol), value in spreads.items()
+            if "bid" in value
         }
         self.path.write_text(json.dumps(serialized, ensure_ascii=True, indent=2), encoding="utf-8")

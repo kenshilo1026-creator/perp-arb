@@ -7,6 +7,10 @@ import aiohttp
 from hydra_basis.streams.base import BaseStreamClient
 
 
+def _lighter_percent_to_decimal(value: Any) -> float:
+    return float(value or 0.0) / 100
+
+
 def parse_market_stats_all_message(message: dict[str, Any]) -> dict[str, dict[str, float]]:
     market_stats = message.get("market_stats", {})
     parsed: dict[str, dict[str, float]] = {}
@@ -15,8 +19,9 @@ def parse_market_stats_all_message(message: dict[str, Any]) -> dict[str, dict[st
         if not symbol:
             continue
         parsed[symbol] = {
-            "funding": float(market.get("funding_rate") or 0.0),
-            "current_funding": float(market.get("current_funding_rate") or 0.0),
+            # Lighter websocket market_stats funding values are reported in percent units.
+            "funding": _lighter_percent_to_decimal(market.get("funding_rate")),
+            "current_funding": _lighter_percent_to_decimal(market.get("current_funding_rate")),
             "markPx": float(market.get("mark_price") or 0.0),
             "indexPx": float(market.get("index_price") or 0.0),
             "midPx": float(market.get("mark_price") or 0.0),

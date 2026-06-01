@@ -1,13 +1,12 @@
 from __future__ import annotations
 
+import asyncio
+import json
 import os
-
-import aiohttp
-
-from hydra_basis.adapters.base import fetch_json
+import urllib.request
 
 
-async def send_telegram(message: str) -> None:
+def send_telegram_sync(message: str) -> None:
     telegram_bot_token = os.getenv("TELEGRAM_BOT_TOKEN", "")
     telegram_chat_id = os.getenv("TELEGRAM_CHAT_ID", "")
 
@@ -22,5 +21,19 @@ async def send_telegram(message: str) -> None:
         "parse_mode": "HTML",
         "disable_web_page_preview": True,
     }
-    async with aiohttp.ClientSession() as session:
-        await fetch_json(session, "POST", url, json=payload)
+    request = urllib.request.Request(
+        url,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(request, timeout=15) as response:
+        if getattr(response, "status", 200) >= 400:
+            raise RuntimeError(f"telegram http status={response.status}")
+        body = response.read()
+        if body:
+            json.loads(body.decode("utf-8"))
+
+
+async def send_telegram(message: str) -> None:
+    await asyncio.to_thread(send_telegram_sync, message)

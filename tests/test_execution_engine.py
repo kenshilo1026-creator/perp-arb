@@ -24,6 +24,7 @@ from hydra_basis.execution_engine.lighter_adapter import (
     LighterExecutionAdapter,
 )
 from hydra_basis.execution_engine.lighter_live import build_lighter_client_factory_from_env
+from hydra_basis.alerts import build_ranked_alert_digest
 from hydra_basis.execution_engine.executor import execute_single_clip
 from hydra_basis.execution_engine.executor import execution_sides_for_signal
 from scripts.run_execution_preview import compute_batch_count
@@ -87,6 +88,14 @@ class OrderbookSpreadStoreTests(unittest.TestCase):
             loaded = store.load()
             self.assertEqual(loaded[("lighter", "BTC")]["bid"], 100.0)
             self.assertEqual(loaded[("lighter", "BTC")]["ask"], 100.05)
+
+    def test_save_and_load_no_orderbook_sentinel(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "orderbook_spreads.json"
+            store = OrderbookSpreadStore(path)
+            store.save({("lighter", "BOT"): {"status": "no_orderbook"}})
+            loaded = store.load()
+            self.assertEqual(loaded, {("lighter", "BOT"): {"status": "no_orderbook"}})
 
 
 class LoadBestSignalTests(unittest.TestCase):
@@ -559,6 +568,20 @@ class ExecutionPreviewCliTests(unittest.TestCase):
         self.assertEqual(compute_batch_count(10000.0, 500.0), 20)
         self.assertEqual(compute_batch_count(10250.0, 500.0), 21)
         self.assertEqual(compute_single_clip_batch_count(10250.0, 500.0), 21)
+
+    def test_ranked_alert_digest_includes_capital_return(self) -> None:
+        digest = build_ranked_alert_digest(
+            cross_exchange_alerts=[
+                {
+                    "symbol": "BTC",
+                    "short_venue": "lighter",
+                    "long_venue": "mexc",
+                    "stats": {"annualized_avg": 0.40, "positive_ratio": 1.0},
+                }
+            ],
+            spot_perp_alerts=[],
+        )
+        self.assertIn("資本回報", digest)
 
 
 if __name__ == "__main__":

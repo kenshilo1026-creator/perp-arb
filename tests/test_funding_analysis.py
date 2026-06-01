@@ -32,6 +32,7 @@ from hydra_basis.adapters.mexc import resolve_funding_interval_hours
 from hydra_basis.adapters.mexc import list_symbols as list_mexc_symbols
 from hydra_basis.adapters.mexc import mexc_contract_symbol
 from hydra_basis.adapters.mexc import fetch_mexc_funding
+from hydra_basis.adapters.mexc import fetch_mexc_funding_since
 from hydra_basis.adapters.mexc import extract_mexc_history_rows
 from hydra_basis.adapters.variational import fetch_variational_funding, list_symbols as list_variational_symbols
 from hydra_basis.adapters.variational import (
@@ -61,6 +62,7 @@ from hydra_basis.backfill import (
     backfill_incremental_start_ms,
 )
 from hydra_basis.runtime import configure_windows_event_loop_policy
+from hydra_basis.symbol_mapping import canonicalize_symbol, load_symbol_mappings
 from hydra_basis.universe import build_symbol_venue_index, select_shared_symbols
 from hydra_basis.universe import symbols_requiring_complete_history
 from scripts._bootstrap import ensure_project_root_on_path
@@ -227,6 +229,16 @@ class RuntimeTests(unittest.TestCase):
         self.assertFalse(hasattr(config, "interval_hours"))
 
 
+class SymbolMappingTests(unittest.TestCase):
+    def test_canonicalize_symbol_uses_global_mapping(self) -> None:
+        self.assertEqual(canonicalize_symbol("1000PEPE"), "PEPE")
+        self.assertEqual(canonicalize_symbol("KPEPE", venue="hyperliquid"), "PEPE")
+
+    def test_load_symbol_mappings_normalizes_case(self) -> None:
+        mappings = load_symbol_mappings()
+        self.assertEqual(mappings["global"]["KPEPE"], "PEPE")
+
+
 class LighterAdapterTests(unittest.IsolatedAsyncioTestCase):
     async def test_fetches_historical_funding_points_from_fundings_endpoint(self) -> None:
         funding_rates_payload = {
@@ -334,6 +346,22 @@ class MexcAdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(points), 1)
         self.assertAlmostEqual(points[0].raw_rate, 0.0001)
         self.assertEqual(mocked.await_count, 2)
+
+    async def test_fetch_funding_since_only_returns_rows_after_start_time(self) -> None:
+        payload = {
+            "data": {
+                "resultList": [
+                    {"settleTime": 1_000, "fundingRate": "0.0001", "collectCycle": 8},
+                    {"settleTime": 2_000, "fundingRate": "0.0002", "collectCycle": 8},
+                    {"settleTime": 3_000, "fundingRate": "0.0003", "collectCycle": 8},
+                ]
+            }
+        }
+        with patch("hydra_basis.adapters.mexc.fetch_json", new=AsyncMock(return_value=payload)):
+            points = await fetch_mexc_funding_since(session=object(), symbol="FORM", start_time_ms=2_000)
+
+        self.assertEqual([point.ts_ms for point in points], [2_000, 3_000])
+        self.assertEqual([point.raw_rate for point in points], [0.0002, 0.0003])
 
     async def test_fetch_funding_still_raises_when_history_rows_stay_empty_after_retries(self) -> None:
         empty_payload = {"data": {"resultList": []}}
@@ -553,6 +581,19 @@ class UniverseTests(unittest.TestCase):
 
         self.assertEqual(symbol_venues["BTC"], {"hyperliquid", "mexc", "lighter"})
         self.assertEqual(selected, ["BTC", "DOGE", "ETH", "SOL"])
+
+    def test_symbol_mapping_merges_variant_symbols_into_one_shared_symbol(self) -> None:
+        venue_symbols = {
+            "hyperliquid": {"KPEPE"},
+            "mexc": {"1000PEPE"},
+            "lighter": {"PEPE"},
+        }
+
+        symbol_venues = build_symbol_venue_index(venue_symbols)
+        selected = select_shared_symbols(symbol_venues, min_shared_venues=2)
+
+        self.assertEqual(symbol_venues["PEPE"], {"hyperliquid", "mexc", "lighter"})
+        self.assertEqual(selected, ["PEPE"])
 
     def test_symbols_requiring_complete_history_only_include_shared_symbols(self) -> None:
         venue_symbols = {
@@ -967,25 +1008,25 @@ class LighterStreamTests(unittest.TestCase):
                     "market_id": 1,
                     "mark_price": "100000.0",
                     "index_price": "99950.0",
-                    "funding_rate": "0.0001",
-                    "current_funding_rate": "0.00012",
+                    "funding_rate": "0.0012",
+                    "current_funding_rate": "0.0013",
                 },
                 "2": {
                     "symbol": "ETH",
                     "market_id": 2,
                     "mark_price": "2500.0",
                     "index_price": "2490.0",
-                    "funding_rate": "-0.0002",
-                    "current_funding_rate": "-0.00018",
+                    "funding_rate": "-0.0020",
+                    "current_funding_rate": "-0.0018",
                 },
             },
         }
 
         parsed = parse_market_stats_all_message(payload)
 
-        self.assertEqual(parsed["BTC"]["funding"], 0.0001)
-        self.assertEqual(parsed["BTC"]["current_funding"], 0.00012)
-        self.assertEqual(parsed["ETH"]["funding"], -0.0002)
+        self.assertAlmostEqual(parsed["BTC"]["funding"], 0.000012)
+        self.assertAlmostEqual(parsed["BTC"]["current_funding"], 0.000013)
+        self.assertAlmostEqual(parsed["ETH"]["funding"], -0.00002)
         self.assertEqual(parsed["ETH"]["markPx"], 2500.0)
         self.assertEqual(parsed["BTC"]["midPx"], 100000.0)
 

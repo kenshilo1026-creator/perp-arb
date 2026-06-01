@@ -1,0 +1,20 @@
+{
+  // 要監控哪些交易所的跨所價差機會
+  "venues": ["hyperliquid", "lighter", "aster", "mexc"],
+  // 兩邊 funding rate 的絕對值上限，超過就不做提醒
+  "max_funding_rate_pct": 0.1,
+  // 至少其中一邊的單所 bid/ask spread 要低於這個百分比
+  "max_orderbook_spread_pct": 0.1,
+  // 跨所可成交價差至少要大於這個百分比才算機會
+  "min_cross_exchange_spread_pct": 0.4,
+  // 自動下單時預設使用多少 USDT 倉位來估算利潤
+  "execution_notional_usd": 10000,
+  // 價格資料超過多少秒沒更新就視為 stale，不參與比較
+  "max_stale_seconds": 15,
+  // 若某交易所價格相對其他交易所偏離太多，視為壞報價
+  "max_price_deviation_pct": 2.0,
+  // 若短時間內價格波動過大，視為黑天鵝風險，應停止開新倉
+  "max_short_term_move_pct": 3.0,
+  // 一腿成交後另一腿對沖失敗時，最多重試幾次
+  "hedge_retry_count": 2
+}

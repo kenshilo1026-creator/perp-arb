@@ -20,6 +20,7 @@ class MarketStateStore:
     def __init__(self) -> None:
         self._mid_prices: dict[str, dict[str, dict[str, float | int]]] = {}
         self._asset_ctxs: dict[str, dict[str, dict[str, float | int]]] = {}
+        self._quotes: dict[str, dict[str, dict[str, float | int]]] = {}
 
     def update_mids(self, venue: str, mids: dict[str, float], *, timestamp_ms: int | None = None) -> None:
         ts_ms = timestamp_ms if timestamp_ms is not None else now_ms()
@@ -29,6 +30,23 @@ class MarketStateStore:
 
     def get_mid_snapshot(self, venue: str) -> dict[str, dict[str, float | int]]:
         return dict(self._mid_prices.get(venue, {}))
+
+    def update_quotes(self, venue: str, quotes: dict[str, dict[str, float]], *, timestamp_ms: int | None = None) -> None:
+        ts_ms = timestamp_ms if timestamp_ms is not None else now_ms()
+        venue_state = self._quotes.setdefault(venue, {})
+        for symbol, quote in quotes.items():
+            bid = quote.get("bid")
+            ask = quote.get("ask")
+            if bid is None or ask is None:
+                continue
+            venue_state[symbol] = {
+                "bid": float(bid),
+                "ask": float(ask),
+                "ts_ms": int(quote.get("ts_ms") or ts_ms),
+            }
+
+    def get_quote_snapshot(self, venue: str) -> dict[str, dict[str, float | int]]:
+        return dict(self._quotes.get(venue, {}))
 
     def update_asset_ctxs(self, venue: str, asset_ctxs: dict[str, dict[str, float]], *, timestamp_ms: int | None = None) -> None:
         venue_state = self._asset_ctxs.setdefault(venue, {})
@@ -46,7 +64,11 @@ class MarketStateStore:
         return dict(self._asset_ctxs.get(venue, {}))
 
     def get_symbols(self, venue: str) -> set[str]:
-        return set(self._asset_ctxs.get(venue, {})) | set(self._mid_prices.get(venue, {}))
+        return (
+            set(self._asset_ctxs.get(venue, {}))
+            | set(self._mid_prices.get(venue, {}))
+            | set(self._quotes.get(venue, {}))
+        )
 
 
 class HyperliquidStreamRunner:
@@ -137,9 +159,11 @@ class MexcStreamRunner:
         if channel == "push.tickers":
             parsed = parse_push_tickers_message(message)
             self.state_store.update_asset_ctxs("mexc", parsed)
+            self.state_store.update_quotes("mexc", parsed)
         if channel == "push.ticker":
             parsed = parse_push_ticker_message(message)
             self.state_store.update_asset_ctxs("mexc", parsed)
+            self.state_store.update_quotes("mexc", parsed)
         return message
 
     async def close(self) -> None:

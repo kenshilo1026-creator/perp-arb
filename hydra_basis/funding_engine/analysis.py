@@ -4,6 +4,7 @@ import datetime as dt
 import statistics
 from typing import Any
 
+from hydra_basis.config import FILTER_NEGATIVE_FUNDING_SPIKE
 from hydra_basis.funding_engine.models import FundingPoint
 
 
@@ -124,7 +125,7 @@ def analyze_spread(
     max_single_interval_hourly_rate: float = DEFAULT_MAX_SINGLE_INTERVAL_HOURLY_RATE,
 ) -> dict[str, Any] | None:
     all_points = short_venue_points + long_venue_points
-    if any(p.hourly_rate < -max_single_interval_hourly_rate for p in all_points):
+    if FILTER_NEGATIVE_FUNDING_SPIKE and any(p.hourly_rate < -max_single_interval_hourly_rate for p in all_points):
         return None
     effective_min_observations = resolve_pair_min_observations(
         short_venue_points,
@@ -208,6 +209,8 @@ def analyze_positive_funding(
     min_observations: int = DEFAULT_MIN_OBSERVATIONS,
     max_single_interval_hourly_rate: float = DEFAULT_MAX_SINGLE_INTERVAL_HOURLY_RATE,
 ) -> dict[str, Any] | None:
+    if FILTER_NEGATIVE_FUNDING_SPIKE and any(p.hourly_rate < -max_single_interval_hourly_rate for p in venue_points):
+        return None
     if any(abs(p.hourly_rate) > max_single_interval_hourly_rate for p in venue_points):
         return None
     if len(venue_points) < min_observations:

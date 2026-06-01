@@ -1,0 +1,26 @@
+{
+  "global": {
+    "1000PEPE": "PEPE",
+    "KPEPE": "PEPE",
+    "1000FLOKI": "FLOKI",
+    "KFLOKI": "FLOKI",
+    "1000SHIB": "SHIB",
+    "KSHIB": "SHIB",
+    "1000BONK": "BONK",
+    "KBONK": "BONK",
+    "1000MOG": "MOG",
+    "1000000MOG": "MOG",
+    "KMOG": "MOG",
+    "1000NEIRO": "NEIRO",
+    "KNEIRO": "NEIRO",
+    "1000LUNC": "LUNC",
+    "KLUNC": "LUNC"
+  },
+  "venues": {
+    "hyperliquid": {},
+    "lighter": {},
+    "mexc": {},
+    "aster": {},
+    "variational": {}
+  }
+}

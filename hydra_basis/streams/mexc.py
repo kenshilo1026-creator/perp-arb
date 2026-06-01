@@ -34,6 +34,8 @@ def parse_push_tickers_message(message: dict[str, Any]) -> dict[str, dict[str, f
             "raw_symbol": raw_symbol,
             "markPx": float(row.get("fairPrice") or 0.0),
             "midPx": float(row.get("lastPrice") or row.get("fairPrice") or 0.0),
+            "bid": float(row.get("bid1") or 0.0),
+            "ask": float(row.get("ask1") or 0.0),
             "ts_ms": timestamp,
         }
     return parsed
@@ -55,6 +57,8 @@ def parse_push_ticker_message(message: dict[str, Any]) -> dict[str, dict[str, fl
             "funding": float(row.get("fundingRate") or 0.0),
             "markPx": float(row.get("fairPrice") or 0.0),
             "midPx": float(row.get("lastPrice") or row.get("fairPrice") or 0.0),
+            "bid": float(row.get("bid1") or 0.0),
+            "ask": float(row.get("ask1") or 0.0),
             "oraclePx": float(row.get("indexPrice") or 0.0),
             "ts_ms": timestamp,
         }

@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+from hydra_basis.symbol_mapping import canonicalize_symbol
+
 
 def build_symbol_venue_index(venue_symbols: dict[str, set[str]]) -> dict[str, set[str]]:
     symbol_venues: dict[str, set[str]] = {}
     for venue, symbols in venue_symbols.items():
         for symbol in symbols:
-            symbol_venues.setdefault(symbol, set()).add(venue)
+            canonical_symbol = canonicalize_symbol(symbol, venue=venue)
+            symbol_venues.setdefault(canonical_symbol, set()).add(venue)
     return symbol_venues
 
 

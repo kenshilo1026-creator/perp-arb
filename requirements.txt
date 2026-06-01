@@ -1,3 +1,6 @@
 aiohttp
 python-dotenv
 lighter-sdk==1.0.4
+eth-account>=0.11.0
+eth-hash[pysha3]>=0.5.0
+msgpack>=1.0.0

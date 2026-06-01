@@ -94,6 +94,10 @@ def extract_mexc_history_rows(data: dict) -> list[dict]:
 
 
 async def fetch_mexc_funding(session, symbol: str) -> list[FundingPoint]:
+    return await fetch_mexc_funding_since(session, symbol, start_time_ms=ms_days_ago(LOOKBACK_DAYS))
+
+
+async def fetch_mexc_funding_since(session, symbol: str, start_time_ms: int) -> list[FundingPoint]:
     mexc_symbol = mexc_contract_symbol(symbol)
     url = "https://contract.mexc.com/api/v1/contract/funding_rate/history"
     params = {"symbol": mexc_symbol, "page_num": 1, "page_size": 1000}
@@ -109,7 +113,6 @@ async def fetch_mexc_funding(session, symbol: str) -> list[FundingPoint]:
         await resolve_funding_interval_hours(session, "mexc", symbol, rows)
         return []
     interval_hours = await resolve_funding_interval_hours(session, "mexc", symbol, rows)
-    cutoff = ms_days_ago(LOOKBACK_DAYS)
     points: list[FundingPoint] = []
 
     for row in rows:
@@ -120,7 +123,7 @@ async def fetch_mexc_funding(session, symbol: str) -> list[FundingPoint]:
         if ts_raw is None or rate_raw is None:
             continue
         ts = int(ts_raw)
-        if ts < cutoff:
+        if ts < start_time_ms:
             continue
         rate = float(rate_raw)
         points.append(FundingPoint("mexc", symbol, ts, rate, interval_hours))

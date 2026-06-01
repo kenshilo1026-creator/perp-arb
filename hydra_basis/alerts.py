@@ -1,6 +1,15 @@
 from __future__ import annotations
 
+from hydra_basis.config import ASSUMED_LEVERAGE
 from hydra_basis.formatting import fmt_pct
+
+
+def _spot_perp_roc(annualized_avg: float, leverage: int = ASSUMED_LEVERAGE) -> float:
+    return annualized_avg * leverage / (leverage + 1)
+
+
+def _perp_perp_roc(annualized_avg: float, leverage: int = ASSUMED_LEVERAGE) -> float:
+    return annualized_avg * leverage / 2
 
 
 def select_best_alerts_by_symbol(
@@ -65,24 +74,28 @@ def build_ranked_alert_digest(
     rows: list[tuple[float, str]] = []
 
     for alert in cross_exchange_alerts:
+        roc = _perp_perp_roc(float(alert["stats"]["annualized_avg"]))
         rows.append(
             (
                 float(alert["stats"]["annualized_avg"]),
                 (
                     f"跨所 | {alert['symbol']} | 做空 {alert['short_venue']} / 做多 {alert['long_venue']} | "
                     f"年化 {fmt_pct(alert['stats']['annualized_avg'])} | "
+                    f"資本回報 {fmt_pct(roc)} | "
                     f"正收益占比 {alert['stats']['positive_ratio']:.1%}"
                 ),
             )
         )
 
     for alert in spot_perp_alerts:
+        roc = _spot_perp_roc(float(alert["stats"]["annualized_avg"]))
         rows.append(
             (
                 float(alert["stats"]["annualized_avg"]),
                 (
                     f"SPOT-PERP | {alert['symbol']} | 做空永續 {alert['venue']} / 買入現貨 | "
                     f"年化 {fmt_pct(alert['stats']['annualized_avg'])} | "
+                    f"資本回報 {fmt_pct(roc)} | "
                     f"正收益占比 {alert['stats']['positive_ratio']:.1%}"
                 ),
             )

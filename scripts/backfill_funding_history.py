@@ -45,6 +45,7 @@ load_environment()
 
 BACKFILL_BATCH_SIZE = 30
 BACKFILL_BATCH_SLEEP_SECONDS = 15
+PERSIST_EVERY_N = 200
 
 
 async def run_backfill() -> None:
@@ -55,6 +56,7 @@ async def run_backfill() -> None:
         for key, points in store.load().items()
     }
     all_spreads = spread_store.load()
+    current_now_ms = now_ms()
 
     async with aiohttp.ClientSession(headers={"User-Agent": "funding-arb-backfill/0.1"}) as session:
         enabled_venues = [venue for venue, config in VENUE_CONFIG.items() if config.enabled]
@@ -69,6 +71,10 @@ async def run_backfill() -> None:
 
         pending_keys = []
         incremental_starts: dict[tuple[str, str], int] = {}
+        full_backfill_keys: set[tuple[str, str]] = set()
+        skipped_complete = 0
+        top_up_scheduled = 0
+        full_backfill_scheduled = 0
         for venue in enabled_venues:
             if venue not in FETCHERS:
                 continue
@@ -79,20 +85,29 @@ async def run_backfill() -> None:
                     analysis_days=7,
                 )
                 if funding_history_is_complete(cached_points, required_days=7):
-                    if backfill_needs_top_up(cached_points, now_ms=now_ms()):
+                    if backfill_needs_top_up(cached_points, now_ms=current_now_ms):
                         start_ms = backfill_incremental_start_ms(merged_cached_points)
                         if start_ms is not None:
                             pending_keys.append((venue, symbol))
                             incremental_starts[(venue, symbol)] = start_ms
-                            print(f"backfill top-up scheduled {(venue, symbol)} from_ts_ms={start_ms}")
+                            top_up_scheduled += 1
                     else:
-                        print(f"backfill skip cached complete {(venue, symbol)}")
+                        skipped_complete += 1
                     continue
                 pending_keys.append((venue, symbol))
+                full_backfill_keys.add((venue, symbol))
+                full_backfill_scheduled += 1
                 if venue in FETCHERS_SINCE:
                     start_ms = backfill_incremental_start_ms(merged_cached_points)
                     if start_ms is not None:
                         incremental_starts[(venue, symbol)] = start_ms
+
+        print(
+            "backfill summary "
+            f"skip_complete={skipped_complete} "
+            f"top_up={top_up_scheduled} "
+            f"full={full_backfill_scheduled}"
+        )
 
         immediate_keys, loris_batched_keys = split_loris_batched_keys(pending_keys)
 
@@ -107,6 +122,7 @@ async def run_backfill() -> None:
                     tasks.append(FETCHERS[venue](session, symbol))
             results = await gather_limited(tasks, limit=FETCH_CONCURRENCY_LIMIT, return_exceptions=True)
 
+            dirty = 0
             for key, result in zip(immediate_keys, results):
                 if isinstance(result, Exception):
                     if should_raise_immediately(result):
@@ -131,13 +147,23 @@ async def run_backfill() -> None:
                     merged,
                     lookback_ms=FUNDING_HISTORY_LOOKBACK_DAYS * 24 * 60 * 60 * 1000,
                 )
-                await capture_backfill_spread_snapshot(
-                    session=session,
-                    spreads=all_spreads,
-                    venue=key[0],
-                    symbol=key[1],
-                    clip_usd=BACKFILL_SPREAD_CLIP_USD,
-                )
+                if key in full_backfill_keys:
+                    await capture_backfill_spread_snapshot(
+                        session=session,
+                        spreads=all_spreads,
+                        venue=key[0],
+                        symbol=key[1],
+                        clip_usd=BACKFILL_SPREAD_CLIP_USD,
+                    )
+                dirty += 1
+                if dirty % PERSIST_EVERY_N == 0:
+                    persist_backfill_progress(
+                        history_store=store,
+                        spread_store=spread_store,
+                        funding_points=all_points,
+                        spreads=all_spreads,
+                    )
+            if dirty % PERSIST_EVERY_N != 0:
                 persist_backfill_progress(
                     history_store=store,
                     spread_store=spread_store,
@@ -158,6 +184,7 @@ async def run_backfill() -> None:
                     tasks.append(FETCHERS[venue](session, symbol))
             results = await gather_limited(tasks, limit=1, return_exceptions=True)
 
+            dirty = 0
             for key, result in zip(batch, results):
                 if isinstance(result, Exception):
                     if should_raise_immediately(result):
@@ -182,13 +209,23 @@ async def run_backfill() -> None:
                     merged,
                     lookback_ms=FUNDING_HISTORY_LOOKBACK_DAYS * 24 * 60 * 60 * 1000,
                 )
-                await capture_backfill_spread_snapshot(
-                    session=session,
-                    spreads=all_spreads,
-                    venue=key[0],
-                    symbol=key[1],
-                    clip_usd=BACKFILL_SPREAD_CLIP_USD,
-                )
+                if key in full_backfill_keys:
+                    await capture_backfill_spread_snapshot(
+                        session=session,
+                        spreads=all_spreads,
+                        venue=key[0],
+                        symbol=key[1],
+                        clip_usd=BACKFILL_SPREAD_CLIP_USD,
+                    )
+                dirty += 1
+                if dirty % PERSIST_EVERY_N == 0:
+                    persist_backfill_progress(
+                        history_store=store,
+                        spread_store=spread_store,
+                        funding_points=all_points,
+                        spreads=all_spreads,
+                    )
+            if dirty % PERSIST_EVERY_N != 0:
                 persist_backfill_progress(
                     history_store=store,
                     spread_store=spread_store,

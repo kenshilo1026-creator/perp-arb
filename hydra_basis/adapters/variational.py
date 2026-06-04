@@ -13,6 +13,7 @@ VARIATIONAL_BASE_URL = "https://omni-client-api.prod.ap-northeast-1.variational.
 LORIS_HISTORICAL_URL = "https://api.loris.tools/funding/historical"
 _VARIATIONAL_STATS_CACHE: dict[int, dict[str, dict[str, float]]] = {}
 LORIS_GATEWAY_RETRIES = 2
+LORIS_COMPARISON_INTERVAL_HOURS = 8.0
 
 
 def is_retryable_loris_gateway_error(exc: Exception) -> bool:
@@ -125,5 +126,5 @@ async def fetch_variational_funding_since(session, symbol: str, start_time_ms: i
         data or {},
         symbol=symbol,
         venue="variational",
-        interval_hours=float(entry["interval_hours"]),
+        interval_hours=max(float(entry["interval_hours"]), LORIS_COMPARISON_INTERVAL_HOURS),
     )

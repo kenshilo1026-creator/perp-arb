@@ -28,6 +28,8 @@ def build_lighter_market_order_request(
     slippage_bps: float,
     market_index: int,
     client_order_index: int | None = None,
+    min_base_amount: Decimal | None = None,
+    min_quote_amount: Decimal | None = None,
 ) -> dict[str, int | bool]:
     side_normalized = side.strip().lower()
     if side_normalized not in {"buy", "sell"}:
@@ -42,6 +44,16 @@ def build_lighter_market_order_request(
     else:
         price = bid * (Decimal("1") - slippage)
         is_ask = True
+
+    notional = quantity * ((bid + ask) / Decimal("2"))
+    if min_base_amount is not None and quantity < min_base_amount:
+        raise RuntimeError(
+            f"lighter order quantity={quantity} below min_base_amount={min_base_amount}"
+        )
+    if min_quote_amount is not None and notional < min_quote_amount:
+        raise RuntimeError(
+            f"lighter order notional={notional:.6f} below min_quote_amount={min_quote_amount}"
+        )
 
     base_amount = int(
         (quantity * Decimal(str(base_amount_multiplier))).to_integral_value(rounding=ROUND_FLOOR)
@@ -79,11 +91,39 @@ class LighterExecutionAdapter:
             self.client = self._signer_client_factory()
         return self.client
 
+    async def close(self) -> None:
+        if self.client is None:
+            return
+        for method_name in ("close", "close_client", "api_client.close"):
+            target = self.client
+            for part in method_name.split("."):
+                target = getattr(target, part, None)
+                if target is None:
+                    break
+            if target is None:
+                continue
+            result = target()
+            if inspect.isawaitable(result):
+                await result
+            return
+
     async def _load_market_config(self, symbol: str):
         result = self._market_config_loader(symbol)
         if inspect.isawaitable(result):
             return await result
         return result
+
+    def _normalize_market_config(self, config):
+        if isinstance(config, dict):
+            return config
+        market_index, base_amount_multiplier, price_multiplier = config
+        return {
+            "market_index": market_index,
+            "base_amount_multiplier": base_amount_multiplier,
+            "price_multiplier": price_multiplier,
+            "min_base_amount": None,
+            "min_quote_amount": None,
+        }
 
     async def _load_orderbook(self, symbol: str):
         result = self._orderbook_loader(symbol)
@@ -91,18 +131,27 @@ class LighterExecutionAdapter:
             return await result
         return result
 
-    async def place_market_order(self, *, symbol: str, side: str, amount: str, clip_usd: float) -> dict[str, object]:
+    async def _submit_market_order(
+        self,
+        *,
+        symbol: str,
+        side: str,
+        amount: str,
+        reduce_only: bool,
+    ) -> dict[str, object]:
         quantity = Decimal(str(amount))
-        market_index, base_amount_multiplier, price_multiplier = await self._load_market_config(symbol)
+        market_config = self._normalize_market_config(await self._load_market_config(symbol))
         orderbook = await self._load_orderbook(symbol)
         request = build_lighter_market_order_request(
             side=side,
             quantity=quantity,
             orderbook=orderbook,
-            base_amount_multiplier=base_amount_multiplier,
-            price_multiplier=price_multiplier,
+            base_amount_multiplier=market_config["base_amount_multiplier"],
+            price_multiplier=market_config["price_multiplier"],
             slippage_bps=self.slippage_bps,
-            market_index=market_index,
+            market_index=market_config["market_index"],
+            min_base_amount=market_config.get("min_base_amount"),
+            min_quote_amount=market_config.get("min_quote_amount"),
         )
         client = self._get_client()
         _tx, tx_hash, error = await client.create_order(
@@ -113,7 +162,7 @@ class LighterExecutionAdapter:
             is_ask=request["is_ask"],
             order_type=client.ORDER_TYPE_LIMIT,
             time_in_force=client.ORDER_TIME_IN_FORCE_GOOD_TILL_TIME,
-            reduce_only=False,
+            reduce_only=reduce_only,
             trigger_price=0,
         )
         if error is not None:
@@ -123,3 +172,41 @@ class LighterExecutionAdapter:
             "tx_hash": tx_hash,
             "client_order_index": request["client_order_index"],
         }
+
+    async def place_market_order(self, *, symbol: str, side: str, amount: str, clip_usd: float) -> dict[str, object]:
+        return await self._submit_market_order(
+            symbol=symbol,
+            side=side,
+            amount=amount,
+            reduce_only=False,
+        )
+
+    async def close_position(
+        self,
+        *,
+        venue: str,
+        symbol: str,
+        side: str,
+        quantity: str,
+        market_type: str,
+        **kwargs,
+    ) -> dict[str, object]:
+        if market_type != "perp":
+            raise RuntimeError("lighter spot emergency close is not supported")
+        return await self._submit_market_order(
+            symbol=symbol,
+            side=side,
+            amount=quantity,
+            reduce_only=True,
+        )
+
+    async def add_isolated_margin(
+        self,
+        *,
+        venue: str,
+        symbol: str,
+        side: str,
+        amount_usd: float,
+        **kwargs,
+    ) -> dict[str, object]:
+        raise RuntimeError("lighter isolated margin top-up is not supported by this adapter")

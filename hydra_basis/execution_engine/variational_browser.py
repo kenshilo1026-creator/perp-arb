@@ -42,7 +42,7 @@ class VariationalBrowserExecutionAdapter:
         self.client_role = client_role
         self.timeout_seconds = timeout_seconds
 
-    async def place_limit_order(
+    async def _place_order(
         self,
         *,
         symbol: str,
@@ -69,6 +69,39 @@ class VariationalBrowserExecutionAdapter:
                     )
                 )
                 return await self._await_order_result(ws, request_id=request_id, symbol=symbol)
+
+    async def place_limit_order(
+        self,
+        *,
+        symbol: str,
+        side: str,
+        amount: str,
+        clip_usd: float | None = None,
+        market: str | None = None,
+        account: str | None = None,
+        timeout_ms: int | None = None,
+    ) -> dict[str, object]:
+        return await self._place_order(
+            symbol=symbol, side=side, amount=amount, clip_usd=clip_usd,
+            market=market, account=account, timeout_ms=timeout_ms,
+        )
+
+    async def place_market_order(
+        self,
+        *,
+        symbol: str,
+        side: str,
+        amount: str,
+        clip_usd: float | None = None,
+        market: str | None = None,
+        account: str | None = None,
+        timeout_ms: int | None = None,
+    ) -> dict[str, object]:
+        # Variational broker protocol has no price field — always executes at best available price.
+        return await self._place_order(
+            symbol=symbol, side=side, amount=amount, clip_usd=clip_usd,
+            market=market, account=account, timeout_ms=timeout_ms,
+        )
 
     async def _await_register_ack(self, ws) -> None:
         while True:

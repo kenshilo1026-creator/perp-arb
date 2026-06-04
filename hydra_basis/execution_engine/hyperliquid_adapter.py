@@ -2,11 +2,16 @@ from __future__ import annotations
 
 import os
 import time
+from decimal import Decimal
 
 import aiohttp
 import msgpack
 from eth_account import Account
-from eth_account.messages import encode_structured_data
+try:
+    from eth_account.messages import encode_structured_data
+except ImportError:  # eth-account >= 0.12
+    encode_structured_data = None
+from eth_account.messages import encode_typed_data
 from eth_hash.auto import keccak
 
 from hydra_basis.adapters.base import fetch_json
@@ -26,6 +31,12 @@ def _action_hash(action: dict, vault_address: str | None, nonce: int) -> bytes:
         data += b"\x01"
         data += bytes.fromhex(vault_address[2:])
     return keccak(data)
+
+
+def encode_hyperliquid_typed_data(structured: dict):
+    if encode_structured_data is not None:
+        return encode_structured_data(structured)
+    return encode_typed_data(full_message=structured)
 
 
 def _sign_l1_action(
@@ -57,12 +68,22 @@ def _sign_l1_action(
         "message": phantom_agent,
     }
     wallet = Account.from_key(private_key)
-    signed = wallet.sign_message(encode_structured_data(structured))
+    signed = wallet.sign_message(encode_hyperliquid_typed_data(structured))
     return {"r": hex(signed.r), "s": hex(signed.s), "v": signed.v}
 
 
-def _float_to_wire(x: float) -> str:
-    return f"{x:.8f}".rstrip("0").rstrip(".")
+def hyperliquid_float_to_wire(x: float) -> str:
+    return f"{x:.5g}"
+
+
+def extract_hyperliquid_order_id(data: dict, *, fill_type: str) -> int | None:
+    statuses = data.get("response", {}).get("data", {}).get("statuses", [])
+    if not statuses:
+        return None
+    status = statuses[0]
+    if "error" in status:
+        raise RuntimeError(f"hyperliquid order error: {status['error']}")
+    return (status.get(fill_type) or {}).get("oid")
 
 
 class HyperliquidExecutionAdapter:
@@ -71,6 +92,7 @@ class HyperliquidExecutionAdapter:
         *,
         private_key: str | None = None,
         account_address: str | None = None,
+        leverage: int | None = None,
         slippage_bps: float = 50.0,
     ) -> None:
         self.private_key = private_key or os.getenv("HYPERLIQUID_PRIVATE_KEY", "")
@@ -83,7 +105,9 @@ class HyperliquidExecutionAdapter:
             or self._wallet.address
         )
         self.slippage_bps = slippage_bps
+        self.default_leverage = leverage if leverage is not None else int(os.getenv("HYPERLIQUID_LEVERAGE", "1"))
         self._universe: list[str] | None = None
+        self._isolated_asset_indices: set[int] = set()
 
     async def _get_asset_index(self, symbol: str) -> int:
         if self._universe is None:
@@ -120,6 +144,42 @@ class HyperliquidExecutionAdapter:
                     raise RuntimeError(f"hyperliquid order rejected: {data}")
                 return data
 
+    async def ensure_isolated_margin(self, symbol: str) -> int:
+        asset_index = await self._get_asset_index(symbol)
+        if asset_index in self._isolated_asset_indices:
+            return asset_index
+        action = {
+            "type": "updateLeverage",
+            "asset": asset_index,
+            "isCross": False,
+            "leverage": self.default_leverage,
+        }
+        await self._post_order(action)
+        self._isolated_asset_indices.add(asset_index)
+        return asset_index
+
+    async def add_isolated_margin(
+        self,
+        *,
+        venue: str,
+        symbol: str,
+        side: str,
+        amount_usd: float,
+        **kwargs,
+    ) -> dict:
+        asset_index = await self._get_asset_index(symbol)
+        side_normalized = side.strip().upper()
+        if side_normalized not in {"LONG", "SHORT"}:
+            raise RuntimeError(f"unsupported hyperliquid position side: {side}")
+        action = {
+            "type": "updateIsolatedMargin",
+            "asset": asset_index,
+            "isBuy": side_normalized == "LONG",
+            "ntli": int(Decimal(str(amount_usd)) * Decimal("1000000")),
+        }
+        data = await self._post_order(action)
+        return {"ok": True, "raw": data}
+
     def _build_action(
         self,
         *,
@@ -135,8 +195,8 @@ class HyperliquidExecutionAdapter:
             "orders": [{
                 "a": asset_index,
                 "b": is_buy,
-                "p": _float_to_wire(price),
-                "s": _float_to_wire(size),
+                "p": hyperliquid_float_to_wire(price),
+                "s": hyperliquid_float_to_wire(size),
                 "r": reduce_only,
                 "t": {"limit": {"tif": tif}},
             }],
@@ -146,7 +206,7 @@ class HyperliquidExecutionAdapter:
     async def place_limit_order(
         self, *, symbol: str, side: str, amount: str, clip_usd: float, price: str
     ) -> dict:
-        asset_index = await self._get_asset_index(symbol)
+        asset_index = await self.ensure_isolated_margin(symbol)
         is_buy = side.strip().upper() == "BUY"
         action = self._build_action(
             asset_index=asset_index,
@@ -156,14 +216,13 @@ class HyperliquidExecutionAdapter:
             tif="Gtc",
         )
         data = await self._post_order(action)
-        statuses = data.get("response", {}).get("data", {}).get("statuses", [{}])
-        order_id = (statuses[0].get("resting") or {}).get("oid") if statuses else None
+        order_id = extract_hyperliquid_order_id(data, fill_type="resting")
         return {"ok": True, "order_id": order_id, "raw": data}
 
     async def place_market_order(
         self, *, symbol: str, side: str, amount: str, clip_usd: float
     ) -> dict:
-        asset_index = await self._get_asset_index(symbol)
+        asset_index = await self.ensure_isolated_margin(symbol)
         is_buy = side.strip().upper() == "BUY"
         mid = await self._get_mid_price(symbol)
         slippage = self.slippage_bps / 10000
@@ -176,6 +235,34 @@ class HyperliquidExecutionAdapter:
             tif="Ioc",
         )
         data = await self._post_order(action)
-        statuses = data.get("response", {}).get("data", {}).get("statuses", [{}])
-        order_id = (statuses[0].get("filled") or {}).get("oid") if statuses else None
+        order_id = extract_hyperliquid_order_id(data, fill_type="filled")
+        return {"ok": True, "order_id": order_id, "raw": data}
+
+    async def close_position(
+        self,
+        *,
+        venue: str,
+        symbol: str,
+        side: str,
+        quantity: str,
+        market_type: str,
+        **kwargs,
+    ) -> dict:
+        if market_type != "perp":
+            raise RuntimeError("hyperliquid spot emergency close is not supported")
+        asset_index = await self._get_asset_index(symbol)
+        is_buy = side.strip().upper() == "BUY"
+        mid = await self._get_mid_price(symbol)
+        slippage = self.slippage_bps / 10000
+        price = mid * (1 + slippage) if is_buy else mid * (1 - slippage)
+        action = self._build_action(
+            asset_index=asset_index,
+            is_buy=is_buy,
+            price=price,
+            size=float(quantity),
+            tif="Ioc",
+            reduce_only=True,
+        )
+        data = await self._post_order(action)
+        order_id = extract_hyperliquid_order_id(data, fill_type="filled")
         return {"ok": True, "order_id": order_id, "raw": data}

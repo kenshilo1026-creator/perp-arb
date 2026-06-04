@@ -1,0 +1,16 @@
+{
+  // 是否啟用 isolated margin 自動補保證金
+  "enabled": true,
+
+  // 現價距離強平價 <= 這個百分比時觸發補保證金
+  "liq_distance_trigger_pct": 5.0,
+
+  // 每次補多少 USDT/USDC 保證金
+  "topup_amount_usd": 500.0,
+
+  // 每條腿最多自動補幾次，避免黑天鵝無限補錢
+  "max_topups_per_leg": 3,
+
+  // 同一條腿兩次補保證金之間最少相隔秒數
+  "cooldown_seconds": 60
+}

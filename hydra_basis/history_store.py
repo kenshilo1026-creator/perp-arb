@@ -11,6 +11,14 @@ def now_ms() -> int:
     return int(dt.datetime.now(dt.timezone.utc).timestamp() * 1000)
 
 
+def utc_datetime_from_ms(ts_ms: int) -> str:
+    return dt.datetime.fromtimestamp(ts_ms / 1000, dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def annualized_pct_from_point(point: FundingPoint) -> float:
+    return point.hourly_rate * 24 * 365 * 100
+
+
 def trim_points_to_lookback_ms(
     points: list[FundingPoint],
     *,
@@ -125,8 +133,10 @@ class FundingHistoryStore:
                         "venue": point.venue,
                         "symbol": point.symbol,
                         "ts_ms": point.ts_ms,
+                        "datetime_utc": utc_datetime_from_ms(point.ts_ms),
                         "raw_rate": point.raw_rate,
                         "interval_hours": point.interval_hours,
+                        "annualized_pct": annualized_pct_from_point(point),
                     }
                     json.dumps(row)  # validate before adding
                     rows.append(row)

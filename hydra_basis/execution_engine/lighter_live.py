@@ -5,6 +5,7 @@ import os
 import platform
 import sys
 from typing import Any
+from decimal import Decimal
 
 import aiohttp
 
@@ -79,7 +80,7 @@ async def fetch_lighter_market_config(
     symbol: str,
     *,
     base_url: str = LIGHTER_BASE_URL,
-) -> tuple[int, int, int]:
+) -> dict[str, int | Decimal]:
     async with aiohttp.ClientSession() as session:
         data = await fetch_json(
             session,
@@ -92,7 +93,13 @@ async def fetch_lighter_market_config(
             continue
         price_decimals = int(market["supported_price_decimals"])
         size_decimals = int(market["supported_size_decimals"])
-        return int(market["market_id"]), pow(10, size_decimals), pow(10, price_decimals)
+        return {
+            "market_index": int(market["market_id"]),
+            "base_amount_multiplier": pow(10, size_decimals),
+            "price_multiplier": pow(10, price_decimals),
+            "min_base_amount": Decimal(str(market.get("min_base_amount", "0"))),
+            "min_quote_amount": Decimal(str(market.get("min_quote_amount", "0"))),
+        }
     raise RuntimeError(f"Ticker {symbol} not found in Lighter order books")
 
 

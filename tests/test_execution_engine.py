@@ -28,7 +28,10 @@ from hydra_basis.alerts import build_ranked_alert_digest
 from hydra_basis.execution_engine.executor import execute_single_clip
 from hydra_basis.execution_engine.executor import execution_sides_for_signal
 from scripts.run_execution_preview import compute_batch_count
-from scripts.run_execution_once import compute_batch_count as compute_single_clip_batch_count
+from scripts.run_execution_once import (
+    build_adapter_for_venue,
+    compute_batch_count as compute_single_clip_batch_count,
+)
 
 
 class ExecutionConfigTests(unittest.TestCase):
@@ -397,6 +400,20 @@ class LighterExecutionAdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(request["price"], 10201)
         self.assertFalse(request["is_ask"])
 
+    async def test_build_lighter_market_order_request_rejects_below_min_base_or_quote(self) -> None:
+        with self.assertRaisesRegex(RuntimeError, "min_base_amount=0.005"):
+            build_lighter_market_order_request(
+                side="buy",
+                quantity=Decimal("0.003"),
+                orderbook={"bid": 1766.5, "ask": 1766.54, "ts_ms": 1},
+                base_amount_multiplier=10000,
+                price_multiplier=100,
+                slippage_bps=100.0,
+                market_index=0,
+                min_base_amount=Decimal("0.005"),
+                min_quote_amount=Decimal("10"),
+            )
+
     async def test_place_market_order_calls_create_order_with_expected_fields(self) -> None:
         class FakeSignerClient:
             ORDER_TYPE_LIMIT = "limit"
@@ -582,6 +599,18 @@ class ExecutionPreviewCliTests(unittest.TestCase):
             spot_perp_alerts=[],
         )
         self.assertIn("資本回報", digest)
+
+    def test_run_execution_once_passes_leverage_to_supported_venues(self) -> None:
+        with mock.patch("scripts.run_execution_once.AsterExecutionAdapter") as aster_cls:
+            build_adapter_for_venue("aster", leverage=3)
+        with mock.patch("scripts.run_execution_once.HyperliquidExecutionAdapter") as hyper_cls:
+            build_adapter_for_venue("hyperliquid", leverage=4)
+        with mock.patch("scripts.run_execution_once.MexcExecutionAdapter") as mexc_cls:
+            build_adapter_for_venue("mexc", leverage=5)
+
+        aster_cls.assert_called_once_with(leverage=3)
+        hyper_cls.assert_called_once_with(leverage=4)
+        mexc_cls.assert_called_once_with(leverage=5)
 
 
 if __name__ == "__main__":

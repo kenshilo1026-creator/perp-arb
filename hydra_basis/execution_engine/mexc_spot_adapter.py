@@ -1,0 +1,75 @@
+from __future__ import annotations
+
+import hashlib
+import hmac
+import os
+import time
+from urllib.parse import urlencode
+
+import aiohttp
+
+
+class MexcSpotExecutionAdapter:
+    BASE_URL = "https://api.mexc.com"
+
+    def __init__(
+        self,
+        *,
+        api_key: str | None = None,
+        api_secret: str | None = None,
+    ) -> None:
+        self.api_key = api_key or os.getenv("MEXC_SPOT_API_KEY", "") or os.getenv("MEXC_API_KEY", "")
+        self.api_secret = api_secret or os.getenv("MEXC_SPOT_API_SECRET", "") or os.getenv("MEXC_API_SECRET", "")
+
+    def _timestamp_ms(self) -> int:
+        return int(time.time() * 1000)
+
+    def _sign(self, query_string: str) -> str:
+        return hmac.new(
+            self.api_secret.encode("utf-8"),
+            query_string.encode("utf-8"),
+            hashlib.sha256,
+        ).hexdigest()
+
+    async def _post_order(self, params: dict) -> dict:
+        params["timestamp"] = self._timestamp_ms()
+        query = urlencode(params)
+        signature = self._sign(query)
+        headers = {
+            "X-MEXC-APIKEY": self.api_key,
+            "Content-Type": "application/x-www-form-urlencoded",
+        }
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                f"{self.BASE_URL}/api/v3/order",
+                data=f"{query}&signature={signature}",
+                headers=headers,
+            ) as resp:
+                data = await resp.json()
+                if resp.status != 200:
+                    raise RuntimeError(f"mexc spot order {resp.status}: {data}")
+                return data
+
+    async def close_position(
+        self,
+        *,
+        venue: str,
+        symbol: str,
+        side: str,
+        quantity: str,
+        market_type: str,
+        **kwargs,
+    ) -> dict:
+        if market_type != "spot":
+            raise RuntimeError("mexc spot adapter only supports spot emergency close")
+        if side.strip().upper() != "SELL":
+            raise RuntimeError("mexc spot emergency close only supports SELL for long spot positions")
+        data = await self._post_order(
+            {
+                "symbol": f"{symbol.strip().upper()}USDT",
+                "side": "SELL",
+                "type": "MARKET",
+                "quantity": quantity,
+            }
+        )
+        return {"ok": True, "order_id": data.get("orderId"), "raw": data}

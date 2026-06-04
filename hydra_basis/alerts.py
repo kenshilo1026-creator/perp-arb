@@ -77,7 +77,7 @@ def build_ranked_alert_digest(
         roc = _perp_perp_roc(float(alert["stats"]["annualized_avg"]))
         rows.append(
             (
-                float(alert["stats"]["annualized_avg"]),
+                roc,
                 (
                     f"跨所 | {alert['symbol']} | 做空 {alert['short_venue']} / 做多 {alert['long_venue']} | "
                     f"年化 {fmt_pct(alert['stats']['annualized_avg'])} | "
@@ -91,7 +91,7 @@ def build_ranked_alert_digest(
         roc = _spot_perp_roc(float(alert["stats"]["annualized_avg"]))
         rows.append(
             (
-                float(alert["stats"]["annualized_avg"]),
+                roc,
                 (
                     f"SPOT-PERP | {alert['symbol']} | 做空永續 {alert['venue']} / 買入現貨 | "
                     f"年化 {fmt_pct(alert['stats']['annualized_avg'])} | "

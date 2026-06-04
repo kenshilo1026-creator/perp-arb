@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import math
-from decimal import Decimal
 
 try:
     from _bootstrap import ensure_project_root_on_path
@@ -12,9 +11,11 @@ except ModuleNotFoundError:  # pragma: no cover
 ensure_project_root_on_path()
 
 from hydra_basis.env import load_environment
+from hydra_basis.config import POSITION_REGISTRY_PATH
 from hydra_basis.execution_engine.aster_adapter import AsterExecutionAdapter
 from hydra_basis.execution_engine.executor import execute_single_clip
 from hydra_basis.execution_engine.hyperliquid_adapter import HyperliquidExecutionAdapter
+from hydra_basis.execution_engine.mexc_adapter import MexcExecutionAdapter
 from hydra_basis.execution_engine.lighter_adapter import LighterExecutionAdapter, compute_base_quantity_from_clip_usd
 from hydra_basis.execution_engine.lighter_live import (
     build_lighter_client_factory_from_env,
@@ -25,6 +26,7 @@ from hydra_basis.execution_engine.runtime import prepare_execution_preview
 from hydra_basis.execution_engine.state_machine import ExecutionStateMachine
 from hydra_basis.execution_engine.variational_browser import VariationalBrowserExecutionAdapter
 from hydra_basis.formatting import fmt_pct
+from hydra_basis.risk_management.recording import record_successful_execution
 
 load_environment()
 
@@ -53,7 +55,18 @@ def prompt_float(label: str) -> float:
     return number
 
 
-def build_adapter_for_venue(venue: str):
+def prompt_int(label: str) -> int:
+    value = prompt_text(label)
+    try:
+        number = int(value)
+    except ValueError as exc:
+        raise RuntimeError(f"{label} must be an integer") from exc
+    if number <= 0:
+        raise RuntimeError(f"{label} must be positive")
+    return number
+
+
+def build_adapter_for_venue(venue: str, *, leverage: int = 1):
     v = venue.lower()
     if v == "lighter":
         return LighterExecutionAdapter(
@@ -64,9 +77,11 @@ def build_adapter_for_venue(venue: str):
     if v == "variational":
         return VariationalBrowserExecutionAdapter()
     if v == "aster":
-        return AsterExecutionAdapter()
+        return AsterExecutionAdapter(leverage=leverage)
     if v == "hyperliquid":
-        return HyperliquidExecutionAdapter()
+        return HyperliquidExecutionAdapter(leverage=leverage)
+    if v == "mexc":
+        return MexcExecutionAdapter(leverage=leverage)
     raise RuntimeError(f"no execution adapter for venue: {venue}")
 
 
@@ -74,6 +89,7 @@ async def run_execution_once() -> None:
     symbol = prompt_text("ticker").upper()
     total_usd = prompt_float("total_usd")
     clip_usd = prompt_float("clip_usd")
+    leverage = prompt_int("leverage_x")
 
     signal, preview, short_book, long_book = await prepare_execution_preview(
         symbol=symbol,
@@ -91,6 +107,7 @@ async def run_execution_once() -> None:
     print(f"{signal.short_venue}_spread: {fmt_pct(preview.maker_spread_pct if preview.maker_venue == signal.short_venue else preview.taker_spread_pct)}")
     print(f"{signal.long_venue}_spread: {fmt_pct(preview.maker_spread_pct if preview.maker_venue == signal.long_venue else preview.taker_spread_pct)}")
     print(f"clip_usd: {clip_usd:.2f}")
+    print(f"leverage_x: {leverage}")
 
     if preview.requires_confirm:
         answer = input("spread > 0.1%, continue? [y/N]: ").strip().lower()
@@ -106,8 +123,8 @@ async def run_execution_once() -> None:
     taker_book = short_book if preview.taker_venue == signal.short_venue else long_book
     quantity = compute_base_quantity_from_clip_usd(clip_usd=clip_usd, orderbook=taker_book)
 
-    maker_adapter = build_adapter_for_venue(preview.maker_venue)
-    taker_adapter = build_adapter_for_venue(preview.taker_venue)
+    maker_adapter = build_adapter_for_venue(preview.maker_venue, leverage=leverage)
+    taker_adapter = build_adapter_for_venue(preview.taker_venue, leverage=leverage)
 
     result = await execute_single_clip(
         symbol=signal.symbol,
@@ -124,6 +141,15 @@ async def run_execution_once() -> None:
     )
     print("execution result")
     print(result)
+    strategy_id = record_successful_execution(
+        path=POSITION_REGISTRY_PATH,
+        symbol=signal.symbol,
+        quantity=str(quantity),
+        short_venue=signal.short_venue,
+        long_venue=signal.long_venue,
+        execution_result=result,
+    )
+    print(f"risk registry recorded: {strategy_id} -> {POSITION_REGISTRY_PATH}")
 
 
 def main() -> None:

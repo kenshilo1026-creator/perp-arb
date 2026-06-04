@@ -2,6 +2,7 @@ import unittest
 import os
 import sys
 import asyncio
+import json
 import tempfile
 import datetime as dt
 from pathlib import Path
@@ -132,6 +133,35 @@ class AnalyzeSpreadTests(unittest.TestCase):
         stats = analyze_spread(short_points, long_points, min_observations=4)
 
         self.assertIsNone(stats)
+
+    def test_spread_analysis_filters_negative_hourly_funding_spikes(self) -> None:
+        short_points = [
+            FundingPoint("short", "LAB", ts_ms=hour * 3_600_000, raw_rate=-0.0005, interval_hours=1)
+            for hour in range(24)
+        ]
+        long_points = [
+            FundingPoint("long", "LAB", ts_ms=hour * 3_600_000, raw_rate=-0.0020, interval_hours=1)
+            for hour in range(24)
+        ]
+
+        stats = analyze_spread(short_points, long_points, min_observations=24)
+
+        self.assertIsNone(stats)
+
+    def test_spread_analysis_allows_positive_hourly_funding_above_spike_threshold(self) -> None:
+        short_points = [
+            FundingPoint("short", "BTC", ts_ms=hour * 3_600_000, raw_rate=0.0020, interval_hours=1)
+            for hour in range(24)
+        ]
+        long_points = [
+            FundingPoint("long", "BTC", ts_ms=hour * 3_600_000, raw_rate=0.0, interval_hours=1)
+            for hour in range(24)
+        ]
+
+        stats = analyze_spread(short_points, long_points, min_observations=24)
+
+        self.assertIsNotNone(stats)
+        self.assertAlmostEqual(stats["avg_hourly"], 0.0020)
 
     def test_positive_funding_analysis_detects_spot_perp_opportunity(self) -> None:
         end_ms = int(dt.datetime.now(dt.timezone.utc).timestamp() * 1000)
@@ -484,6 +514,28 @@ class VariationalAdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(points[0].symbol, "BTC")
         self.assertEqual(points[0].interval_hours, 8.0)
         self.assertAlmostEqual(points[0].raw_rate, 0.00003848)
+
+    async def test_fetch_variational_funding_uses_loris_8h_interval_for_1h_markets(self) -> None:
+        stats_payload = {
+            "listings": [
+                {"ticker": "LAB", "funding_rate": "-1.9", "funding_interval_s": 3600},
+            ]
+        }
+        historical_payload = {
+            "symbol": "LAB",
+            "series": {
+                "variational": [
+                    {"t": "2026-06-01T00:00:00Z", "y": -500.0},
+                ]
+            },
+            "notices": [],
+        }
+        with patch("hydra_basis.adapters.variational.fetch_json", new=AsyncMock(side_effect=[stats_payload, historical_payload])):
+            points = await fetch_variational_funding(session=object(), symbol="LAB")
+
+        self.assertEqual(points[0].interval_hours, 8.0)
+        self.assertAlmostEqual(points[0].raw_rate, -0.05)
+        self.assertAlmostEqual(points[0].hourly_rate, -0.00625)
 
     def test_parse_stats_listings_extracts_funding_and_interval(self) -> None:
         parsed = parse_stats_listings(
@@ -851,7 +903,7 @@ class AlertsTests(unittest.TestCase):
         self.assertEqual(selected[0]["symbol"], "BTC")
         self.assertEqual(selected[0]["venue"], "b")
 
-    def test_build_ranked_alert_digest_sorts_by_annualized_desc(self) -> None:
+    def test_build_ranked_alert_digest_sorts_by_roc_desc(self) -> None:
         digest = build_ranked_alert_digest(
             cross_exchange_alerts=[
                 {"symbol": "BTC", "short_venue": "a", "long_venue": "b", "stats": {"annualized_avg": 0.40, "positive_ratio": 0.8}},
@@ -862,7 +914,7 @@ class AlertsTests(unittest.TestCase):
         )
 
         self.assertIn("#1", digest)
-        self.assertTrue(digest.index("ETH") < digest.index("BTC"))
+        self.assertTrue(digest.index("BTC") < digest.index("ETH"))
         self.assertIn("SPOT-PERP", digest)
         self.assertIn("跨所", digest)
 
@@ -884,6 +936,25 @@ class HistoryStoreTests(unittest.TestCase):
             self.assertIn(("hyperliquid", "BTC"), loaded)
             self.assertEqual(len(loaded[("hyperliquid", "BTC")]), 2)
             self.assertEqual(loaded[("hyperliquid", "BTC")][0].ts_ms, 1000)
+
+    def test_save_includes_readable_datetime_and_annualized_pct_without_hourly_rate(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "funding_history.json"
+            store = FundingHistoryStore(path)
+            payload = {
+                ("hyperliquid", "BTC"): [
+                    FundingPoint("hyperliquid", "BTC", 1_700_000_000_000, 0.0008, 8),
+                ]
+            }
+
+            store.save(payload)
+            row = json.loads(path.read_text(encoding="utf-8"))["hyperliquid::BTC"][0]
+
+            self.assertEqual(row["ts_ms"], 1_700_000_000_000)
+            self.assertEqual(row["datetime_utc"], "2023-11-14T22:13:20Z")
+            self.assertEqual(row["raw_rate"], 0.0008)
+            self.assertAlmostEqual(row["annualized_pct"], 87.6)
+            self.assertNotIn("hourly_rate", row)
 
     def test_trim_points_to_14_day_lookback(self) -> None:
         now_ms = int(dt.datetime.now(dt.timezone.utc).timestamp() * 1000)

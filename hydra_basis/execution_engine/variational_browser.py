@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import uuid
+from pathlib import Path
 
 from aiohttp import ClientSession, WSMsgType
 
@@ -9,8 +11,11 @@ from aiohttp import ClientSession, WSMsgType
 def build_place_order_payload(
     *,
     request_id: str,
+    symbol: str,
     side: str,
     amount: str,
+    order_type: str = "market",
+    price: str | None = None,
     market: str | None = None,
     account: str | None = None,
     timeout_ms: int | None = None,
@@ -18,9 +23,13 @@ def build_place_order_payload(
     payload: dict[str, str | int] = {
         "type": "PLACE_ORDER",
         "requestId": request_id,
+        "symbol": symbol,
         "side": side,
         "amount": amount,
+        "orderType": order_type.upper(),
     }
+    if price is not None:
+        payload["price"] = price
     if market is not None:
         payload["market"] = market
     if account is not None:
@@ -37,10 +46,12 @@ class VariationalBrowserExecutionAdapter:
         broker_url: str = "http://127.0.0.1:8768/",
         client_role: str = "strategy",
         timeout_seconds: float = 10.0,
+        debug_payload_path: Path | None = Path("data/variational_order_debug.json"),
     ) -> None:
         self.broker_url = broker_url
         self.client_role = client_role
         self.timeout_seconds = timeout_seconds
+        self.debug_payload_path = debug_payload_path
 
     async def _place_order(
         self,
@@ -51,6 +62,8 @@ class VariationalBrowserExecutionAdapter:
         clip_usd: float | None = None,
         market: str | None = None,
         account: str | None = None,
+        order_type: str = "market",
+        price: str | None = None,
         timeout_ms: int | None = None,
     ) -> dict[str, object]:
         request_id = str(uuid.uuid4())
@@ -61,8 +74,11 @@ class VariationalBrowserExecutionAdapter:
                 await ws.send_json(
                     build_place_order_payload(
                         request_id=request_id,
+                        symbol=symbol,
                         side=side,
                         amount=amount,
+                        order_type=order_type,
+                        price=price,
                         market=market,
                         account=account,
                         timeout_ms=timeout_ms,
@@ -79,11 +95,13 @@ class VariationalBrowserExecutionAdapter:
         clip_usd: float | None = None,
         market: str | None = None,
         account: str | None = None,
+        price: str | None = None,
         timeout_ms: int | None = None,
     ) -> dict[str, object]:
         return await self._place_order(
             symbol=symbol, side=side, amount=amount, clip_usd=clip_usd,
-            market=market, account=account, timeout_ms=timeout_ms,
+            market=market, account=account, order_type="limit", price=price,
+            timeout_ms=timeout_ms,
         )
 
     async def place_market_order(
@@ -97,10 +115,10 @@ class VariationalBrowserExecutionAdapter:
         account: str | None = None,
         timeout_ms: int | None = None,
     ) -> dict[str, object]:
-        # Variational broker protocol has no price field — always executes at best available price.
         return await self._place_order(
             symbol=symbol, side=side, amount=amount, clip_usd=clip_usd,
-            market=market, account=account, timeout_ms=timeout_ms,
+            market=market, account=account, order_type="market",
+            timeout_ms=timeout_ms,
         )
 
     async def _await_register_ack(self, ws) -> None:
@@ -128,7 +146,20 @@ class VariationalBrowserExecutionAdapter:
             if payload.get("type") != "ORDER_RESULT":
                 continue
             if not payload.get("ok", False):
+                debug_path_text = ""
+                if self.debug_payload_path is not None:
+                    self.debug_payload_path.parent.mkdir(parents=True, exist_ok=True)
+                    self.debug_payload_path.write_text(
+                        json.dumps(payload, indent=2, ensure_ascii=False),
+                        encoding="utf-8",
+                    )
+                    debug_path_text = f" debug_payload={self.debug_payload_path}"
+                details = payload.get("details")
+                detail_text = ""
+                if details:
+                    detail_text = f" details={json.dumps(details, ensure_ascii=False)[:2000]}"
                 raise RuntimeError(
-                    f"variational browser order failed for {symbol}: {payload.get('error', 'unknown error')}"
+                    f"variational browser order failed for {symbol}: "
+                    f"{payload.get('error', 'unknown error')}{debug_path_text}{detail_text}"
                 )
             return payload

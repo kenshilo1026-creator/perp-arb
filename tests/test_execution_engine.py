@@ -19,6 +19,7 @@ from hydra_basis.execution_engine.signal_store import load_best_signal_for_symbo
 from hydra_basis.execution_engine.state_machine import ExecutionStateMachine
 from hydra_basis.execution_engine.variational_browser import VariationalBrowserExecutionAdapter, build_place_order_payload
 from hydra_basis.execution_engine.lighter_adapter import (
+    build_lighter_limit_order_request,
     build_lighter_market_order_request,
     compute_base_quantity_from_clip_usd,
     LighterExecutionAdapter,
@@ -27,6 +28,7 @@ from hydra_basis.execution_engine.lighter_live import build_lighter_client_facto
 from hydra_basis.alerts import build_ranked_alert_digest
 from hydra_basis.execution_engine.executor import execute_single_clip
 from hydra_basis.execution_engine.executor import execution_sides_for_signal
+from hydra_basis.execution_engine.mexc_spot_adapter import MexcSpotExecutionAdapter
 from scripts.run_execution_preview import compute_batch_count
 from scripts.run_execution_once import (
     build_adapter_for_venue,
@@ -358,11 +360,62 @@ class VariationalBrowserAdapterTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(RuntimeError):
             await adapter.place_limit_order(symbol="BTC", side="BUY", amount="50")
 
+    async def test_failed_order_writes_debug_payload_when_path_is_configured(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            debug_path = Path(temp_dir) / "variational_order_debug.json"
+
+            async def failing_handler(request: web.Request) -> web.WebSocketResponse:
+                ws = web.WebSocketResponse()
+                await ws.prepare(request)
+                async for msg in ws:
+                    if msg.type != web.WSMsgType.TEXT:
+                        continue
+                    payload = json.loads(msg.data)
+                    if payload["type"] == "REGISTER":
+                        await ws.send_json({"type": "REGISTER_ACK", "ok": True, "role": payload["role"]})
+                    elif payload["type"] == "PLACE_ORDER":
+                        await ws.send_json(
+                            {
+                                "type": "ORDER_RESULT",
+                                "requestId": payload["requestId"],
+                                "ok": False,
+                                "error": "browser reject",
+                                "details": {"buttons": [{"text": "Order History"}]},
+                            }
+                        )
+                return ws
+
+            await self._runner.cleanup()
+            self._app = web.Application()
+            self._app.router.add_get("/", failing_handler)
+            self._runner = web.AppRunner(self._app)
+            await self._runner.setup()
+            self._site = web.TCPSite(self._runner, "127.0.0.1", 0)
+            await self._site.start()
+            self._port = self._site._server.sockets[0].getsockname()[1]
+            self._url = f"http://127.0.0.1:{self._port}/"
+
+            adapter = VariationalBrowserExecutionAdapter(
+                broker_url=self._url,
+                client_role="strategy",
+                debug_payload_path=debug_path,
+            )
+
+            with self.assertRaises(RuntimeError):
+                await adapter.place_limit_order(symbol="BTC", side="BUY", amount="50")
+
+            payload = json.loads(debug_path.read_text(encoding="utf-8"))
+            self.assertEqual(payload["error"], "browser reject")
+            self.assertEqual(payload["details"]["buttons"][0]["text"], "Order History")
+
     def test_build_place_order_payload_uses_expected_command_shape(self) -> None:
         payload = build_place_order_payload(
             request_id="req-1",
+            symbol="BTC",
             side="BUY",
             amount="50",
+            order_type="limit",
+            price="61000",
             market="BTC-PERP",
             account="main",
             timeout_ms=5000,
@@ -370,6 +423,9 @@ class VariationalBrowserAdapterTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(payload["type"], "PLACE_ORDER")
         self.assertEqual(payload["requestId"], "req-1")
+        self.assertEqual(payload["symbol"], "BTC")
+        self.assertEqual(payload["orderType"], "LIMIT")
+        self.assertEqual(payload["price"], "61000")
         self.assertEqual(payload["market"], "BTC-PERP")
 
 
@@ -399,6 +455,23 @@ class LighterExecutionAdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(request["base_amount"], 10000)
         self.assertEqual(request["price"], 10201)
         self.assertFalse(request["is_ask"])
+
+    async def test_build_lighter_limit_order_request_uses_explicit_passive_price(self) -> None:
+        request = build_lighter_limit_order_request(
+            side="sell",
+            quantity=Decimal("10"),
+            price=Decimal("100.25"),
+            base_amount_multiplier=1000,
+            price_multiplier=100,
+            market_index=7,
+            client_order_index=123,
+        )
+
+        self.assertEqual(request["market_index"], 7)
+        self.assertEqual(request["client_order_index"], 123)
+        self.assertEqual(request["base_amount"], 10000)
+        self.assertEqual(request["price"], 10025)
+        self.assertTrue(request["is_ask"])
 
     async def test_build_lighter_market_order_request_rejects_below_min_base_or_quote(self) -> None:
         with self.assertRaisesRegex(RuntimeError, "min_base_amount=0.005"):
@@ -441,6 +514,40 @@ class LighterExecutionAdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(call["base_amount"], 10000)
         self.assertEqual(call["price"], 10201)
         self.assertFalse(call["is_ask"])
+
+    async def test_place_limit_order_calls_create_order_with_explicit_price(self) -> None:
+        class FakeSignerClient:
+            ORDER_TYPE_LIMIT = "limit"
+            ORDER_TIME_IN_FORCE_GOOD_TILL_TIME = "gtt"
+
+            def __init__(self) -> None:
+                self.calls = []
+
+            async def create_order(self, **kwargs):
+                self.calls.append(kwargs)
+                return None, "tx-hash", None
+
+        adapter = LighterExecutionAdapter(
+            signer_client_factory=lambda: FakeSignerClient(),
+            market_config_loader=lambda symbol: (7, 1000, 100),
+            orderbook_loader=lambda symbol: {"bid": 99.0, "ask": 101.0, "ts_ms": 1},
+        )
+
+        result = await adapter.place_limit_order(
+            symbol="BTC",
+            side="SELL",
+            amount="10",
+            clip_usd=1000.0,
+            price="100.25",
+        )
+
+        self.assertTrue(result["ok"])
+        call = adapter.client.calls[0]
+        self.assertEqual(call["market_index"], 7)
+        self.assertEqual(call["base_amount"], 10000)
+        self.assertEqual(call["price"], 10025)
+        self.assertTrue(call["is_ask"])
+        self.assertFalse(call["reduce_only"])
 
     async def test_place_market_order_accepts_async_market_and_orderbook_loaders(self) -> None:
         class FakeSignerClient:
@@ -505,6 +612,35 @@ class LighterLiveFactoryTests(unittest.TestCase):
 
 
 class SingleClipExecutorTests(unittest.IsolatedAsyncioTestCase):
+    async def test_execute_single_clip_passes_maker_price_when_provided(self) -> None:
+        maker_kwargs: dict[str, object] = {}
+
+        class MakerAdapter:
+            async def place_limit_order(self, **kwargs):
+                maker_kwargs.update(kwargs)
+                return {"ok": True, "orderId": "maker-1"}
+
+        class TakerAdapter:
+            async def place_market_order(self, **kwargs):
+                return {"ok": True, "orderId": "taker-1"}
+
+        await execute_single_clip(
+            symbol="BTC",
+            clip_usd=1000.0,
+            quantity=Decimal("0.01"),
+            maker_venue="mexc_spot",
+            taker_venue="aster",
+            short_venue="mexc_spot",
+            long_venue="aster",
+            maker_adapter=MakerAdapter(),
+            taker_adapter=TakerAdapter(),
+            max_hedge_retries=1,
+            state_machine=ExecutionStateMachine(),
+            maker_price="60000",
+        )
+
+        self.assertEqual(maker_kwargs["price"], "60000")
+
     async def test_execute_single_clip_retries_hedge_once_then_completes(self) -> None:
         calls: list[tuple[str, str]] = []
 
@@ -580,6 +716,52 @@ class SingleClipExecutorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(taker_side, "BUY")
 
 
+class MexcSpotExecutionAdapterTests(unittest.IsolatedAsyncioTestCase):
+    async def test_place_market_order_posts_spot_market_quantity(self) -> None:
+        calls: list[dict] = []
+
+        class Adapter(MexcSpotExecutionAdapter):
+            async def _post_order(self, params: dict) -> dict:
+                calls.append(dict(params))
+                return {"orderId": "spot-1"}
+
+        result = await Adapter(api_key="k", api_secret="s").place_market_order(
+            symbol="eth",
+            side="BUY",
+            amount="0.1",
+            clip_usd=0.0,
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(calls[0]["symbol"], "ETHUSDT")
+        self.assertEqual(calls[0]["side"], "BUY")
+        self.assertEqual(calls[0]["type"], "MARKET")
+        self.assertEqual(calls[0]["quantity"], "0.1")
+
+    async def test_place_limit_order_posts_spot_limit_price(self) -> None:
+        calls: list[dict] = []
+
+        class Adapter(MexcSpotExecutionAdapter):
+            async def _post_order(self, params: dict) -> dict:
+                calls.append(dict(params))
+                return {"orderId": "spot-2"}
+
+        result = await Adapter(api_key="k", api_secret="s").place_limit_order(
+            symbol="eth",
+            side="SELL",
+            amount="0.1",
+            clip_usd=0.0,
+            price="3000.5",
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(calls[0]["symbol"], "ETHUSDT")
+        self.assertEqual(calls[0]["side"], "SELL")
+        self.assertEqual(calls[0]["type"], "LIMIT")
+        self.assertEqual(calls[0]["price"], "3000.5")
+        self.assertEqual(calls[0]["timeInForce"], "GTC")
+
+
 class ExecutionPreviewCliTests(unittest.TestCase):
     def test_compute_batch_count_rounds_up(self) -> None:
         self.assertEqual(compute_batch_count(10000.0, 500.0), 20)
@@ -611,6 +793,12 @@ class ExecutionPreviewCliTests(unittest.TestCase):
         aster_cls.assert_called_once_with(leverage=3)
         hyper_cls.assert_called_once_with(leverage=4)
         mexc_cls.assert_called_once_with(leverage=5)
+
+    def test_run_execution_once_passes_broker_url_to_variational_adapter(self) -> None:
+        with mock.patch("scripts.run_execution_once.VariationalBrowserExecutionAdapter") as adapter_cls:
+            build_adapter_for_venue("variational", broker_url="ws://127.0.0.1:9999")
+
+        adapter_cls.assert_called_once_with(broker_url="ws://127.0.0.1:9999")
 
 
 if __name__ == "__main__":

@@ -23,6 +23,7 @@ async def execute_single_clip(
     taker_adapter,
     max_hedge_retries: int,
     state_machine,
+    maker_price: str | None = None,
 ) -> dict[str, object]:
     maker_side, taker_side = execution_sides_for_signal(
         maker_venue=maker_venue,
@@ -33,12 +34,15 @@ async def execute_single_clip(
     state_machine.to_preview_ready()
     state_machine.to_awaiting_confirm()
     state_machine.to_placing_maker_leg()
-    maker_result = await maker_adapter.place_limit_order(
-        symbol=symbol,
-        side=maker_side,
-        amount=str(quantity),
-        clip_usd=clip_usd,
-    )
+    maker_kwargs = {
+        "symbol": symbol,
+        "side": maker_side,
+        "amount": str(quantity),
+        "clip_usd": clip_usd,
+    }
+    if maker_price is not None:
+        maker_kwargs["price"] = maker_price
+    maker_result = await maker_adapter.place_limit_order(**maker_kwargs)
     if not maker_result.get("ok", False):
         raise RuntimeError(f"maker order failed on {maker_venue}")
 

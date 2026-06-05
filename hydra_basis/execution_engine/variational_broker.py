@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import uuid
 from datetime import datetime, timezone
@@ -18,6 +19,7 @@ class VariationalCommandBroker:
         self._roles: dict[Any, str] = {}
         self._extension = None
         self._pending_requests: dict[str, Any] = {}
+        self._extension_ready = asyncio.Event()
 
     async def on_connect(self, websocket) -> None:
         self._roles[websocket] = "unknown"
@@ -26,6 +28,7 @@ class VariationalCommandBroker:
         role = self._roles.pop(websocket, "unknown")
         if websocket is self._extension:
             self._extension = None
+            self._extension_ready.clear()
             failures = list(self._pending_requests.items())
             self._pending_requests.clear()
             for request_id, requester in failures:
@@ -79,6 +82,7 @@ class VariationalCommandBroker:
         self._roles[websocket] = role
         if role == "extension":
             self._extension = websocket
+            self._extension_ready.set()
         await self._send(
             websocket,
             {
@@ -90,6 +94,12 @@ class VariationalCommandBroker:
         )
         if not self.quiet:
             print(f"[VARIATIONAL_BROKER] registered role={role}", flush=True)
+
+    async def wait_for_extension(self, *, timeout_seconds: float = 30.0) -> bool:
+        if self._extension is not None:
+            return True
+        await asyncio.wait_for(self._extension_ready.wait(), timeout=timeout_seconds)
+        return self._extension is not None
 
     async def _handle_place_order(self, websocket, payload: dict[str, Any]) -> None:
         request_id = str(payload.get("requestId") or uuid.uuid4())
@@ -119,8 +129,11 @@ class VariationalCommandBroker:
             {
                 "type": "PLACE_ORDER",
                 "requestId": request_id,
+                "symbol": payload.get("symbol"),
                 "side": side,
                 "amount": amount,
+                "orderType": payload.get("orderType"),
+                "price": payload.get("price"),
                 "market": payload.get("market"),
                 "account": payload.get("account"),
                 "timeoutMs": payload.get("timeoutMs"),
@@ -198,3 +211,6 @@ class VariationalCommandBrokerServer:
             return
         self._server.close()
         await self._server.wait_closed()
+
+    async def wait_for_extension(self, *, timeout_seconds: float = 30.0) -> bool:
+        return await self.broker.wait_for_extension(timeout_seconds=timeout_seconds)

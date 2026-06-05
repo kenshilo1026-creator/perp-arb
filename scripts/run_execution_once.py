@@ -24,6 +24,7 @@ from hydra_basis.execution_engine.lighter_live import (
 )
 from hydra_basis.execution_engine.runtime import prepare_execution_preview
 from hydra_basis.execution_engine.state_machine import ExecutionStateMachine
+from hydra_basis.execution_engine.variational_broker import VariationalCommandBrokerServer
 from hydra_basis.execution_engine.variational_browser import VariationalBrowserExecutionAdapter
 from hydra_basis.formatting import fmt_pct
 from hydra_basis.risk_management.recording import record_successful_execution
@@ -66,7 +67,12 @@ def prompt_int(label: str) -> int:
     return number
 
 
-def build_adapter_for_venue(venue: str, *, leverage: int = 1):
+VARIATIONAL_BROKER_HOST = "127.0.0.1"
+VARIATIONAL_BROKER_PORT = 8768
+VARIATIONAL_EXTENSION_TIMEOUT_SECONDS = 30.0
+
+
+def build_adapter_for_venue(venue: str, *, leverage: int = 1, broker_url: str | None = None):
     v = venue.lower()
     if v == "lighter":
         return LighterExecutionAdapter(
@@ -75,6 +81,8 @@ def build_adapter_for_venue(venue: str, *, leverage: int = 1):
             orderbook_loader=lambda symbol: fetch_lighter_orderbook_live(symbol),
         )
     if v == "variational":
+        if broker_url is not None:
+            return VariationalBrowserExecutionAdapter(broker_url=broker_url)
         return VariationalBrowserExecutionAdapter()
     if v == "aster":
         return AsterExecutionAdapter(leverage=leverage)
@@ -123,22 +131,41 @@ async def run_execution_once() -> None:
     taker_book = short_book if preview.taker_venue == signal.short_venue else long_book
     quantity = compute_base_quantity_from_clip_usd(clip_usd=clip_usd, orderbook=taker_book)
 
-    maker_adapter = build_adapter_for_venue(preview.maker_venue, leverage=leverage)
-    taker_adapter = build_adapter_for_venue(preview.taker_venue, leverage=leverage)
+    async def execute_with_adapters(*, broker_url: str | None = None) -> dict[str, object]:
+        maker_adapter = build_adapter_for_venue(preview.maker_venue, leverage=leverage, broker_url=broker_url)
+        taker_adapter = build_adapter_for_venue(preview.taker_venue, leverage=leverage, broker_url=broker_url)
+        return await execute_single_clip(
+            symbol=signal.symbol,
+            clip_usd=clip_usd,
+            quantity=quantity,
+            maker_venue=preview.maker_venue,
+            taker_venue=preview.taker_venue,
+            short_venue=signal.short_venue,
+            long_venue=signal.long_venue,
+            maker_adapter=maker_adapter,
+            taker_adapter=taker_adapter,
+            max_hedge_retries=2,
+            state_machine=ExecutionStateMachine(),
+        )
 
-    result = await execute_single_clip(
-        symbol=signal.symbol,
-        clip_usd=clip_usd,
-        quantity=quantity,
-        maker_venue=preview.maker_venue,
-        taker_venue=preview.taker_venue,
-        short_venue=signal.short_venue,
-        long_venue=signal.long_venue,
-        maker_adapter=maker_adapter,
-        taker_adapter=taker_adapter,
-        max_hedge_retries=2,
-        state_machine=ExecutionStateMachine(),
-    )
+    if "variational" in {preview.maker_venue, preview.taker_venue}:
+        print(
+            "starting embedded Variational broker. "
+            "Open Variational page with the Chrome extension connected to "
+            f"ws://{VARIATIONAL_BROKER_HOST}:{VARIATIONAL_BROKER_PORT}"
+        )
+        async with VariationalCommandBrokerServer(
+            host=VARIATIONAL_BROKER_HOST,
+            port=VARIATIONAL_BROKER_PORT,
+        ) as server:
+            print(
+                "waiting for Variational extension command client "
+                f"timeout={VARIATIONAL_EXTENSION_TIMEOUT_SECONDS:.1f}s"
+            )
+            await server.wait_for_extension(timeout_seconds=VARIATIONAL_EXTENSION_TIMEOUT_SECONDS)
+            result = await execute_with_adapters(broker_url=server.ws_url)
+    else:
+        result = await execute_with_adapters()
     print("execution result")
     print(result)
     strategy_id = record_successful_execution(

@@ -28,6 +28,7 @@ from hydra_basis.execution_engine.lighter_live import build_lighter_client_facto
 from hydra_basis.alerts import build_ranked_alert_digest
 from hydra_basis.execution_engine.executor import execute_single_clip
 from hydra_basis.execution_engine.executor import execution_sides_for_signal
+from hydra_basis.execution_engine import mexc_spot_adapter
 from hydra_basis.execution_engine.mexc_spot_adapter import MexcSpotExecutionAdapter
 from scripts.run_execution_preview import compute_batch_count
 from scripts.run_execution_once import (
@@ -717,6 +718,73 @@ class SingleClipExecutorTests(unittest.IsolatedAsyncioTestCase):
 
 
 class MexcSpotExecutionAdapterTests(unittest.IsolatedAsyncioTestCase):
+    async def test_signed_spot_order_request_uses_query_params_with_json_content_type(self) -> None:
+        post_calls: list[dict] = []
+
+        class Response:
+            status = 200
+
+            async def __aenter__(self) -> "Response":
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb) -> None:
+                return None
+
+            async def json(self) -> dict:
+                return {"orderId": "spot-1"}
+
+        class Session:
+            async def __aenter__(self) -> "Session":
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb) -> None:
+                return None
+
+            def post(self, url: str, **kwargs) -> Response:
+                post_calls.append({"url": url, **kwargs})
+                return Response()
+
+        class Adapter(MexcSpotExecutionAdapter):
+            def _timestamp_ms(self) -> int:
+                return 1234567890
+
+        original_session = mexc_spot_adapter.aiohttp.ClientSession
+        mexc_spot_adapter.aiohttp.ClientSession = Session
+        self.addCleanup(setattr, mexc_spot_adapter.aiohttp, "ClientSession", original_session)
+
+        adapter = Adapter(api_key="k", api_secret="s")
+        await adapter._post_order(
+            {
+                "symbol": "ETHUSDT",
+                "side": "BUY",
+                "type": "LIMIT",
+                "quantity": "0.1",
+                "price": "3000",
+            }
+        )
+
+        self.assertEqual(
+            post_calls[0]["headers"],
+            {
+                "X-MEXC-APIKEY": "k",
+                "Content-Type": "application/json",
+            },
+        )
+        self.assertNotIn("data", post_calls[0])
+        self.assertEqual(post_calls[0]["params"]["timestamp"], 1234567890)
+        self.assertIn("signature", post_calls[0]["params"])
+
+    async def test_place_order_rejects_missing_spot_credentials_before_http(self) -> None:
+        adapter = MexcSpotExecutionAdapter(api_key="", api_secret="")
+
+        with self.assertRaisesRegex(RuntimeError, "MEXC spot API credentials missing"):
+            await adapter.place_market_order(
+                symbol="ETH",
+                side="BUY",
+                amount="0.1",
+                clip_usd=0.0,
+            )
+
     async def test_place_market_order_posts_spot_market_quantity(self) -> None:
         calls: list[dict] = []
 

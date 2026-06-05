@@ -18,8 +18,16 @@ class MexcSpotExecutionAdapter:
         api_key: str | None = None,
         api_secret: str | None = None,
     ) -> None:
-        self.api_key = api_key or os.getenv("MEXC_SPOT_API_KEY", "") or os.getenv("MEXC_API_KEY", "")
-        self.api_secret = api_secret or os.getenv("MEXC_SPOT_API_SECRET", "") or os.getenv("MEXC_API_SECRET", "")
+        self.api_key = (
+            api_key
+            if api_key is not None
+            else os.getenv("MEXC_SPOT_API_KEY", "") or os.getenv("MEXC_API_KEY", "")
+        )
+        self.api_secret = (
+            api_secret
+            if api_secret is not None
+            else os.getenv("MEXC_SPOT_API_SECRET", "") or os.getenv("MEXC_API_SECRET", "")
+        )
 
     def _timestamp_ms(self) -> int:
         return int(time.time() * 1000)
@@ -31,18 +39,39 @@ class MexcSpotExecutionAdapter:
             hashlib.sha256,
         ).hexdigest()
 
-    async def _post_order(self, params: dict) -> dict:
-        params["timestamp"] = self._timestamp_ms()
-        query = urlencode(params)
+    def _ensure_credentials(self) -> None:
+        if self.api_key and self.api_secret:
+            return
+        raise RuntimeError(
+            "MEXC spot API credentials missing: set MEXC_SPOT_API_KEY/"
+            "MEXC_SPOT_API_SECRET or MEXC_API_KEY/MEXC_API_SECRET in .env"
+        )
+
+    def _signed_order_params(self, params: dict) -> dict:
+        self._ensure_credentials()
+        signed_params = dict(params)
+        signed_params["timestamp"] = self._timestamp_ms()
+        query = urlencode(signed_params)
         signature = self._sign(query)
-        headers = {
+        signed_params["signature"] = signature
+        return signed_params
+
+    def _order_headers(self) -> dict[str, str]:
+        self._ensure_credentials()
+        return {
             "X-MEXC-APIKEY": self.api_key,
-            "Content-Type": "application/x-www-form-urlencoded",
+            "Content-Type": "application/json",
+        }
+
+    async def _post_order(self, params: dict) -> dict:
+        signed_params = self._signed_order_params(params)
+        headers = {
+            **self._order_headers(),
         }
         async with aiohttp.ClientSession() as session:
             async with session.post(
                 f"{self.BASE_URL}/api/v3/order",
-                data=f"{query}&signature={signature}",
+                params=signed_params,
                 headers=headers,
             ) as resp:
                 data = await resp.json()

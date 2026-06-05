@@ -71,6 +71,52 @@ def build_lighter_market_order_request(
     }
 
 
+def build_lighter_limit_order_request(
+    *,
+    side: str,
+    quantity: Decimal,
+    price: Decimal,
+    base_amount_multiplier: int,
+    price_multiplier: int,
+    market_index: int,
+    client_order_index: int | None = None,
+    min_base_amount: Decimal | None = None,
+    min_quote_amount: Decimal | None = None,
+) -> dict[str, int | bool]:
+    side_normalized = side.strip().lower()
+    if side_normalized not in {"buy", "sell"}:
+        raise RuntimeError(f"unsupported lighter side: {side}")
+    if price <= 0:
+        raise RuntimeError("lighter limit price must be positive")
+
+    notional = quantity * price
+    if min_base_amount is not None and quantity < min_base_amount:
+        raise RuntimeError(
+            f"lighter order quantity={quantity} below min_base_amount={min_base_amount}"
+        )
+    if min_quote_amount is not None and notional < min_quote_amount:
+        raise RuntimeError(
+            f"lighter order notional={notional:.6f} below min_quote_amount={min_quote_amount}"
+        )
+
+    base_amount = int(
+        (quantity * Decimal(str(base_amount_multiplier))).to_integral_value(rounding=ROUND_FLOOR)
+    )
+    price_i = int((price * Decimal(str(price_multiplier))).to_integral_value(rounding=ROUND_FLOOR))
+    if base_amount <= 0:
+        raise RuntimeError("lighter base amount rounds to zero")
+    if price_i <= 0:
+        raise RuntimeError("lighter price rounds to zero")
+
+    return {
+        "market_index": market_index,
+        "client_order_index": client_order_index if client_order_index is not None else int(time.time() * 1000),
+        "base_amount": base_amount,
+        "price": price_i,
+        "is_ask": side_normalized == "sell",
+    }
+
+
 class LighterExecutionAdapter:
     def __init__(
         self,
@@ -173,11 +219,64 @@ class LighterExecutionAdapter:
             "client_order_index": request["client_order_index"],
         }
 
+    async def _submit_limit_order(
+        self,
+        *,
+        symbol: str,
+        side: str,
+        amount: str,
+        price: str,
+        reduce_only: bool,
+    ) -> dict[str, object]:
+        quantity = Decimal(str(amount))
+        limit_price = Decimal(str(price))
+        market_config = self._normalize_market_config(await self._load_market_config(symbol))
+        request = build_lighter_limit_order_request(
+            side=side,
+            quantity=quantity,
+            price=limit_price,
+            base_amount_multiplier=market_config["base_amount_multiplier"],
+            price_multiplier=market_config["price_multiplier"],
+            market_index=market_config["market_index"],
+            min_base_amount=market_config.get("min_base_amount"),
+            min_quote_amount=market_config.get("min_quote_amount"),
+        )
+        client = self._get_client()
+        _tx, tx_hash, error = await client.create_order(
+            market_index=request["market_index"],
+            client_order_index=request["client_order_index"],
+            base_amount=request["base_amount"],
+            price=request["price"],
+            is_ask=request["is_ask"],
+            order_type=client.ORDER_TYPE_LIMIT,
+            time_in_force=client.ORDER_TIME_IN_FORCE_GOOD_TILL_TIME,
+            reduce_only=reduce_only,
+            trigger_price=0,
+        )
+        if error is not None:
+            raise RuntimeError(f"lighter create_order failed: {error}")
+        return {
+            "ok": True,
+            "tx_hash": tx_hash,
+            "client_order_index": request["client_order_index"],
+        }
+
     async def place_market_order(self, *, symbol: str, side: str, amount: str, clip_usd: float) -> dict[str, object]:
         return await self._submit_market_order(
             symbol=symbol,
             side=side,
             amount=amount,
+            reduce_only=False,
+        )
+
+    async def place_limit_order(
+        self, *, symbol: str, side: str, amount: str, clip_usd: float, price: str
+    ) -> dict[str, object]:
+        return await self._submit_limit_order(
+            symbol=symbol,
+            side=side,
+            amount=amount,
+            price=price,
             reduce_only=False,
         )
 

@@ -34,6 +34,27 @@ async def fetch_orderbook_snapshot(
     raise RuntimeError(f"unsupported preview venue={venue}")
 
 
+async def fetch_mexc_spot_orderbook(session: aiohttp.ClientSession, symbol: str) -> dict[str, float | int]:
+    spot_symbol = symbol.strip().upper()
+    if not spot_symbol.endswith("USDT"):
+        spot_symbol = f"{spot_symbol}USDT"
+    data = await fetch_json(
+        session,
+        "GET",
+        "https://api.mexc.com/api/v3/depth",
+        params={"symbol": spot_symbol, "limit": 5},
+    )
+    bids = data.get("bids") or []
+    asks = data.get("asks") or []
+    if not bids or not asks:
+        raise RuntimeError(f"missing mexc spot orderbook for {symbol}")
+    return {
+        "bid": float(bids[0][0]),
+        "ask": float(asks[0][0]),
+        "ts_ms": 0,
+    }
+
+
 async def fetch_hyperliquid_orderbook(session: aiohttp.ClientSession, symbol: str) -> dict[str, float | int]:
     universe = await fetch_hyperliquid_universe(session)
     if symbol.upper() not in universe:

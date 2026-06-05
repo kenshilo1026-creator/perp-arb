@@ -50,6 +50,40 @@ class MexcSpotExecutionAdapter:
                     raise RuntimeError(f"mexc spot order {resp.status}: {data}")
                 return data
 
+    def _spot_symbol(self, symbol: str) -> str:
+        normalized = symbol.strip().upper()
+        if normalized.endswith("USDT"):
+            return normalized
+        return f"{normalized}USDT"
+
+    async def place_market_order(
+        self, *, symbol: str, side: str, amount: str, clip_usd: float
+    ) -> dict:
+        data = await self._post_order(
+            {
+                "symbol": self._spot_symbol(symbol),
+                "side": side.strip().upper(),
+                "type": "MARKET",
+                "quantity": amount,
+            }
+        )
+        return {"ok": True, "order_id": data.get("orderId"), "raw": data}
+
+    async def place_limit_order(
+        self, *, symbol: str, side: str, amount: str, clip_usd: float, price: str
+    ) -> dict:
+        data = await self._post_order(
+            {
+                "symbol": self._spot_symbol(symbol),
+                "side": side.strip().upper(),
+                "type": "LIMIT",
+                "timeInForce": "GTC",
+                "quantity": amount,
+                "price": price,
+            }
+        )
+        return {"ok": True, "order_id": data.get("orderId"), "raw": data}
+
     async def close_position(
         self,
         *,
@@ -66,7 +100,7 @@ class MexcSpotExecutionAdapter:
             raise RuntimeError("mexc spot emergency close only supports SELL for long spot positions")
         data = await self._post_order(
             {
-                "symbol": f"{symbol.strip().upper()}USDT",
+                "symbol": self._spot_symbol(symbol),
                 "side": "SELL",
                 "type": "MARKET",
                 "quantity": quantity,

@@ -2,6 +2,10 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import inspect
+from decimal import Decimal
+
+import aiohttp
 
 try:
     from _bootstrap import ensure_project_root_on_path
@@ -19,11 +23,13 @@ from hydra_basis.execution_engine.lighter_live import (
     fetch_lighter_orderbook_live,
 )
 from hydra_basis.execution_engine.mexc_adapter import MexcExecutionAdapter
+from hydra_basis.execution_engine.mexc_spot_adapter import MexcSpotExecutionAdapter
+from hydra_basis.execution_engine.market_data import fetch_mexc_spot_orderbook, fetch_orderbook_snapshot
 from hydra_basis.execution_engine.variational_browser import VariationalBrowserExecutionAdapter
 from hydra_basis.execution_engine.variational_broker import VariationalCommandBrokerServer
 
 
-SUPPORTED_VENUES = {"aster", "hyperliquid", "lighter", "mexc", "variational"}
+SUPPORTED_VENUES = {"aster", "hyperliquid", "lighter", "mexc", "mexc_spot", "variational"}
 SUPPORTED_ORDER_TYPES = {"market", "limit"}
 SUPPORTED_SIDES = {"BUY", "SELL"}
 LIVE_CONFIRMATION_PHRASE = "PLACE LIVE ORDER"
@@ -76,6 +82,62 @@ def format_cli_error(error: Exception) -> str:
     return f"下單失敗: {error}"
 
 
+def decimal_to_plain(value: Decimal | float | str) -> str:
+    decimal_value = value if isinstance(value, Decimal) else Decimal(str(value))
+    plain = format(decimal_value.normalize(), "f")
+    if "." in plain:
+        plain = plain.rstrip("0").rstrip(".")
+    return plain or "0"
+
+
+def limit_price_from_orderbook(orderbook: dict[str, float | int], side: str) -> str:
+    normalized_side = side.strip().upper()
+    if normalized_side == "BUY":
+        return decimal_to_plain(orderbook["bid"])
+    if normalized_side == "SELL":
+        return decimal_to_plain(orderbook["ask"])
+    raise RuntimeError(f"unsupported side: {side}")
+
+
+async def load_adapter_orderbook(adapter, symbol: str) -> dict[str, float | int]:
+    loader = getattr(adapter, "get_orderbook", None)
+    if loader is not None:
+        result = loader(symbol)
+        if inspect.isawaitable(result):
+            return await result
+        return result
+    loader = getattr(adapter, "_load_orderbook", None)
+    if loader is not None:
+        result = loader(symbol)
+        if inspect.isawaitable(result):
+            return await result
+        return result
+    raise RuntimeError("limit order without --price requires adapter orderbook support")
+
+
+async def load_default_limit_orderbook(
+    *,
+    venue: str,
+    symbol: str,
+    clip_usd: float,
+    adapter=None,
+) -> dict[str, float | int]:
+    if adapter is not None:
+        try:
+            return await load_adapter_orderbook(adapter, symbol)
+        except RuntimeError:
+            pass
+    async with aiohttp.ClientSession(headers={"User-Agent": "funding-arb-single-order/0.1"}) as session:
+        if venue == "mexc_spot":
+            return await fetch_mexc_spot_orderbook(session, symbol)
+        return await fetch_orderbook_snapshot(
+            session,
+            venue=venue,
+            symbol=symbol,
+            clip_usd=clip_usd,
+        )
+
+
 def build_adapter_for_venue(venue: str):
     if venue == "aster":
         return AsterExecutionAdapter()
@@ -87,6 +149,8 @@ def build_adapter_for_venue(venue: str):
         )
     if venue == "mexc":
         return MexcExecutionAdapter()
+    if venue == "mexc_spot":
+        return MexcSpotExecutionAdapter()
     if venue == "variational":
         return VariationalBrowserExecutionAdapter()
     if venue == "hyperliquid":
@@ -119,21 +183,28 @@ async def execute_single_order(
         quantity=quantity,
         order_type=order_type,
     )
-    if normalized["order_type"] == "limit" and price is None:
-        raise RuntimeError("limit order requires --price")
+    adapter = adapter_override or build_adapter_for_venue(normalized["venue"]) if live else adapter_override
+    resolved_price = price
+    if normalized["order_type"] == "limit" and resolved_price is None and normalized["venue"] != "variational":
+        orderbook = await load_default_limit_orderbook(
+            venue=normalized["venue"],
+            symbol=normalized["symbol"],
+            clip_usd=clip_usd,
+            adapter=adapter,
+        )
+        resolved_price = limit_price_from_orderbook(orderbook, normalized["side"])
     dry_run_payload = {
         "venue": normalized["venue"],
         "symbol": normalized["symbol"],
         "side": normalized["side"],
         "quantity": normalized["quantity"],
         "order_type": normalized["order_type"],
-        "price": price,
+        "price": resolved_price,
         "live": live,
     }
     if not live:
         return {"ok": True, "dry_run": True, "request": dry_run_payload}
 
-    adapter = adapter_override or build_adapter_for_venue(normalized["venue"])
     try:
         method_name = single_order_method_name(normalized["order_type"])
         method = getattr(adapter, method_name)
@@ -144,7 +215,7 @@ async def execute_single_order(
             "clip_usd": clip_usd,
         }
         if normalized["order_type"] == "limit":
-            kwargs["price"] = price
+            kwargs["price"] = resolved_price
         result = await method(**kwargs)
         return {"ok": True, "dry_run": False, "request": dry_run_payload, "result": result}
     finally:
@@ -166,6 +237,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--clip-usd", type=float, default=0.0)
     parser.add_argument("--variational-broker-host", default="127.0.0.1")
     parser.add_argument("--variational-broker-port", type=int, default=8768)
+    parser.add_argument("--variational-extension-timeout", type=float, default=30.0)
     parser.add_argument("--live", action="store_true", help="Actually place the order.")
     return parser.parse_args()
 
@@ -205,6 +277,11 @@ async def main_async() -> None:
                 host=args.variational_broker_host,
                 port=args.variational_broker_port,
             ) as server:
+                print(
+                    "waiting for Variational extension command client "
+                    f"timeout={args.variational_extension_timeout:.1f}s"
+                )
+                await server.wait_for_extension(timeout_seconds=args.variational_extension_timeout)
                 result = await execute_single_order(
                     venue=args.venue,
                     symbol=args.symbol,

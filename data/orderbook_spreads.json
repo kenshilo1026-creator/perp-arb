@@ -1311,10 +1311,10 @@
     "ts_ms": 1780387450950
   },
   "lighter::DELL": {
-    "bid": 408.58,
-    "ask": 408.63,
-    "spread_pct": 0.00012236756769988465,
-    "ts_ms": 1780541492698
+    "bid": 411.46,
+    "ask": 411.86,
+    "spread_pct": 0.0009716756546665553,
+    "ts_ms": 1780626588027
   },
   "lighter::DIA": {
     "bid": 510.52,
@@ -1482,10 +1482,10 @@
     "ts_ms": 1780387474168
   },
   "lighter::IBM": {
-    "bid": 294.16,
-    "ask": 294.51,
-    "spread_pct": 0.0011891212394039643,
-    "ts_ms": 1780541493945
+    "bid": 296.9,
+    "ask": 297.17,
+    "spread_pct": 0.0009089837897892124,
+    "ts_ms": 1780626588807
   },
   "lighter::ICP": {
     "bid": 2.9825,
@@ -4149,10 +4149,10 @@
     "ts_ms": 1780387615750
   },
   "aster::QNTX": {
-    "bid": 96.04,
-    "ask": 96.27,
-    "spread_pct": 0.0023919712963443376,
-    "ts_ms": 1780541515900
+    "bid": 60.04,
+    "ask": 60.29,
+    "spread_pct": 0.004155239757333998,
+    "ts_ms": 1780626635000
   },
   "aster::QQQ": {
     "bid": 742.78,
@@ -4434,10 +4434,10 @@
     "ts_ms": 1780387620450
   },
   "aster::SLX": {
-    "bid": 0.23755,
-    "ask": 0.23778,
-    "spread_pct": 0.0009677487219404633,
-    "ts_ms": 1780541517250
+    "bid": 0.20692,
+    "ask": 0.20716,
+    "spread_pct": 0.001159196290571957,
+    "ts_ms": 1780626635050
   },
   "aster::SMSN": {
     "status": "no_orderbook"
@@ -5145,27 +5145,27 @@
     "ts_ms": 0
   },
   "variational::1000000MOG": {
-    "bid": 0.1152,
-    "ask": 0.1157,
-    "spread_pct": 0.004330879168471203,
+    "bid": 0.112,
+    "ask": 0.1126,
+    "spread_pct": 0.0053428317008014535,
     "ts_ms": 0
   },
   "variational::1000BONK": {
-    "bid": 0.004821,
-    "ask": 0.004831,
-    "spread_pct": 0.0020721094073768045,
+    "bid": 0.004642,
+    "ask": 0.00465,
+    "spread_pct": 0.0017219113215667945,
     "ts_ms": 0
   },
   "variational::1000FLOKI": {
-    "bid": 0.02508,
-    "ask": 0.02514,
-    "spread_pct": 0.002389486260453905,
+    "bid": 0.02444,
+    "ask": 0.02451,
+    "spread_pct": 0.0028600612870276045,
     "ts_ms": 0
   },
   "variational::1000PEPE": {
-    "bid": 0.002993,
-    "ask": 0.002997,
-    "spread_pct": 0.0013355592654424363,
+    "bid": 0.002904,
+    "ask": 0.002908,
+    "spread_pct": 0.001376462491397143,
     "ts_ms": 0
   },
   "variational::1INCH": {
@@ -5691,9 +5691,9 @@
     "ts_ms": 0
   },
   "variational::BZ": {
-    "bid": 96.5087,
-    "ask": 96.551,
-    "spread_pct": 0.0004382064200866088,
+    "bid": 95.638,
+    "ask": 95.68,
+    "spread_pct": 0.00043905957620298756,
     "ts_ms": 0
   },
   "variational::C": {
@@ -5811,9 +5811,9 @@
     "ts_ms": 0
   },
   "variational::COPPER": {
-    "bid": 6.45677,
-    "ask": 6.46106,
-    "spread_pct": 0.0006641982438227051,
+    "bid": 6.44839,
+    "ask": 6.45166,
+    "spread_pct": 0.0005069747791676079,
     "ts_ms": 0
   },
   "variational::CORE": {
@@ -6135,9 +6135,9 @@
     "ts_ms": 0
   },
   "variational::GAS": {
-    "bid": 1.26429,
-    "ask": 1.2694,
-    "spread_pct": 0.0040336426318927495,
+    "bid": 1.19964,
+    "ask": 1.20525,
+    "spread_pct": 0.004665494055861094,
     "ts_ms": 0
   },
   "variational::GENIUS": {
@@ -6507,9 +6507,9 @@
     "ts_ms": 0
   },
   "variational::LAGRANGE": {
-    "bid": 0.08431,
-    "ask": 0.0846,
-    "spread_pct": 0.003433781303652816,
+    "bid": 0.07847,
+    "ask": 0.07878,
+    "spread_pct": 0.003942766295707533,
     "ts_ms": 0
   },
   "variational::LDO": {
@@ -6519,9 +6519,9 @@
     "ts_ms": 0
   },
   "variational::LIGHTER": {
-    "bid": 1.72097,
-    "ask": 1.72698,
-    "spread_pct": 0.0034861294392319196,
+    "bid": 1.45537,
+    "ask": 1.46202,
+    "spread_pct": 0.0045588694003887344,
     "ts_ms": 0
   },
   "variational::LINEA": {
@@ -6849,9 +6849,9 @@
     "ts_ms": 0
   },
   "variational::OPENAI": {
-    "bid": 1448.69,
-    "ask": 1451.25,
-    "spread_pct": 0.0017655537700779639,
+    "bid": 1429.17,
+    "ask": 1431.25,
+    "spread_pct": 0.0014543318813320613,
     "ts_ms": 0
   },
   "variational::OPG": {
@@ -7221,9 +7221,9 @@
     "ts_ms": 0
   },
   "variational::SENTIENT": {
-    "bid": 0.01345,
-    "ask": 0.01355,
-    "spread_pct": 0.007407407407407363,
+    "bid": 0.01277,
+    "ask": 0.0129,
+    "spread_pct": 0.010128554733151532,
     "ts_ms": 0
   },
   "variational::SFP": {
@@ -7629,9 +7629,9 @@
     "ts_ms": 0
   },
   "variational::VANATOKEN": {
-    "bid": 1.23226,
-    "ask": 1.23871,
-    "spread_pct": 0.005220621861050573,
+    "bid": 1.15806,
+    "ask": 1.16498,
+    "spread_pct": 0.005957710586128363,
     "ts_ms": 0
   },
   "variational::VANRY": {
@@ -7755,9 +7755,9 @@
     "ts_ms": 0
   },
   "variational::XAUT": {
-    "bid": 4444.36,
-    "ask": 4447.21,
-    "spread_pct": 0.0006410566412906526,
+    "bid": 4412.72,
+    "ask": 4415.66,
+    "spread_pct": 0.0006660338589864957,
     "ts_ms": 0
   },
   "variational::XCN": {
@@ -7935,15 +7935,72 @@
     "ts_ms": 0
   },
   "variational::ANTHROPIC": {
-    "bid": 1814.22,
-    "ask": 1815.51,
-    "spread_pct": 0.0007107966708267356,
+    "bid": 1727.07,
+    "ask": 1729.28,
+    "spread_pct": 0.0012788056765084765,
     "ts_ms": 0
   },
   "aster::SUSHI": {
-    "bid": 0.2183,
-    "ask": 0.2206,
-    "spread_pct": 0.010480747322852571,
-    "ts_ms": 1780541528850
+    "bid": 0.2049,
+    "ask": 0.2082,
+    "spread_pct": 0.015976761074800276,
+    "ts_ms": 1780626661500
+  },
+  "lighter::NBIS": {
+    "status": "no_orderbook"
+  },
+  "lighter::NOW": {
+    "bid": 118.42,
+    "ask": 118.66,
+    "spread_pct": 0.0020246330352623157,
+    "ts_ms": 1780626590279
+  },
+  "lighter::QNT": {
+    "status": "no_orderbook"
+  },
+  "aster::ANTHROPIC": {
+    "bid": 1713.55,
+    "ask": 1739.74,
+    "spread_pct": 0.015168144001807004,
+    "ts_ms": 1780626591100
+  },
+  "aster::DELL": {
+    "bid": 412.1,
+    "ask": 412.99,
+    "spread_pct": 0.002157340411349032,
+    "ts_ms": 1780626608350
+  },
+  "aster::IBM": {
+    "bid": 296.84,
+    "ask": 297.57,
+    "spread_pct": 0.0024562170892145764,
+    "ts_ms": 1780626608200
+  },
+  "aster::IREN": {
+    "status": "no_orderbook"
+  },
+  "aster::LLY": {
+    "status": "no_orderbook"
+  },
+  "aster::NOW": {
+    "bid": 118.33,
+    "ask": 118.71,
+    "spread_pct": 0.003206209922375932,
+    "ts_ms": 1780626634750
+  },
+  "aster::NVO": {
+    "status": "no_orderbook"
+  },
+  "aster::ONDS": {
+    "status": "no_orderbook"
+  },
+  "aster::WDC": {
+    "status": "no_orderbook"
+  },
+  "variational::QNTX": {
+    "bid": 59.1872,
+    "ask": 59.3471,
+    "spread_pct": 0.002697953250662473,
+    "ts_ms": 0
   }
 }

@@ -70,6 +70,7 @@ def build_ranked_alert_digest(
     *,
     cross_exchange_alerts: list[dict],
     spot_perp_alerts: list[dict],
+    max_rows: int = 20,
 ) -> str:
     rows: list[tuple[float, str]] = []
 
@@ -105,7 +106,7 @@ def build_ranked_alert_digest(
     if not rows:
         return ""
 
-    lines = ["<b>套利訊號總表</b>"]
-    for index, (_, line) in enumerate(rows, start=1):
+    lines = ["<b>套利訊號總表 Top 20</b>"]
+    for index, (_, line) in enumerate(rows[:max_rows], start=1):
         lines.append(f"#{index} {line}")
     return "\n".join(lines)

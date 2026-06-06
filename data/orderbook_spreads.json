@@ -1482,10 +1482,10 @@
     "ts_ms": 1780387474168
   },
   "lighter::IBM": {
-    "bid": 296.9,
-    "ask": 297.17,
-    "spread_pct": 0.0009089837897892124,
-    "ts_ms": 1780626588807
+    "bid": 278.39,
+    "ask": 278.54,
+    "spread_pct": 0.000538667337008364,
+    "ts_ms": 1780763377381
   },
   "lighter::ICP": {
     "bid": 2.9825,
@@ -4434,10 +4434,10 @@
     "ts_ms": 1780387620450
   },
   "aster::SLX": {
-    "bid": 0.20692,
-    "ask": 0.20716,
-    "spread_pct": 0.001159196290571957,
-    "ts_ms": 1780626635050
+    "bid": 0.17315,
+    "ask": 0.17331,
+    "spread_pct": 0.0009236275471915574,
+    "ts_ms": 1780763388700
   },
   "aster::SMSN": {
     "status": "no_orderbook"
@@ -5145,27 +5145,27 @@
     "ts_ms": 0
   },
   "variational::1000000MOG": {
-    "bid": 0.112,
-    "ask": 0.1126,
-    "spread_pct": 0.0053428317008014535,
+    "bid": 0.1018,
+    "ask": 0.1024,
+    "spread_pct": 0.005876591576885439,
     "ts_ms": 0
   },
   "variational::1000BONK": {
-    "bid": 0.004642,
-    "ask": 0.00465,
-    "spread_pct": 0.0017219113215667945,
+    "bid": 0.004218,
+    "ask": 0.004226,
+    "spread_pct": 0.0018948365703456483,
     "ts_ms": 0
   },
   "variational::1000FLOKI": {
-    "bid": 0.02444,
-    "ask": 0.02451,
-    "spread_pct": 0.0028600612870276045,
+    "bid": 0.023,
+    "ask": 0.02307,
+    "spread_pct": 0.003038853917950971,
     "ts_ms": 0
   },
   "variational::1000PEPE": {
-    "bid": 0.002904,
-    "ask": 0.002908,
-    "spread_pct": 0.001376462491397143,
+    "bid": 0.002647,
+    "ask": 0.002651,
+    "spread_pct": 0.0015100037750094741,
     "ts_ms": 0
   },
   "variational::1INCH": {
@@ -5811,9 +5811,9 @@
     "ts_ms": 0
   },
   "variational::COPPER": {
-    "bid": 6.44839,
-    "ask": 6.45166,
-    "spread_pct": 0.0005069747791676079,
+    "bid": 6.1814,
+    "ask": 6.18459,
+    "spread_pct": 0.0005159311951570438,
     "ts_ms": 0
   },
   "variational::CORE": {
@@ -6135,9 +6135,9 @@
     "ts_ms": 0
   },
   "variational::GAS": {
-    "bid": 1.19964,
-    "ask": 1.20525,
-    "spread_pct": 0.004665494055861094,
+    "bid": 1.08807,
+    "ask": 1.09335,
+    "spread_pct": 0.00484088346123163,
     "ts_ms": 0
   },
   "variational::GENIUS": {
@@ -6507,9 +6507,9 @@
     "ts_ms": 0
   },
   "variational::LAGRANGE": {
-    "bid": 0.07847,
-    "ask": 0.07878,
-    "spread_pct": 0.003942766295707533,
+    "bid": 0.07188,
+    "ask": 0.07212,
+    "spread_pct": 0.00333333333333339,
     "ts_ms": 0
   },
   "variational::LDO": {
@@ -6519,9 +6519,9 @@
     "ts_ms": 0
   },
   "variational::LIGHTER": {
-    "bid": 1.45537,
-    "ask": 1.46202,
-    "spread_pct": 0.0045588694003887344,
+    "bid": 1.45229,
+    "ask": 1.4604,
+    "spread_pct": 0.00556873543013492,
     "ts_ms": 0
   },
   "variational::LINEA": {
@@ -6849,9 +6849,9 @@
     "ts_ms": 0
   },
   "variational::OPENAI": {
-    "bid": 1429.17,
-    "ask": 1431.25,
-    "spread_pct": 0.0014543318813320613,
+    "bid": 1304.02,
+    "ask": 1305.46,
+    "spread_pct": 0.0011036681637721344,
     "ts_ms": 0
   },
   "variational::OPG": {
@@ -7221,9 +7221,9 @@
     "ts_ms": 0
   },
   "variational::SENTIENT": {
-    "bid": 0.01277,
-    "ask": 0.0129,
-    "spread_pct": 0.010128554733151532,
+    "bid": 0.0125,
+    "ask": 0.01262,
+    "spread_pct": 0.009554140127388422,
     "ts_ms": 0
   },
   "variational::SFP": {
@@ -7629,9 +7629,9 @@
     "ts_ms": 0
   },
   "variational::VANATOKEN": {
-    "bid": 1.15806,
-    "ask": 1.16498,
-    "spread_pct": 0.005957710586128363,
+    "bid": 1.08289,
+    "ask": 1.08912,
+    "spread_pct": 0.005736621838757813,
     "ts_ms": 0
   },
   "variational::VANRY": {
@@ -7755,9 +7755,9 @@
     "ts_ms": 0
   },
   "variational::XAUT": {
-    "bid": 4412.72,
-    "ask": 4415.66,
-    "spread_pct": 0.0006660338589864957,
+    "bid": 4281.0,
+    "ask": 4283.76,
+    "spread_pct": 0.0006445014221064497,
     "ts_ms": 0
   },
   "variational::XCN": {
@@ -7935,46 +7935,46 @@
     "ts_ms": 0
   },
   "variational::ANTHROPIC": {
-    "bid": 1727.07,
-    "ask": 1729.28,
-    "spread_pct": 0.0012788056765084765,
+    "bid": 1651.07,
+    "ask": 1653.46,
+    "spread_pct": 0.0014464991995836625,
     "ts_ms": 0
   },
   "aster::SUSHI": {
-    "bid": 0.2049,
-    "ask": 0.2082,
-    "spread_pct": 0.015976761074800276,
-    "ts_ms": 1780626661500
+    "bid": 0.1671,
+    "ask": 0.1688,
+    "spread_pct": 0.010122060136945563,
+    "ts_ms": 1780763393250
   },
   "lighter::NBIS": {
     "status": "no_orderbook"
   },
   "lighter::NOW": {
-    "bid": 118.42,
-    "ask": 118.66,
-    "spread_pct": 0.0020246330352623157,
-    "ts_ms": 1780626590279
+    "bid": 109.62,
+    "ask": 109.8,
+    "spread_pct": 0.0016406890894174878,
+    "ts_ms": 1780763378406
   },
   "lighter::QNT": {
     "status": "no_orderbook"
   },
   "aster::ANTHROPIC": {
-    "bid": 1713.55,
-    "ask": 1739.74,
-    "spread_pct": 0.015168144001807004,
-    "ts_ms": 1780626591100
+    "bid": 1651.07,
+    "ask": 1654.17,
+    "spread_pct": 0.0018758093209571085,
+    "ts_ms": 1780763367900
   },
   "aster::DELL": {
-    "bid": 412.1,
-    "ask": 412.99,
-    "spread_pct": 0.002157340411349032,
-    "ts_ms": 1780626608350
+    "bid": 385.35,
+    "ask": 386.08,
+    "spread_pct": 0.0018925890877978851,
+    "ts_ms": 1780763383100
   },
   "aster::IBM": {
-    "bid": 296.84,
-    "ask": 297.57,
-    "spread_pct": 0.0024562170892145764,
-    "ts_ms": 1780626608200
+    "bid": 278.27,
+    "ask": 278.8,
+    "spread_pct": 0.0019028129319476174,
+    "ts_ms": 1780763383000
   },
   "aster::IREN": {
     "status": "no_orderbook"
@@ -7983,10 +7983,10 @@
     "status": "no_orderbook"
   },
   "aster::NOW": {
-    "bid": 118.33,
-    "ask": 118.71,
-    "spread_pct": 0.003206209922375932,
-    "ts_ms": 1780626634750
+    "bid": 109.61,
+    "ask": 109.85,
+    "spread_pct": 0.0021871867310671186,
+    "ts_ms": 1780763388500
   },
   "aster::NVO": {
     "status": "no_orderbook"
@@ -7998,9 +7998,45 @@
     "status": "no_orderbook"
   },
   "variational::QNTX": {
-    "bid": 59.1872,
-    "ask": 59.3471,
-    "spread_pct": 0.002697953250662473,
+    "bid": 52.4299,
+    "ask": 52.6559,
+    "spread_pct": 0.004301247171359005,
+    "ts_ms": 0
+  },
+  "lighter::OPENAI": {
+    "bid": 1307.64,
+    "ask": 1308.65,
+    "spread_pct": 0.0007720856632865553,
+    "ts_ms": 1780763379234
+  },
+  "variational::INTC": {
+    "bid": 96.7256,
+    "ask": 96.811,
+    "spread_pct": 0.0008825204121598397,
+    "ts_ms": 0
+  },
+  "variational::QQQ": {
+    "bid": 704.753,
+    "ask": 704.977,
+    "spread_pct": 0.00031779135011659353,
+    "ts_ms": 0
+  },
+  "variational::SOXL": {
+    "bid": 176.617,
+    "ask": 176.832,
+    "spread_pct": 0.0012165828733424252,
+    "ts_ms": 0
+  },
+  "variational::TSLA": {
+    "bid": 392.646,
+    "ask": 392.886,
+    "spread_pct": 0.0006110508547074061,
+    "ts_ms": 0
+  },
+  "variational::US500": {
+    "bid": 738.139,
+    "ask": 738.395,
+    "spread_pct": 0.0003467580157313977,
     "ts_ms": 0
   }
 }

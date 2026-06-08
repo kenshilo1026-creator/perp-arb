@@ -1,0 +1,28 @@
+{
+  "legs": [
+    {
+      "last_margin_topup_ts_ms": null,
+      "leg_id": "manual-H-1780892585826:aster:short",
+      "margin_topups": 0,
+      "market_type": "perp",
+      "quantity": "100",
+      "side": "SHORT",
+      "status": "open",
+      "strategy_id": "manual-H-1780892585826",
+      "symbol": "H",
+      "venue": "aster"
+    },
+    {
+      "last_margin_topup_ts_ms": null,
+      "leg_id": "manual-H-1780892585826:variational:long",
+      "margin_topups": 0,
+      "market_type": "perp",
+      "quantity": "100",
+      "side": "LONG",
+      "status": "open",
+      "strategy_id": "manual-H-1780892585826",
+      "symbol": "H",
+      "venue": "variational"
+    }
+  ]
+}

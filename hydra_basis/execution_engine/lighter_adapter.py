@@ -4,6 +4,8 @@ import inspect
 import time
 from decimal import Decimal, ROUND_FLOOR
 
+from hydra_basis.execution_engine.order_fill import poll_until_filled
+
 
 def compute_base_quantity_from_clip_usd(
     *,
@@ -177,6 +179,29 @@ class LighterExecutionAdapter:
             return await result
         return result
 
+    async def _get_order_status(self, client_order_index: object) -> dict[str, object]:
+        client = self._get_client()
+        for method_name in (
+            "get_order",
+            "get_order_by_client_order_index",
+            "get_order_by_client_order_id",
+        ):
+            method = getattr(client, method_name, None)
+            if method is None:
+                continue
+            result = method(client_order_index)
+            if inspect.isawaitable(result):
+                result = await result
+            if isinstance(result, tuple):
+                _response, payload, error = result if len(result) == 3 else (None, result[-1], None)
+                if error is not None:
+                    raise RuntimeError(f"lighter order status failed: {error}")
+                result = payload
+            if isinstance(result, dict):
+                return result
+            return {"status": str(result), "raw": result}
+        raise RuntimeError("lighter client has no order status method")
+
     async def _submit_market_order(
         self,
         *,
@@ -278,6 +303,26 @@ class LighterExecutionAdapter:
             amount=amount,
             price=price,
             reduce_only=False,
+        )
+
+    async def wait_for_order_fill(
+        self,
+        *,
+        order_result: dict,
+        symbol: str,
+        side: str,
+        amount: str,
+        timeout_seconds: float,
+        poll_interval_seconds: float = 0.5,
+    ) -> dict[str, object]:
+        client_order_index = order_result.get("client_order_index")
+        if client_order_index is None:
+            raise RuntimeError("lighter limit order fill wait requires client_order_index")
+        return await poll_until_filled(
+            fetch_status=lambda: self._get_order_status(client_order_index),
+            timeout_seconds=timeout_seconds,
+            poll_interval_seconds=poll_interval_seconds,
+            timeout_message="lighter limit order fill timeout",
         )
 
     async def close_position(

@@ -12,6 +12,7 @@ from hydra_basis.execution_engine.interfaces import FakeExecutionAdapter
 from hydra_basis.execution_engine.market_data import select_variational_quote_fields
 from hydra_basis.execution_engine.models import ExecutionPreview, ExecutionRequest, ExecutionSignal
 from hydra_basis.execution_engine.orderbook_spread_store import OrderbookSpreadStore
+from hydra_basis.execution_engine.runtime import estimate_clip_usd_from_size
 from hydra_basis.execution_engine.preview import build_execution_preview
 from hydra_basis.execution_engine.priority import resolve_execution_legs
 from hydra_basis.execution_engine.risk import compute_spread_pct, orderbook_is_anomalous, spread_requires_confirm
@@ -25,6 +26,9 @@ from hydra_basis.execution_engine.lighter_adapter import (
     LighterExecutionAdapter,
 )
 from hydra_basis.execution_engine.lighter_live import build_lighter_client_factory_from_env
+from hydra_basis.execution_engine.aster_adapter import AsterExecutionAdapter
+from hydra_basis.execution_engine.hyperliquid_adapter import HyperliquidExecutionAdapter
+from hydra_basis.execution_engine.mexc_adapter import MexcExecutionAdapter
 from hydra_basis.alerts import build_ranked_alert_digest
 from hydra_basis.execution_engine.executor import execute_single_clip
 from hydra_basis.execution_engine.executor import execution_sides_for_signal
@@ -34,6 +38,8 @@ from scripts.run_execution_preview import compute_batch_count
 from scripts.run_execution_once import (
     build_adapter_for_venue,
     compute_batch_count as compute_single_clip_batch_count,
+    compute_token_batch_count,
+    validate_maker_fill_supported,
 )
 
 
@@ -581,6 +587,56 @@ class LighterExecutionAdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(call["market_index"], 9)
         self.assertTrue(call["is_ask"])
 
+    async def test_wait_for_order_fill_polls_client_order_index_until_filled(self) -> None:
+        class FakeSignerClient:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            async def get_order(self, client_order_index):
+                self.calls += 1
+                if self.calls == 1:
+                    return {"status": "open", "client_order_index": client_order_index}
+                return {"status": "filled", "client_order_index": client_order_index}
+
+        adapter = LighterExecutionAdapter(
+            signer_client_factory=lambda: FakeSignerClient(),
+            market_config_loader=lambda symbol: (7, 1000, 100),
+            orderbook_loader=lambda symbol: {"bid": 99.0, "ask": 101.0, "ts_ms": 1},
+        )
+
+        result = await adapter.wait_for_order_fill(
+            order_result={"ok": True, "client_order_index": 123},
+            symbol="BTC",
+            side="SELL",
+            amount="1",
+            timeout_seconds=1.0,
+            poll_interval_seconds=0.0,
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["raw"]["status"], "filled")
+
+    async def test_wait_for_order_fill_times_out_when_lighter_order_stays_open(self) -> None:
+        class FakeSignerClient:
+            async def get_order(self, client_order_index):
+                return {"status": "open", "client_order_index": client_order_index}
+
+        adapter = LighterExecutionAdapter(
+            signer_client_factory=lambda: FakeSignerClient(),
+            market_config_loader=lambda symbol: (7, 1000, 100),
+            orderbook_loader=lambda symbol: {"bid": 99.0, "ask": 101.0, "ts_ms": 1},
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "lighter limit order fill timeout"):
+            await adapter.wait_for_order_fill(
+                order_result={"ok": True, "client_order_index": 123},
+                symbol="BTC",
+                side="SELL",
+                amount="1",
+                timeout_seconds=0.01,
+                poll_interval_seconds=0.0,
+            )
+
 
 class LighterLiveFactoryTests(unittest.TestCase):
     def test_build_lighter_client_factory_reads_env_and_checks_client(self) -> None:
@@ -642,6 +698,35 @@ class SingleClipExecutorTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(maker_kwargs["price"], "60000")
 
+    async def test_execute_single_clip_defaults_maker_price_from_orderbook_when_missing(self) -> None:
+        maker_kwargs: dict[str, object] = {}
+
+        class MakerAdapter:
+            async def place_limit_order(self, **kwargs):
+                maker_kwargs.update(kwargs)
+                return {"ok": True, "orderId": "maker-1"}
+
+        class TakerAdapter:
+            async def place_market_order(self, **kwargs):
+                return {"ok": True, "orderId": "taker-1"}
+
+        await execute_single_clip(
+            symbol="BTC",
+            clip_usd=1000.0,
+            quantity=Decimal("0.01"),
+            maker_venue="aster",
+            taker_venue="variational",
+            short_venue="aster",
+            long_venue="variational",
+            maker_adapter=MakerAdapter(),
+            taker_adapter=TakerAdapter(),
+            max_hedge_retries=1,
+            state_machine=ExecutionStateMachine(),
+            maker_orderbook={"bid": 99.0, "ask": 101.0, "ts_ms": 1},
+        )
+
+        self.assertEqual(maker_kwargs["price"], "101")
+
     async def test_execute_single_clip_retries_hedge_once_then_completes(self) -> None:
         calls: list[tuple[str, str]] = []
 
@@ -679,6 +764,74 @@ class SingleClipExecutorTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result["ok"])
         self.assertEqual(state_machine.state, "completed")
         self.assertEqual(calls, [("maker", "SELL"), ("taker", "BUY"), ("taker", "BUY")])
+
+    async def test_execute_single_clip_waits_for_maker_fill_before_hedging(self) -> None:
+        calls: list[str] = []
+
+        class MakerAdapter:
+            async def place_limit_order(self, **kwargs):
+                calls.append("maker_submit")
+                return {"ok": True, "order_id": "maker-1", "raw": {"status": "NEW"}}
+
+            async def wait_for_order_fill(self, **kwargs):
+                calls.append("maker_filled")
+                return {"ok": True, "order_id": "maker-1", "raw": {"status": "FILLED"}}
+
+        class TakerAdapter:
+            async def place_market_order(self, **kwargs):
+                calls.append("taker_market")
+                return {"ok": True, "order_id": "taker-1"}
+
+        result = await execute_single_clip(
+            symbol="BTC",
+            clip_usd=1000.0,
+            quantity=Decimal("10"),
+            maker_venue="variational",
+            taker_venue="lighter",
+            short_venue="variational",
+            long_venue="lighter",
+            maker_adapter=MakerAdapter(),
+            taker_adapter=TakerAdapter(),
+            max_hedge_retries=1,
+            state_machine=ExecutionStateMachine(),
+            require_maker_fill_confirmation=True,
+            maker_fill_timeout_seconds=5.0,
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(calls, ["maker_submit", "maker_filled", "taker_market"])
+
+    async def test_execute_single_clip_does_not_hedge_without_maker_fill_confirmation(self) -> None:
+        calls: list[str] = []
+
+        class MakerAdapter:
+            async def place_limit_order(self, **kwargs):
+                calls.append("maker_submit")
+                return {"ok": True, "order_id": "maker-1", "raw": {"status": "NEW"}}
+
+        class TakerAdapter:
+            async def place_market_order(self, **kwargs):
+                calls.append("taker_market")
+                return {"ok": True, "order_id": "taker-1"}
+
+        with self.assertRaisesRegex(RuntimeError, "maker fill confirmation unavailable"):
+            await execute_single_clip(
+                symbol="BTC",
+                clip_usd=1000.0,
+                quantity=Decimal("10"),
+                maker_venue="variational",
+                taker_venue="lighter",
+                short_venue="variational",
+                long_venue="lighter",
+                maker_adapter=MakerAdapter(),
+                taker_adapter=TakerAdapter(),
+                max_hedge_retries=1,
+                state_machine=ExecutionStateMachine(),
+                require_maker_fill_confirmation=True,
+                maker_fill_timeout_seconds=5.0,
+            )
+
+        self.assertEqual(calls, ["maker_submit"])
 
     async def test_execute_single_clip_enters_emergency_exit_after_hedge_failures(self) -> None:
         class MakerAdapter:
@@ -829,12 +982,147 @@ class MexcSpotExecutionAdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(calls[0]["price"], "3000.5")
         self.assertEqual(calls[0]["timeInForce"], "GTC")
 
+    async def test_wait_for_order_fill_polls_spot_order_until_filled(self) -> None:
+        class Adapter(MexcSpotExecutionAdapter):
+            def __init__(self) -> None:
+                super().__init__(api_key="k", api_secret="s")
+                self.calls = 0
+
+            async def _get_order(self, params: dict) -> dict:
+                self.calls += 1
+                if self.calls == 1:
+                    return {"status": "NEW", "orderId": params["orderId"]}
+                return {"status": "FILLED", "orderId": params["orderId"]}
+
+        result = await Adapter().wait_for_order_fill(
+            order_result={"ok": True, "order_id": 42},
+            symbol="ETH",
+            side="BUY",
+            amount="0.1",
+            timeout_seconds=1.0,
+            poll_interval_seconds=0.0,
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["raw"]["status"], "FILLED")
+
+    async def test_wait_for_order_fill_times_out_when_spot_order_stays_new(self) -> None:
+        class Adapter(MexcSpotExecutionAdapter):
+            async def _get_order(self, params: dict) -> dict:
+                return {"status": "NEW", "orderId": params["orderId"]}
+
+        with self.assertRaisesRegex(RuntimeError, "mexc spot limit order fill timeout"):
+            await Adapter(api_key="k", api_secret="s").wait_for_order_fill(
+                order_result={"ok": True, "order_id": 42},
+                symbol="ETH",
+                side="BUY",
+                amount="0.1",
+                timeout_seconds=0.01,
+                poll_interval_seconds=0.0,
+            )
+
+
+class AsterOrderFillWatcherTests(unittest.IsolatedAsyncioTestCase):
+    async def test_wait_for_order_fill_polls_aster_order_until_filled(self) -> None:
+        class Adapter(AsterExecutionAdapter):
+            def __init__(self) -> None:
+                super().__init__(signer_address="0x1", private_key="unused", user_address="0x2")
+                self.calls = 0
+
+            async def _resolve_raw_symbol(self, symbol: str) -> str:
+                return "ETHUSDT"
+
+            async def _get_order_status(self, *, symbol: str, order_id: object) -> dict:
+                self.calls += 1
+                if self.calls == 1:
+                    return {"status": "NEW", "orderId": order_id}
+                return {"status": "FILLED", "orderId": order_id}
+
+        result = await Adapter().wait_for_order_fill(
+            order_result={"ok": True, "order_id": 123},
+            symbol="ETH",
+            side="BUY",
+            amount="0.1",
+            timeout_seconds=1.0,
+            poll_interval_seconds=0.0,
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["raw"]["status"], "FILLED")
+
+
+class MexcFuturesOrderFillWatcherTests(unittest.IsolatedAsyncioTestCase):
+    async def test_wait_for_order_fill_polls_contract_order_until_filled(self) -> None:
+        class Adapter(MexcExecutionAdapter):
+            def __init__(self) -> None:
+                super().__init__(api_key="k", api_secret="s")
+                self.calls = 0
+
+            async def _get_order_status(self, order_id: object) -> dict:
+                self.calls += 1
+                if self.calls == 1:
+                    return {"state": 2, "orderId": order_id}
+                return {"state": 3, "orderId": order_id}
+
+        result = await Adapter().wait_for_order_fill(
+            order_result={"ok": True, "order_id": "abc"},
+            symbol="ETH",
+            side="BUY",
+            amount="0.1",
+            timeout_seconds=1.0,
+            poll_interval_seconds=0.0,
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["raw"]["state"], 3)
+
+
+class HyperliquidOrderFillWatcherTests(unittest.IsolatedAsyncioTestCase):
+    async def test_wait_for_order_fill_polls_order_status_until_filled(self) -> None:
+        class Adapter(HyperliquidExecutionAdapter):
+            def __init__(self) -> None:
+                self.private_key = "unused"
+                self.account_address = "0xabc"
+                self.slippage_bps = 50.0
+                self.default_leverage = 1
+                self._universe = ["ETH"]
+                self._isolated_asset_indices = set()
+                self.calls = 0
+
+            async def _get_order_status(self, order_id: object) -> dict:
+                self.calls += 1
+                if self.calls == 1:
+                    return {"status": "open", "order": {"status": "open", "oid": order_id}}
+                return {"status": "order", "order": {"status": "filled", "oid": order_id}}
+
+        result = await Adapter().wait_for_order_fill(
+            order_result={"ok": True, "order_id": 456},
+            symbol="ETH",
+            side="BUY",
+            amount="0.1",
+            timeout_seconds=1.0,
+            poll_interval_seconds=0.0,
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["raw"]["order"]["status"], "filled")
+
 
 class ExecutionPreviewCliTests(unittest.TestCase):
     def test_compute_batch_count_rounds_up(self) -> None:
         self.assertEqual(compute_batch_count(10000.0, 500.0), 20)
         self.assertEqual(compute_batch_count(10250.0, 500.0), 21)
         self.assertEqual(compute_single_clip_batch_count(10250.0, 500.0), 21)
+        self.assertEqual(compute_token_batch_count(Decimal("10"), Decimal("3")), 4)
+
+    def test_estimate_clip_usd_from_token_size_uses_average_mid(self) -> None:
+        clip_usd = estimate_clip_usd_from_size(
+            clip_size=Decimal("10"),
+            short_book={"bid": 99.0, "ask": 101.0},
+            long_book={"bid": 109.0, "ask": 111.0},
+        )
+
+        self.assertEqual(clip_usd, 1050.0)
 
     def test_ranked_alert_digest_includes_capital_return(self) -> None:
         digest = build_ranked_alert_digest(
@@ -867,6 +1155,12 @@ class ExecutionPreviewCliTests(unittest.TestCase):
             build_adapter_for_venue("variational", broker_url="ws://127.0.0.1:9999")
 
         adapter_cls.assert_called_once_with(broker_url="ws://127.0.0.1:9999")
+
+    def test_run_execution_once_rejects_variational_as_maker_until_fill_watcher_exists(self) -> None:
+        with self.assertRaisesRegex(RuntimeError, "variational maker limit order is not safe yet"):
+            validate_maker_fill_supported("variational")
+
+        validate_maker_fill_supported("aster")
 
 
 if __name__ == "__main__":

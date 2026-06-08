@@ -55,6 +55,7 @@ from hydra_basis.monitor_errors import build_exchange_error_message
 from hydra_basis.monitor_errors import raise_exchange_error
 from hydra_basis.monitor_errors import should_raise_immediately
 from hydra_basis.backfill import (
+    build_spread_refresh_keys,
     chunk_sequence,
     split_loris_batched_keys,
     capture_backfill_spread_snapshot,
@@ -697,6 +698,22 @@ class BackfillUtilsTests(unittest.TestCase):
         self.assertEqual(immediate, [("hyperliquid", "BTC"), ("mexc", "ETH")])
         self.assertEqual(batched, [("variational", "BTC")])
 
+    def test_spread_refresh_keys_include_complete_cached_symbols(self) -> None:
+        keys = build_spread_refresh_keys(
+            {
+                "aster": {"BEAT", "BTC"},
+                "variational": {"BEAT"},
+                "disabled": {"BTC"},
+            },
+            enabled_venues=["aster", "variational", "disabled"],
+            supported_venues={"aster", "variational"},
+        )
+
+        self.assertEqual(
+            keys,
+            [("aster", "BEAT"), ("aster", "BTC"), ("variational", "BEAT")],
+        )
+
     def test_complete_history_still_needs_top_up_when_new_interval_has_passed(self) -> None:
         now_value = 1_700_000_000_000
         points = [
@@ -718,6 +735,28 @@ class BackfillUtilsTests(unittest.TestCase):
 
 
 class BackfillSpreadSnapshotTests(unittest.IsolatedAsyncioTestCase):
+    async def test_force_refresh_retries_previous_no_orderbook_sentinel(self) -> None:
+        spreads: dict[tuple[str, str], dict[str, float | int]] = {
+            ("lighter", "BOT"): {"status": "no_orderbook"}
+        }
+
+        with patch(
+            "hydra_basis.backfill.fetch_orderbook_snapshot",
+            new=AsyncMock(return_value={"bid": 10.0, "ask": 10.1, "ts_ms": 123}),
+        ) as fetch_orderbook:
+            stored = await capture_backfill_spread_snapshot(
+                session=object(),
+                spreads=spreads,
+                venue="lighter",
+                symbol="BOT",
+                clip_usd=1000.0,
+                force_refresh=True,
+            )
+
+        self.assertTrue(stored)
+        fetch_orderbook.assert_awaited_once()
+        self.assertEqual(spreads[("lighter", "BOT")]["bid"], 10.0)
+
     async def test_missing_orderbook_does_not_fail_backfill(self) -> None:
         spreads: dict[tuple[str, str], dict[str, float | int]] = {}
 

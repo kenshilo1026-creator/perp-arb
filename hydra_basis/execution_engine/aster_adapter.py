@@ -14,6 +14,8 @@ except ImportError:  # eth-account >= 0.12
     encode_structured_data = None
 from eth_account.messages import encode_typed_data
 
+from hydra_basis.execution_engine.order_fill import poll_until_filled
+
 ASTER_EXECUTION_SUFFIXES = ("USDT", "USDC", "USD")
 
 
@@ -194,6 +196,26 @@ class AsterExecutionAdapter:
                     raise RuntimeError(f"aster order {resp.status}: {result}")
                 return result
 
+    async def _get_signed_query(self, url: str, params: dict) -> dict:
+        query = urlencode(params)
+        headers = {
+            "Content-Type": "application/x-www-form-urlencoded",
+            "User-Agent": "funding-arb-execution/0.1",
+        }
+        async with aiohttp.ClientSession() as session:
+            async with session.get(f"{url}?{query}", headers=headers) as resp:
+                content_type = resp.headers.get("Content-Type", "")
+                if "application/json" not in content_type.lower():
+                    text = await resp.text()
+                    raise RuntimeError(
+                        f"aster order {resp.status}: unexpected content-type={content_type!r} "
+                        f"body={text[:300]!r}"
+                    )
+                result = await resp.json()
+                if resp.status != 200:
+                    raise RuntimeError(f"aster order {resp.status}: {result}")
+                return result
+
     def build_signed_params(self, params: dict) -> dict:
         if not self.signer_address:
             raise RuntimeError("ASTER_API_WALLET_ADDRESS is not set")
@@ -211,6 +233,34 @@ class AsterExecutionAdapter:
         params = self.build_signed_params(params)
         return await self._post_signed_query(f"{self.BASE_URL}/fapi/v3/order", params)
 
+    async def _get_order_status(self, *, symbol: str, order_id: object) -> dict:
+        raw_symbol = await self._resolve_raw_symbol(symbol)
+        params = self.build_signed_params({
+            "symbol": raw_symbol,
+            "orderId": str(order_id),
+        })
+        return await self._get_signed_query(f"{self.BASE_URL}/fapi/v3/order", params)
+
+    async def wait_for_order_fill(
+        self,
+        *,
+        order_result: dict,
+        symbol: str,
+        side: str,
+        amount: str,
+        timeout_seconds: float,
+        poll_interval_seconds: float = 0.5,
+    ) -> dict:
+        order_id = order_result.get("order_id") or order_result.get("orderId")
+        if order_id is None:
+            raise RuntimeError("aster limit order fill wait requires order_id")
+        return await poll_until_filled(
+            fetch_status=lambda: self._get_order_status(symbol=symbol, order_id=order_id),
+            timeout_seconds=timeout_seconds,
+            poll_interval_seconds=poll_interval_seconds,
+            timeout_message="aster limit order fill timeout",
+        )
+
     async def ensure_isolated_margin(self, symbol: str) -> None:
         raw_symbol = await self._resolve_raw_symbol(symbol)
         if raw_symbol in self._isolated_symbols:
@@ -219,7 +269,12 @@ class AsterExecutionAdapter:
             "symbol": raw_symbol,
             "marginType": "ISOLATED",
         })
-        await self._post_signed_query(f"{self.BASE_URL}/fapi/v3/marginType", params)
+        try:
+            await self._post_signed_query(f"{self.BASE_URL}/fapi/v3/marginType", params)
+        except RuntimeError as exc:
+            message = str(exc)
+            if "-4046" not in message and "No need to change margin type" not in message:
+                raise
         self._isolated_symbols.add(raw_symbol)
 
     async def ensure_leverage(self, symbol: str) -> None:

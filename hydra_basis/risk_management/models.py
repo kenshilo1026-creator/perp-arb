@@ -7,7 +7,7 @@ from typing import Literal
 MarketType = Literal["perp", "spot"]
 PositionSide = Literal["LONG", "SHORT"]
 PositionStatus = Literal["open", "closed", "emergency_closed", "close_failed"]
-RiskEventType = Literal["LIQUIDATION", "ADL", "POSITION_MISSING", "MANUAL_EMERGENCY"]
+RiskEventType = Literal["LIQUIDATION", "ADL", "POSITION_MISSING", "MANUAL_EMERGENCY", "FUNDING_AUTO_CLOSE"]
 
 
 @dataclass

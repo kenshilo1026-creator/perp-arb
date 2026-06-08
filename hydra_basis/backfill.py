@@ -31,6 +31,21 @@ def split_loris_batched_keys(
     return immediate, batched
 
 
+def build_spread_refresh_keys(
+    venue_symbols: dict[str, set[str]],
+    *,
+    enabled_venues: Sequence[str],
+    supported_venues: set[str] | None = None,
+) -> list[tuple[str, str]]:
+    keys: list[tuple[str, str]] = []
+    for venue in enabled_venues:
+        if supported_venues is not None and venue not in supported_venues:
+            continue
+        for symbol in sorted(venue_symbols.get(venue, set())):
+            keys.append((venue, symbol))
+    return keys
+
+
 def backfill_incremental_start_ms(points: Sequence) -> int | None:
     if not points:
         return None
@@ -57,8 +72,9 @@ async def capture_backfill_spread_snapshot(
     venue: str,
     symbol: str,
     clip_usd: float,
+    force_refresh: bool = False,
 ) -> bool:
-    if spreads.get((venue, symbol), {}).get("status") == NO_ORDERBOOK_SENTINEL:
+    if not force_refresh and spreads.get((venue, symbol), {}).get("status") == NO_ORDERBOOK_SENTINEL:
         return False
 
     try:

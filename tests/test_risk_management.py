@@ -10,6 +10,16 @@ from hydra_basis.execution_engine.hyperliquid_adapter import extract_hyperliquid
 from hydra_basis.risk_management.closers import MarketTypeRouterCloser
 from hydra_basis.risk_management.manager import EmergencyRiskManager
 from hydra_basis.risk_management.models import PositionLeg, RiskEvent
+from hydra_basis.risk_management.funding_risk import (
+    FundingRiskConfig,
+    FundingRiskManager,
+    FundingRiskState,
+    FundingSettlement,
+    ProjectedFundingRate,
+    funding_cashflow_pct,
+    load_funding_risk_config,
+)
+from hydra_basis.risk_management.funding_runtime import process_funding_risk_once
 from hydra_basis.risk_management.recording import record_successful_execution
 from hydra_basis.risk_management.registry import PositionRegistry
 from hydra_basis.risk_management.runtime import process_watcher_once
@@ -115,6 +125,157 @@ class GlobalRiskManagementTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(result["ok"])
         self.assertEqual(result["failed_leg_ids"], ["other"])
         self.assertEqual(registry.get_leg("other").status, "close_failed")
+
+
+class FundingRiskTests(unittest.TestCase):
+    def test_funding_cashflow_uses_position_side(self) -> None:
+        self.assertEqual(funding_cashflow_pct(side="SHORT", funding_rate=0.001), 0.001)
+        self.assertEqual(funding_cashflow_pct(side="LONG", funding_rate=0.001), -0.001)
+        self.assertEqual(funding_cashflow_pct(side="LONG", funding_rate=-0.001), 0.001)
+        self.assertEqual(funding_cashflow_pct(side="SHORT", funding_rate=-0.001), -0.001)
+
+    def test_longer_interval_window_counts_pair_net_funding(self) -> None:
+        registry = PositionRegistry(
+            legs=[
+                PositionLeg("arb-1", "a-short", "aster", "LAB", "perp", "SHORT", "100", "open"),
+                PositionLeg("arb-1", "b-long", "variational", "LAB", "perp", "LONG", "100", "open"),
+            ]
+        )
+        manager = FundingRiskManager(
+            registry=registry,
+            state=FundingRiskState(),
+            config=FundingRiskConfig(
+                enabled=True,
+                check_interval_seconds=3600,
+                consecutive_negative_windows=2,
+                auto_close_negative_funding_pct=0.1,
+            ),
+        )
+
+        first = manager.ingest_settlements(
+            [
+                FundingSettlement("a-short", 1_000, 0.0010, 1.0),
+                FundingSettlement("a-short", 2_000, 0.0010, 1.0),
+                FundingSettlement("a-short", 3_000, 0.0010, 1.0),
+                FundingSettlement("a-short", 4_000, 0.0010, 1.0),
+                FundingSettlement("b-long", 4_000, 0.0050, 4.0),
+            ]
+        )
+        second = manager.ingest_settlements(
+            [
+                FundingSettlement("a-short", 5_000, 0.0010, 1.0),
+                FundingSettlement("a-short", 6_000, 0.0010, 1.0),
+                FundingSettlement("a-short", 7_000, 0.0010, 1.0),
+                FundingSettlement("a-short", 8_000, 0.0010, 1.0),
+                FundingSettlement("b-long", 8_000, 0.0050, 4.0),
+            ]
+        )
+
+        self.assertEqual(first["action"], "negative_window_recorded")
+        self.assertAlmostEqual(first["net_cashflow_pct"], -0.001)
+        self.assertEqual(second["action"], "notify_consecutive_negative")
+        self.assertEqual(second["consecutive_negative_windows"], 2)
+        self.assertIsNone(second.get("risk_event"))
+
+    def test_projection_auto_closes_when_unsettled_net_loss_exceeds_config(self) -> None:
+        registry = PositionRegistry(
+            legs=[
+                PositionLeg("arb-1", "a-short", "aster", "LAB", "perp", "SHORT", "100", "open"),
+                PositionLeg("arb-1", "b-long", "variational", "LAB", "perp", "LONG", "100", "open"),
+            ]
+        )
+        manager = FundingRiskManager(
+            registry=registry,
+            state=FundingRiskState(),
+            config=FundingRiskConfig(
+                enabled=True,
+                check_interval_seconds=3600,
+                consecutive_negative_windows=2,
+                auto_close_negative_funding_pct=0.1,
+            ),
+        )
+
+        result = manager.evaluate_projection(
+            strategy_id="arb-1",
+            rates=[
+                ProjectedFundingRate("a-short", funding_rate=0.0001, interval_hours=1.0),
+                ProjectedFundingRate("b-long", funding_rate=0.0020, interval_hours=4.0),
+            ],
+        )
+
+        self.assertEqual(result["action"], "auto_close_projected_negative_funding")
+        self.assertLess(result["net_cashflow_pct"], -0.001)
+        event = result["risk_event"]
+        self.assertEqual(event.strategy_id, "arb-1")
+        self.assertEqual(event.event_type, "FUNDING_AUTO_CLOSE")
+
+    def test_load_funding_risk_config_reads_jsonc(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "funding_risk.jsonc"
+            path.write_text(
+                """
+                {
+                  // pair-level funding risk
+                  "enabled": true,
+                  "check_interval_seconds": 3600,
+                  "consecutive_negative_windows": 2,
+                  "auto_close_negative_funding_pct": 0.1
+                }
+                """,
+                encoding="utf-8",
+            )
+
+            config = load_funding_risk_config(path)
+
+        self.assertTrue(config.enabled)
+        self.assertEqual(config.consecutive_negative_windows, 2)
+        self.assertEqual(config.auto_close_negative_funding_pct, 0.1)
+
+
+class FundingRiskRuntimeTests(unittest.IsolatedAsyncioTestCase):
+    async def test_process_funding_risk_once_auto_closes_counterparty_on_projection_loss(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            registry_path = Path(temp_dir) / "position_registry.json"
+            state_path = Path(temp_dir) / "funding_risk_state.json"
+            registry = PositionRegistry(
+                legs=[
+                    PositionLeg("arb-1", "a-short", "aster", "LAB", "perp", "SHORT", "100", "open"),
+                    PositionLeg("arb-1", "mexc-spot", "mexc", "LAB", "spot", "LONG", "100", "open"),
+                ]
+            )
+            registry.save(registry_path)
+
+            class Provider:
+                async def fetch_settlements(self, registry, state):
+                    return []
+
+                async def fetch_projected_rates(self, registry):
+                    return {
+                        "arb-1": [
+                            ProjectedFundingRate("a-short", funding_rate=-0.0020, interval_hours=1.0),
+                        ]
+                    }
+
+            class Closer:
+                async def close_position(self, **kwargs):
+                    return {"ok": True, "kwargs": kwargs}
+
+            result = await process_funding_risk_once(
+                registry_path=registry_path,
+                state_path=state_path,
+                provider=Provider(),
+                closers={"aster": Closer(), "mexc": Closer()},
+                config=FundingRiskConfig(
+                    enabled=True,
+                    check_interval_seconds=3600,
+                    consecutive_negative_windows=2,
+                    auto_close_negative_funding_pct=0.1,
+                ),
+                dry_run=False,
+            )
+
+        self.assertEqual(result["auto_close_results"][0]["closed_leg_ids"], ["a-short", "mexc-spot"])
+        self.assertIn("funding", result["messages"][0].lower())
 
 
 class PositionRegistryTests(unittest.TestCase):
@@ -526,6 +687,28 @@ class EmergencyCloserAdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(calls[0]["params"]["marginType"], "ISOLATED")
         self.assertIn("/fapi/v3/leverage", calls[1]["url"])
         self.assertIn("/fapi/v3/order", calls[2]["url"])
+
+    async def test_aster_ignores_margin_type_already_isolated_error(self) -> None:
+        calls: list[dict] = []
+
+        class FakeAster(AsterExecutionAdapter):
+            async def _resolve_raw_symbol(self, symbol: str) -> str:
+                return f"{symbol}USDT"
+
+            async def _post_signed_query(self, url: str, params: dict) -> dict:
+                calls.append({"url": url, "params": params})
+                raise RuntimeError("aster order 400: {'code': -4046, 'msg': 'No need to change margin type.'}")
+
+            def build_signed_params(self, params: dict) -> dict:
+                return params
+
+        adapter = FakeAster(signer_address="0xsigner", private_key="0xprivate", user_address="0xuser")
+
+        await adapter.ensure_isolated_margin("ETH")
+        await adapter.ensure_isolated_margin("ETH")
+
+        self.assertEqual(len(calls), 1)
+        self.assertIn("ETHUSDT", adapter._isolated_symbols)
 
     async def test_aster_place_order_sets_leverage_before_order(self) -> None:
         calls: list[dict] = []

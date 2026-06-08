@@ -17,7 +17,7 @@ def select_best_alerts_by_symbol(
     *,
     min_annualized_avg: float,
     spreads_by_venue_symbol: dict[tuple[str, str], dict[str, float | int]] | None = None,
-    max_spread_pct: float = 0.001,
+    max_spread_pct: float = 0.002,
 ) -> list[dict]:
     best_by_symbol: dict[str, dict] = {}
 

@@ -24,10 +24,17 @@ class EmergencyRiskManager:
         self.dry_run = dry_run
 
     async def handle_event(self, event: RiskEvent) -> dict[str, object]:
-        legs_to_close = self.registry.open_counterparty_legs(
-            strategy_id=event.strategy_id,
-            trigger_leg_id=event.leg_id,
-        )
+        if event.event_type == "FUNDING_AUTO_CLOSE":
+            legs_to_close = [
+                leg
+                for leg in self.registry.legs_for_strategy(event.strategy_id)
+                if leg.status == "open"
+            ]
+        else:
+            legs_to_close = self.registry.open_counterparty_legs(
+                strategy_id=event.strategy_id,
+                trigger_leg_id=event.leg_id,
+            )
         closed_leg_ids: list[str] = []
         failed_leg_ids: list[str] = []
         close_results: dict[str, dict] = {}

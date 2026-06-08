@@ -5,6 +5,7 @@ import hmac
 import json
 import os
 import time
+from decimal import Decimal
 
 import aiohttp
 
@@ -97,6 +98,50 @@ class MexcExecutionAdapter:
                 if resp.status != 200 or not data.get("success"):
                     raise RuntimeError(f"mexc order status {resp.status}: {data}")
                 return data.get("data", data)
+
+    async def _get_open_positions(self, symbol: str) -> list[dict]:
+        contract_sym = mexc_contract_symbol(symbol)
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                f"{self.BASE_URL}/api/v1/private/position/open_positions",
+                params={"symbol": contract_sym},
+                headers=self._signed_headers(""),
+            ) as resp:
+                data = await resp.json()
+                if resp.status != 200 or not data.get("success"):
+                    raise RuntimeError(f"mexc open positions {resp.status}: {data}")
+                payload = data.get("data", [])
+                if isinstance(payload, dict):
+                    payload = payload.get("positions", [])
+                if not isinstance(payload, list):
+                    raise RuntimeError(f"unexpected mexc open positions payload: {data}")
+                return payload
+
+    async def get_open_position(self, *, symbol: str, market_type: str) -> dict | None:
+        if market_type != "perp":
+            raise RuntimeError("mexc futures live position query only supports perp")
+        contract_sym = mexc_contract_symbol(symbol)
+        for item in await self._get_open_positions(symbol):
+            if str(item.get("symbol", "")).upper() != contract_sym:
+                continue
+            quantity = Decimal(str(item.get("holdVol", item.get("positionVol", "0")) or "0"))
+            if quantity <= 0:
+                continue
+            position_type = int(item.get("positionType", item.get("position_type", 0)) or 0)
+            if position_type == 1:
+                side = "LONG"
+            elif position_type == 2:
+                side = "SHORT"
+            else:
+                raise RuntimeError(f"unsupported mexc positionType: {position_type}")
+            return {
+                "symbol": symbol.strip().upper(),
+                "market_type": "perp",
+                "side": side,
+                "quantity": format(quantity.normalize(), "f"),
+                "raw": item,
+            }
+        return None
 
     async def place_limit_order(
         self, *, symbol: str, side: str, amount: str, clip_usd: float, price: str

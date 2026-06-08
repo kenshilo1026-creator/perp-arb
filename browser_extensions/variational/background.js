@@ -268,6 +268,40 @@ class CommandSocket {
 
 const commandClient = new CommandSocket();
 
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isTransientFrameRemovalError(error) {
+  const message = String(error?.message || error || "");
+  return message.includes("Frame with ID")
+    || message.includes("frame was removed")
+    || message.includes("No frame with id")
+    || message.includes("Cannot access contents of url")
+    || message.includes("Extension context invalidated");
+}
+
+async function runVariationalOrderInjection(payload) {
+  let lastError = null;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      const [injectionResult] = await chrome.scripting.executeScript({
+        target: { tabId: state.attachedTabId },
+        func: executeVariationalOrder,
+        args: [{ ...payload, automationVersion: ORDER_AUTOMATION_VERSION }]
+      });
+      return injectionResult;
+    } catch (error) {
+      lastError = error;
+      if (attempt >= 1 || !isTransientFrameRemovalError(error)) {
+        throw error;
+      }
+      await sleep(1000);
+    }
+  }
+  throw lastError;
+}
+
 async function handleCommandMessage(raw) {
   let payload;
   try {
@@ -284,11 +318,7 @@ async function handleCommandMessage(raw) {
     if (state.attachedTabId == null) {
       throw new Error("No Variational tab attached. Click Start in the extension popup first.");
     }
-    const [injectionResult] = await chrome.scripting.executeScript({
-      target: { tabId: state.attachedTabId },
-      func: executeVariationalOrder,
-      args: [{ ...payload, automationVersion: ORDER_AUTOMATION_VERSION }]
-    });
+    const injectionResult = await runVariationalOrderInjection(payload);
     let result = injectionResult?.result || {};
     if (!result || typeof result !== "object" || !("ok" in result)) {
       const [diagnosticResult] = await chrome.scripting.executeScript({

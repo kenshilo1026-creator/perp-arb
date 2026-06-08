@@ -102,7 +102,43 @@ async def execute_single_clip(
         short_venue=short_venue,
         long_venue=long_venue,
     )
+    return await execute_single_clip_with_sides(
+        symbol=symbol,
+        clip_usd=clip_usd,
+        quantity=quantity,
+        maker_venue=maker_venue,
+        taker_venue=taker_venue,
+        maker_side=maker_side,
+        taker_side=taker_side,
+        maker_adapter=maker_adapter,
+        taker_adapter=taker_adapter,
+        max_hedge_retries=max_hedge_retries,
+        state_machine=state_machine,
+        maker_price=maker_price,
+        maker_orderbook=maker_orderbook,
+        require_maker_fill_confirmation=require_maker_fill_confirmation,
+        maker_fill_timeout_seconds=maker_fill_timeout_seconds,
+    )
 
+
+async def execute_single_clip_with_sides(
+    *,
+    symbol: str,
+    clip_usd: float,
+    quantity: Decimal,
+    maker_venue: str,
+    taker_venue: str,
+    maker_side: str,
+    taker_side: str,
+    maker_adapter,
+    taker_adapter,
+    max_hedge_retries: int,
+    state_machine,
+    maker_price: str | None = None,
+    maker_orderbook: dict[str, float | int] | None = None,
+    require_maker_fill_confirmation: bool = False,
+    maker_fill_timeout_seconds: float = 60.0,
+) -> dict[str, object]:
     state_machine.to_preview_ready()
     state_machine.to_awaiting_confirm()
     state_machine.to_placing_maker_leg()

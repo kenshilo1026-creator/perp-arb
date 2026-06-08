@@ -23,6 +23,54 @@
       "strategy_id": "manual-H-1780892585826",
       "symbol": "H",
       "venue": "variational"
+    },
+    {
+      "last_margin_topup_ts_ms": null,
+      "leg_id": "manual-BEAT-1780911274608:aster:short",
+      "margin_topups": 0,
+      "market_type": "perp",
+      "quantity": "10",
+      "side": "SHORT",
+      "status": "open",
+      "strategy_id": "manual-BEAT-1780911274608",
+      "symbol": "BEAT",
+      "venue": "aster"
+    },
+    {
+      "last_margin_topup_ts_ms": null,
+      "leg_id": "manual-BEAT-1780911274608:variational:long",
+      "margin_topups": 0,
+      "market_type": "perp",
+      "quantity": "10",
+      "side": "LONG",
+      "status": "open",
+      "strategy_id": "manual-BEAT-1780911274608",
+      "symbol": "BEAT",
+      "venue": "variational"
+    },
+    {
+      "last_margin_topup_ts_ms": null,
+      "leg_id": "manual-BEAT-1780911362679:aster:short",
+      "margin_topups": 0,
+      "market_type": "perp",
+      "quantity": "100",
+      "side": "SHORT",
+      "status": "open",
+      "strategy_id": "manual-BEAT-1780911362679",
+      "symbol": "BEAT",
+      "venue": "aster"
+    },
+    {
+      "last_margin_topup_ts_ms": null,
+      "leg_id": "manual-BEAT-1780911362679:variational:long",
+      "margin_topups": 0,
+      "market_type": "perp",
+      "quantity": "100",
+      "side": "LONG",
+      "status": "open",
+      "strategy_id": "manual-BEAT-1780911362679",
+      "symbol": "BEAT",
+      "venue": "variational"
     }
   ]
 }

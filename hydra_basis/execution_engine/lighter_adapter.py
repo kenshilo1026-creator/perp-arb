@@ -119,6 +119,38 @@ def build_lighter_limit_order_request(
     }
 
 
+def _lighter_payload_items(payload) -> list[dict]:
+    if isinstance(payload, tuple):
+        _response, payload, error = payload if len(payload) == 3 else (None, payload[-1], None)
+        if error is not None:
+            raise RuntimeError(f"lighter positions failed: {error}")
+    if isinstance(payload, list):
+        return [item for item in payload if isinstance(item, dict)]
+    if isinstance(payload, dict):
+        for key in ("positions", "data", "accounts"):
+            value = payload.get(key)
+            if isinstance(value, list):
+                return [item for item in value if isinstance(item, dict)]
+        return [payload]
+    return []
+
+
+def _lighter_position_symbol(item: dict) -> str:
+    for key in ("symbol", "ticker", "market", "name"):
+        value = item.get(key)
+        if value:
+            return str(value).strip().upper()
+    return ""
+
+
+def _lighter_position_size(item: dict) -> Decimal:
+    for key in ("position", "szi", "size", "base_amount", "baseAmount", "quantity"):
+        value = item.get(key)
+        if value not in (None, ""):
+            return Decimal(str(value))
+    return Decimal("0")
+
+
 class LighterExecutionAdapter:
     def __init__(
         self,
@@ -201,6 +233,40 @@ class LighterExecutionAdapter:
                 return result
             return {"status": str(result), "raw": result}
         raise RuntimeError("lighter client has no order status method")
+
+    async def get_open_position(self, *, symbol: str, market_type: str) -> dict[str, object] | None:
+        if market_type != "perp":
+            raise RuntimeError("lighter live position query only supports perp")
+        client = self._get_client()
+        for method_name in (
+            "get_positions",
+            "get_account_positions",
+            "get_positions_by_account",
+            "get_account",
+        ):
+            method = getattr(client, method_name, None)
+            if method is None:
+                continue
+            result = method()
+            if inspect.isawaitable(result):
+                result = await result
+            normalized_symbol = symbol.strip().upper()
+            for item in _lighter_payload_items(result):
+                item_symbol = _lighter_position_symbol(item)
+                if item_symbol and item_symbol != normalized_symbol:
+                    continue
+                size = _lighter_position_size(item)
+                if size == 0:
+                    continue
+                return {
+                    "symbol": normalized_symbol,
+                    "market_type": "perp",
+                    "side": "LONG" if size > 0 else "SHORT",
+                    "quantity": format(abs(size).normalize(), "f"),
+                    "raw": item,
+                }
+            return None
+        raise RuntimeError("lighter client has no live position query method")
 
     async def _submit_market_order(
         self,

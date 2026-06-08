@@ -230,12 +230,14 @@ class VariationalBrokerTests(unittest.IsolatedAsyncioTestCase):
 
                 await extension.send(
                     json.dumps(
-                        {
-                            "type": "ORDER_RESULT",
-                            "requestId": forwarded["requestId"],
-                            "ok": True,
-                            "details": {"symbol": forwarded["symbol"]},
-                        }
+                            {
+                                "type": "ORDER_RESULT",
+                                "requestId": forwarded["requestId"],
+                                "ok": True,
+                                "filled": True,
+                                "status": "FILLED",
+                                "details": {"symbol": forwarded["symbol"]},
+                            }
                     )
                 )
 
@@ -283,6 +285,8 @@ class VariationalBrokerTests(unittest.IsolatedAsyncioTestCase):
                                 "type": "ORDER_RESULT",
                                 "requestId": "req-1",
                                 "ok": True,
+                                "filled": True,
+                                "status": "FILLED",
                                 "orderId": "var-1",
                             }
                         )
@@ -290,6 +294,397 @@ class VariationalBrokerTests(unittest.IsolatedAsyncioTestCase):
                     result = json.loads(await strategy.recv())
 
             self.assertEqual(result["orderId"], "var-1")
+
+    async def test_broker_waits_for_variational_fill_event_before_strategy_result(self) -> None:
+        async with VariationalCommandBrokerServer(
+            host="127.0.0.1",
+            port=0,
+            fill_host="127.0.0.1",
+            fill_port=0,
+            quiet=True,
+            order_fill_timeout_seconds=1.0,
+        ) as server:
+            async with websockets.connect(server.ws_url) as extension:
+                await extension.send(json.dumps({"type": "REGISTER", "role": "extension"}))
+                self.assertTrue(json.loads(await extension.recv())["ok"])
+
+                async with websockets.connect(server.fill_ws_url) as fill_feed:
+                    async with websockets.connect(server.ws_url) as strategy:
+                        await strategy.send(json.dumps({"type": "REGISTER", "role": "strategy"}))
+                        self.assertTrue(json.loads(await strategy.recv())["ok"])
+
+                        await strategy.send(
+                            json.dumps(
+                                {
+                                    "type": "PLACE_ORDER",
+                                    "requestId": "req-fill",
+                                    "symbol": "ETH",
+                                    "side": "BUY",
+                                    "amount": "0.003",
+                                    "orderType": "LIMIT",
+                                    "price": "1600",
+                                }
+                            )
+                        )
+
+                        forwarded = json.loads(await extension.recv())
+                        self.assertEqual(forwarded["type"], "PLACE_ORDER")
+                        dispatched = json.loads(await strategy.recv())
+                        self.assertEqual(dispatched["type"], "ORDER_DISPATCHED")
+
+                        await extension.send(
+                            json.dumps(
+                                {
+                                    "type": "ORDER_RESULT",
+                                    "requestId": "req-fill",
+                                    "ok": True,
+                                    "orderId": "var-123",
+                                    "details": {"clickedSubmitText": "Buy ETH"},
+                                }
+                            )
+                        )
+                        with self.assertRaises(asyncio.TimeoutError):
+                            await asyncio.wait_for(strategy.recv(), timeout=0.05)
+
+                        await fill_feed.send(
+                            json.dumps(
+                                {
+                                    "kind": "ws_frame",
+                                    "direction": "received",
+                                    "payloadData": json.dumps(
+                                        {
+                                            "type": "order_update",
+                                            "symbol": "ETH",
+                                            "side": "BUY",
+                                            "status": "filled",
+                                            "order_id": "var-123",
+                                            "filled_base_amount": "0.003",
+                                            "filled_quote_amount": "4.8",
+                                        }
+                                    ),
+                                }
+                            )
+                        )
+
+                        result = json.loads(await strategy.recv())
+
+            self.assertTrue(result["ok"])
+            self.assertTrue(result["filled"])
+            self.assertEqual(result["status"], "FILLED")
+            self.assertEqual(result["orderId"], "var-123")
+
+    async def test_broker_returns_failure_when_variational_fill_event_times_out(self) -> None:
+        async with VariationalCommandBrokerServer(
+            host="127.0.0.1",
+            port=0,
+            fill_host="127.0.0.1",
+            fill_port=0,
+            quiet=True,
+            order_fill_timeout_seconds=0.05,
+        ) as server:
+            async with websockets.connect(server.ws_url) as extension:
+                await extension.send(json.dumps({"type": "REGISTER", "role": "extension"}))
+                self.assertTrue(json.loads(await extension.recv())["ok"])
+
+                async with websockets.connect(server.ws_url) as strategy:
+                    await strategy.send(json.dumps({"type": "REGISTER", "role": "strategy"}))
+                    self.assertTrue(json.loads(await strategy.recv())["ok"])
+
+                    await strategy.send(
+                        json.dumps(
+                            {
+                                "type": "PLACE_ORDER",
+                                "requestId": "req-timeout",
+                                "symbol": "ETH",
+                                "side": "SELL",
+                                "amount": "0.003",
+                                "orderType": "LIMIT",
+                            }
+                        )
+                    )
+                    forwarded = json.loads(await extension.recv())
+                    self.assertEqual(forwarded["type"], "PLACE_ORDER")
+                    self.assertEqual(json.loads(await strategy.recv())["type"], "ORDER_DISPATCHED")
+                    await extension.send(
+                        json.dumps(
+                            {
+                                "type": "ORDER_RESULT",
+                                "requestId": "req-timeout",
+                                "ok": True,
+                                "orderId": "var-timeout",
+                            }
+                        )
+                    )
+                    result = json.loads(await strategy.recv())
+
+            self.assertFalse(result["ok"])
+            self.assertIn("fill timeout", result["error"])
+
+    async def test_broker_handles_variational_fill_event_before_submit_ack(self) -> None:
+        async with VariationalCommandBrokerServer(
+            host="127.0.0.1",
+            port=0,
+            fill_host="127.0.0.1",
+            fill_port=0,
+            quiet=True,
+            order_fill_timeout_seconds=1.0,
+        ) as server:
+            async with websockets.connect(server.ws_url) as extension:
+                await extension.send(json.dumps({"type": "REGISTER", "role": "extension"}))
+                self.assertTrue(json.loads(await extension.recv())["ok"])
+
+                async with websockets.connect(server.fill_ws_url) as fill_feed:
+                    async with websockets.connect(server.ws_url) as strategy:
+                        await strategy.send(json.dumps({"type": "REGISTER", "role": "strategy"}))
+                        self.assertTrue(json.loads(await strategy.recv())["ok"])
+
+                        await strategy.send(
+                            json.dumps(
+                                {
+                                    "type": "PLACE_ORDER",
+                                    "requestId": "req-early-fill",
+                                    "symbol": "H",
+                                    "side": "SELL",
+                                    "amount": "10",
+                                    "orderType": "LIMIT",
+                                }
+                            )
+                        )
+
+                        forwarded = json.loads(await extension.recv())
+                        self.assertEqual(forwarded["type"], "PLACE_ORDER")
+                        self.assertEqual(json.loads(await strategy.recv())["type"], "ORDER_DISPATCHED")
+
+                        await fill_feed.send(
+                            json.dumps(
+                                {
+                                    "kind": "ws_frame",
+                                    "direction": "received",
+                                    "payloadData": json.dumps(
+                                        {
+                                            "type": "trade",
+                                            "symbol": "H",
+                                            "side": "SELL",
+                                            "status": "filled",
+                                            "order_id": "var-early",
+                                            "filled_base_amount": "10",
+                                        }
+                                    ),
+                                }
+                            )
+                        )
+                        with self.assertRaises(asyncio.TimeoutError):
+                            await asyncio.wait_for(strategy.recv(), timeout=0.05)
+
+                        await extension.send(
+                            json.dumps(
+                                {
+                                    "type": "ORDER_RESULT",
+                                    "requestId": "req-early-fill",
+                                    "ok": True,
+                                    "orderId": "var-early",
+                                }
+                            )
+                        )
+                        result = json.loads(await strategy.recv())
+
+            self.assertTrue(result["ok"])
+            self.assertTrue(result["filled"])
+            self.assertEqual(result["orderId"], "var-early")
+
+    async def test_broker_accepts_single_pending_fill_even_when_variational_side_differs(self) -> None:
+        async with VariationalCommandBrokerServer(
+            host="127.0.0.1",
+            port=0,
+            fill_host="127.0.0.1",
+            fill_port=0,
+            quiet=True,
+            order_fill_timeout_seconds=1.0,
+        ) as server:
+            async with websockets.connect(server.ws_url) as extension:
+                await extension.send(json.dumps({"type": "REGISTER", "role": "extension"}))
+                self.assertTrue(json.loads(await extension.recv())["ok"])
+
+                async with websockets.connect(server.fill_ws_url) as fill_feed:
+                    async with websockets.connect(server.ws_url) as strategy:
+                        await strategy.send(json.dumps({"type": "REGISTER", "role": "strategy"}))
+                        self.assertTrue(json.loads(await strategy.recv())["ok"])
+
+                        await strategy.send(
+                            json.dumps(
+                                {
+                                    "type": "PLACE_ORDER",
+                                    "requestId": "req-side-diff",
+                                    "symbol": "BEAT",
+                                    "side": "BUY",
+                                    "amount": "10",
+                                    "orderType": "LIMIT",
+                                }
+                            )
+                        )
+                        forwarded = json.loads(await extension.recv())
+                        self.assertEqual(forwarded["type"], "PLACE_ORDER")
+                        self.assertEqual(json.loads(await strategy.recv())["type"], "ORDER_DISPATCHED")
+
+                        await extension.send(
+                            json.dumps(
+                                {
+                                    "type": "ORDER_RESULT",
+                                    "requestId": "req-side-diff",
+                                    "ok": True,
+                                    "orderId": None,
+                                }
+                            )
+                        )
+                        await fill_feed.send(
+                            json.dumps(
+                                {
+                                    "kind": "ws_frame",
+                                    "direction": "received",
+                                    "payloadData": json.dumps(
+                                        {
+                                            "type": "trade",
+                                            "symbol": "BEAT",
+                                            "side": "SELL",
+                                            "status": "filled",
+                                            "filled_base_amount": "10",
+                                        }
+                                    ),
+                                }
+                            )
+                        )
+                        result = json.loads(await strategy.recv())
+
+            self.assertTrue(result["ok"])
+            self.assertTrue(result["filled"])
+            self.assertEqual(result["status"], "FILLED")
+
+    async def test_broker_extracts_underlying_from_variational_instrument_trade_event(self) -> None:
+        async with VariationalCommandBrokerServer(
+            host="127.0.0.1",
+            port=0,
+            fill_host="127.0.0.1",
+            fill_port=0,
+            quiet=True,
+            order_fill_timeout_seconds=1.0,
+        ) as server:
+            async with websockets.connect(server.ws_url) as extension:
+                await extension.send(json.dumps({"type": "REGISTER", "role": "extension"}))
+                self.assertTrue(json.loads(await extension.recv())["ok"])
+
+                async with websockets.connect(server.fill_ws_url) as fill_feed:
+                    async with websockets.connect(server.ws_url) as strategy:
+                        await strategy.send(json.dumps({"type": "REGISTER", "role": "strategy"}))
+                        self.assertTrue(json.loads(await strategy.recv())["ok"])
+
+                        await strategy.send(
+                            json.dumps(
+                                {
+                                    "type": "PLACE_ORDER",
+                                    "requestId": "req-instrument",
+                                    "symbol": "BEAT",
+                                    "side": "BUY",
+                                    "amount": "10",
+                                    "orderType": "LIMIT",
+                                }
+                            )
+                        )
+                        forwarded = json.loads(await extension.recv())
+                        self.assertEqual(forwarded["type"], "PLACE_ORDER")
+                        self.assertEqual(json.loads(await strategy.recv())["type"], "ORDER_DISPATCHED")
+                        await extension.send(
+                            json.dumps(
+                                {
+                                    "type": "ORDER_RESULT",
+                                    "requestId": "req-instrument",
+                                    "ok": True,
+                                    "orderId": None,
+                                }
+                            )
+                        )
+                        await fill_feed.send(
+                            json.dumps(
+                                {
+                                    "kind": "ws_frame",
+                                    "direction": "received",
+                                    "payloadData": json.dumps(
+                                        {
+                                            "timestamp": "2026-06-08T09:21:52.512Z",
+                                            "type": "trade",
+                                            "data": {
+                                                "id": "90cf813a-5910-4680-bfa8-5edf1f50fe38",
+                                                "side": "buy",
+                                                "instrument": {
+                                                    "instrument_type": "perpetual_future",
+                                                    "underlying": "BEAT",
+                                                    "settlement_asset": "USDC",
+                                                },
+                                                "price": "4.31746",
+                                                "qty": "10",
+                                                "role": "taker",
+                                                "trade_type": "trade",
+                                                "status": "confirmed",
+                                            },
+                                        }
+                                    ),
+                                }
+                            )
+                        )
+                        result = json.loads(await strategy.recv())
+
+            self.assertTrue(result["ok"])
+            self.assertTrue(result["filled"])
+            self.assertEqual(result["details"]["fill"]["symbol"], "BEAT")
+            self.assertEqual(result["orderId"], "90cf813a-5910-4680-bfa8-5edf1f50fe38")
+
+    async def test_broker_timeout_includes_fill_diagnostics(self) -> None:
+        async with VariationalCommandBrokerServer(
+            host="127.0.0.1",
+            port=0,
+            fill_host="127.0.0.1",
+            fill_port=0,
+            quiet=True,
+            order_fill_timeout_seconds=0.05,
+        ) as server:
+            async with websockets.connect(server.ws_url) as extension:
+                await extension.send(json.dumps({"type": "REGISTER", "role": "extension"}))
+                self.assertTrue(json.loads(await extension.recv())["ok"])
+
+                async with websockets.connect(server.fill_ws_url):
+                    async with websockets.connect(server.ws_url) as strategy:
+                        await strategy.send(json.dumps({"type": "REGISTER", "role": "strategy"}))
+                        self.assertTrue(json.loads(await strategy.recv())["ok"])
+
+                        await strategy.send(
+                            json.dumps(
+                                {
+                                    "type": "PLACE_ORDER",
+                                    "requestId": "req-diagnostics",
+                                    "symbol": "BEAT",
+                                    "side": "BUY",
+                                    "amount": "10",
+                                    "orderType": "LIMIT",
+                                }
+                            )
+                        )
+                        forwarded = json.loads(await extension.recv())
+                        self.assertEqual(forwarded["type"], "PLACE_ORDER")
+                        self.assertEqual(json.loads(await strategy.recv())["type"], "ORDER_DISPATCHED")
+                        await extension.send(
+                            json.dumps(
+                                {
+                                    "type": "ORDER_RESULT",
+                                    "requestId": "req-diagnostics",
+                                    "ok": True,
+                                }
+                            )
+                        )
+                        result = json.loads(await strategy.recv())
+
+            self.assertFalse(result["ok"])
+            diagnostics = result["details"]["fill_diagnostics"]
+            self.assertEqual(diagnostics["fill_feed_connections"], 1)
+            self.assertEqual(diagnostics["fill_events_seen"], 0)
 
 
 if __name__ == "__main__":

@@ -4,6 +4,7 @@ import hashlib
 import hmac
 import os
 import time
+from decimal import Decimal
 from urllib.parse import urlencode
 
 import aiohttp
@@ -94,6 +95,19 @@ class MexcSpotExecutionAdapter:
                     raise RuntimeError(f"mexc spot order status {resp.status}: {data}")
                 return data
 
+    async def _get_account(self) -> dict:
+        signed_params = self._signed_order_params({})
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                f"{self.BASE_URL}/api/v3/account",
+                params=signed_params,
+                headers=self._order_headers(),
+            ) as resp:
+                data = await resp.json()
+                if resp.status != 200:
+                    raise RuntimeError(f"mexc spot account {resp.status}: {data}")
+                return data
+
     def _spot_symbol(self, symbol: str) -> str:
         normalized = symbol.strip().upper()
         if normalized.endswith("USDT"):
@@ -152,6 +166,28 @@ class MexcSpotExecutionAdapter:
             poll_interval_seconds=poll_interval_seconds,
             timeout_message="mexc spot limit order fill timeout",
         )
+
+    async def get_open_position(self, *, symbol: str, market_type: str) -> dict | None:
+        if market_type != "spot":
+            raise RuntimeError("mexc spot live position query only supports spot")
+        asset = symbol.strip().upper()
+        account = await self._get_account()
+        for item in account.get("balances", []):
+            if str(item.get("asset", "")).strip().upper() != asset:
+                continue
+            free = Decimal(str(item.get("free", "0") or "0"))
+            locked = Decimal(str(item.get("locked", "0") or "0"))
+            quantity = free + locked
+            if quantity <= 0:
+                continue
+            return {
+                "symbol": asset,
+                "market_type": "spot",
+                "side": "LONG",
+                "quantity": format(quantity.normalize(), "f"),
+                "raw": item,
+            }
+        return None
 
     async def close_position(
         self,

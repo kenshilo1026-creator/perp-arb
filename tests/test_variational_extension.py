@@ -52,6 +52,14 @@ class VariationalExtensionCommandClientTests(unittest.TestCase):
         self.assertIn("submitEnableTimeoutMs", background)
         self.assertIn("Submit button stayed disabled", background)
 
+    def test_background_retries_injection_when_page_frame_is_removed(self) -> None:
+        background = (EXT_DIR / "background.js").read_text(encoding="utf-8")
+
+        self.assertIn("runVariationalOrderInjection", background)
+        self.assertIn("isTransientFrameRemovalError", background)
+        self.assertIn("Frame with ID", background)
+        self.assertIn("await sleep(1000)", background)
+
     def test_background_supports_market_and_limit_order_modes(self) -> None:
         background = (EXT_DIR / "background.js").read_text(encoding="utf-8")
 

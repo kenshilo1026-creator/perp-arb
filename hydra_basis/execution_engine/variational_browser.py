@@ -156,14 +156,19 @@ class VariationalBrowserExecutionAdapter:
             return
 
     async def _await_order_result(self, ws, *, request_id: str, symbol: str) -> dict[str, object]:
+        order_dispatched = False
         while True:
-            msg = await asyncio.wait_for(ws.receive(), timeout=self.timeout_seconds)
+            if order_dispatched:
+                msg = await ws.receive()
+            else:
+                msg = await asyncio.wait_for(ws.receive(), timeout=self.timeout_seconds)
             if msg.type != WSMsgType.TEXT:
                 continue
             payload = msg.json()
             if payload.get("requestId") != request_id:
                 continue
             if payload.get("type") == "ORDER_DISPATCHED":
+                order_dispatched = True
                 continue
             if payload.get("type") != "ORDER_RESULT":
                 continue

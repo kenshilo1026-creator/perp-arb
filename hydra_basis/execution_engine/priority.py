@@ -17,11 +17,6 @@ def resolve_execution_legs(
     short_above = short_spread > spread_priority_threshold
     long_above = long_spread > spread_priority_threshold
 
-    if short_above != long_above:
-        if short_spread < long_spread:
-            return long_venue, short_venue
-        return short_venue, long_venue
-
     if short_above and long_above:
         if short_spread < long_spread:
             return long_venue, short_venue

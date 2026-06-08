@@ -61,6 +61,14 @@ def format_aster_step_quantity(quantity: str, step_size: str) -> str:
     return format(rounded.normalize(), "f")
 
 
+def strip_aster_stable_suffix(symbol: str) -> str:
+    normalized = str(symbol).strip().upper()
+    for suffix in ASTER_EXECUTION_SUFFIXES:
+        if normalized.endswith(suffix):
+            return normalized[: -len(suffix)]
+    return normalized
+
+
 class AsterExecutionAdapter:
     BASE_URL = "https://fapi.asterdex.com"
 
@@ -122,6 +130,9 @@ class AsterExecutionAdapter:
             if raw_symbol in exchange_info:
                 return raw_symbol
         raise RuntimeError(f"aster symbol not found: {symbol}")
+
+    async def warm_up(self) -> None:
+        await self._load_exchange_info_by_symbol()
 
     async def _load_exchange_info_by_symbol(self) -> dict[str, dict]:
         if self._exchange_info_by_symbol is not None:
@@ -240,6 +251,33 @@ class AsterExecutionAdapter:
             "orderId": str(order_id),
         })
         return await self._get_signed_query(f"{self.BASE_URL}/fapi/v3/order", params)
+
+    async def _fetch_position_risk(self) -> list[dict]:
+        params = self.build_signed_params({})
+        data = await self._get_signed_query(f"{self.BASE_URL}/fapi/v3/positionRisk", params)
+        if not isinstance(data, list):
+            raise RuntimeError(f"unexpected aster positionRisk payload: {data}")
+        return data
+
+    async def get_open_position(self, *, symbol: str, market_type: str) -> dict | None:
+        if market_type != "perp":
+            raise RuntimeError("aster live position query only supports perp")
+        normalized_symbol = symbol.strip().upper()
+        for item in await self._fetch_position_risk():
+            if strip_aster_stable_suffix(str(item.get("symbol", ""))) != normalized_symbol:
+                continue
+            amount = Decimal(str(item.get("positionAmt", "0") or "0"))
+            if amount == 0:
+                continue
+            side = "LONG" if amount > 0 else "SHORT"
+            return {
+                "symbol": normalized_symbol,
+                "market_type": "perp",
+                "side": side,
+                "quantity": format(abs(amount).normalize(), "f"),
+                "raw": item,
+            }
+        return None
 
     async def wait_for_order_fill(
         self,

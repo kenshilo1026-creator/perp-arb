@@ -158,6 +158,39 @@ class HyperliquidExecutionAdapter:
                 },
             )
 
+    async def _fetch_clearinghouse_state(self) -> dict:
+        async with aiohttp.ClientSession() as session:
+            return await fetch_json(
+                session,
+                "POST",
+                HYPERLIQUID_INFO_URL,
+                json={
+                    "type": "clearinghouseState",
+                    "user": self.account_address,
+                },
+            )
+
+    async def get_open_position(self, *, symbol: str, market_type: str) -> dict | None:
+        if market_type != "perp":
+            raise RuntimeError("hyperliquid live position query only supports perp")
+        normalized_symbol = symbol.strip().upper()
+        state = await self._fetch_clearinghouse_state()
+        for item in state.get("assetPositions", []):
+            position = item.get("position", {})
+            if str(position.get("coin", "")).strip().upper() != normalized_symbol:
+                continue
+            size = Decimal(str(position.get("szi", "0") or "0"))
+            if size == 0:
+                continue
+            return {
+                "symbol": normalized_symbol,
+                "market_type": "perp",
+                "side": "LONG" if size > 0 else "SHORT",
+                "quantity": format(abs(size).normalize(), "f"),
+                "raw": item,
+            }
+        return None
+
     async def ensure_isolated_margin(self, symbol: str) -> int:
         asset_index = await self._get_asset_index(symbol)
         if asset_index in self._isolated_asset_indices:

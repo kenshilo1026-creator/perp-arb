@@ -10,6 +10,7 @@ ensure_project_root_on_path()
 
 from hydra_basis.adapters.registry import FETCHERS, FETCHERS_SINCE, SYMBOL_DISCOVERERS
 from hydra_basis.backfill import (
+    build_spread_refresh_keys,
     chunk_sequence,
     split_loris_batched_keys,
     capture_backfill_spread_snapshot,
@@ -71,7 +72,6 @@ async def run_backfill() -> None:
 
         pending_keys = []
         incremental_starts: dict[tuple[str, str], int] = {}
-        full_backfill_keys: set[tuple[str, str]] = set()
         skipped_complete = 0
         top_up_scheduled = 0
         full_backfill_scheduled = 0
@@ -95,7 +95,6 @@ async def run_backfill() -> None:
                         skipped_complete += 1
                     continue
                 pending_keys.append((venue, symbol))
-                full_backfill_keys.add((venue, symbol))
                 full_backfill_scheduled += 1
                 if venue in FETCHERS_SINCE:
                     start_ms = backfill_incremental_start_ms(merged_cached_points)
@@ -108,6 +107,12 @@ async def run_backfill() -> None:
             f"top_up={top_up_scheduled} "
             f"full={full_backfill_scheduled}"
         )
+        spread_refresh_keys = build_spread_refresh_keys(
+            venue_symbols,
+            enabled_venues=enabled_venues,
+            supported_venues=set(FETCHERS),
+        )
+        print(f"backfill spread refresh size={len(spread_refresh_keys)}")
 
         immediate_keys, loris_batched_keys = split_loris_batched_keys(pending_keys)
 
@@ -147,14 +152,6 @@ async def run_backfill() -> None:
                     merged,
                     lookback_ms=FUNDING_HISTORY_LOOKBACK_DAYS * 24 * 60 * 60 * 1000,
                 )
-                if key in full_backfill_keys:
-                    await capture_backfill_spread_snapshot(
-                        session=session,
-                        spreads=all_spreads,
-                        venue=key[0],
-                        symbol=key[1],
-                        clip_usd=BACKFILL_SPREAD_CLIP_USD,
-                    )
                 dirty += 1
                 if dirty % PERSIST_EVERY_N == 0:
                     persist_backfill_progress(
@@ -209,14 +206,6 @@ async def run_backfill() -> None:
                     merged,
                     lookback_ms=FUNDING_HISTORY_LOOKBACK_DAYS * 24 * 60 * 60 * 1000,
                 )
-                if key in full_backfill_keys:
-                    await capture_backfill_spread_snapshot(
-                        session=session,
-                        spreads=all_spreads,
-                        venue=key[0],
-                        symbol=key[1],
-                        clip_usd=BACKFILL_SPREAD_CLIP_USD,
-                    )
                 dirty += 1
                 if dirty % PERSIST_EVERY_N == 0:
                     persist_backfill_progress(
@@ -236,6 +225,38 @@ async def run_backfill() -> None:
             if batch_index < len(batches):
                 print(f"backfill sleep {BACKFILL_BATCH_SLEEP_SECONDS}s")
                 await asyncio.sleep(BACKFILL_BATCH_SLEEP_SECONDS)
+
+        if spread_refresh_keys:
+            spread_batches = chunk_sequence(spread_refresh_keys, chunk_size=PERSIST_EVERY_N)
+            for batch_index, batch in enumerate(spread_batches, start=1):
+                print(f"backfill spread-batch {batch_index}/{len(spread_batches)} size={len(batch)}")
+                tasks = [
+                    capture_backfill_spread_snapshot(
+                        session=session,
+                        spreads=all_spreads,
+                        venue=venue,
+                        symbol=symbol,
+                        clip_usd=BACKFILL_SPREAD_CLIP_USD,
+                        force_refresh=True,
+                    )
+                    for venue, symbol in batch
+                ]
+                results = await gather_limited(
+                    tasks,
+                    limit=FETCH_CONCURRENCY_LIMIT,
+                    return_exceptions=True,
+                )
+                for key, result in zip(batch, results):
+                    if isinstance(result, Exception):
+                        if should_raise_immediately(result):
+                            raise result
+                        print(f"backfill spread failed {key}: {result!r}")
+                persist_backfill_progress(
+                    history_store=store,
+                    spread_store=spread_store,
+                    funding_points=all_points,
+                    spreads=all_spreads,
+                )
 
 
 if __name__ == "__main__":

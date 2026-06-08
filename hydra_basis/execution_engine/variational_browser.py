@@ -7,6 +7,8 @@ from pathlib import Path
 
 from aiohttp import ClientSession, WSMsgType
 
+from hydra_basis.execution_engine.order_fill import status_dict_looks_filled
+
 
 def build_place_order_payload(
     *,
@@ -119,6 +121,26 @@ class VariationalBrowserExecutionAdapter:
             symbol=symbol, side=side, amount=amount, clip_usd=clip_usd,
             market=market, account=account, order_type="market",
             timeout_ms=timeout_ms,
+        )
+
+    async def wait_for_order_fill(
+        self,
+        *,
+        order_result: dict[str, object],
+        symbol: str,
+        side: str,
+        amount: str,
+        timeout_seconds: float,
+        poll_interval_seconds: float = 0.5,
+    ) -> dict[str, object]:
+        if bool(order_result.get("filled")) or status_dict_looks_filled(order_result):
+            return {"ok": True, "raw": order_result}
+        details = order_result.get("details")
+        if isinstance(details, dict) and status_dict_looks_filled(details):
+            return {"ok": True, "raw": order_result}
+        raise RuntimeError(
+            "variational limit order fill confirmation unavailable: "
+            "browser ORDER_RESULT must include filled=true or status=FILLED"
         )
 
     async def _await_register_ack(self, ws) -> None:

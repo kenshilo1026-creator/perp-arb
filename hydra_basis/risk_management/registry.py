@@ -28,6 +28,9 @@ class PositionRegistry:
             if leg.strategy_id == strategy_id
         ]
 
+    def open_strategy_ids(self) -> list[str]:
+        return sorted({leg.strategy_id for leg in self._legs.values() if leg.status == "open"})
+
     def open_counterparty_legs(self, *, strategy_id: str, trigger_leg_id: str) -> list[PositionLeg]:
         return [
             leg

@@ -8,6 +8,8 @@ from urllib.parse import urlencode
 
 import aiohttp
 
+from hydra_basis.execution_engine.order_fill import poll_until_filled
+
 
 class MexcSpotExecutionAdapter:
     BASE_URL = "https://api.mexc.com"
@@ -79,6 +81,19 @@ class MexcSpotExecutionAdapter:
                     raise RuntimeError(f"mexc spot order {resp.status}: {data}")
                 return data
 
+    async def _get_order(self, params: dict) -> dict:
+        signed_params = self._signed_order_params(params)
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                f"{self.BASE_URL}/api/v3/order",
+                params=signed_params,
+                headers=self._order_headers(),
+            ) as resp:
+                data = await resp.json()
+                if resp.status != 200:
+                    raise RuntimeError(f"mexc spot order status {resp.status}: {data}")
+                return data
+
     def _spot_symbol(self, symbol: str) -> str:
         normalized = symbol.strip().upper()
         if normalized.endswith("USDT"):
@@ -112,6 +127,31 @@ class MexcSpotExecutionAdapter:
             }
         )
         return {"ok": True, "order_id": data.get("orderId"), "raw": data}
+
+    async def wait_for_order_fill(
+        self,
+        *,
+        order_result: dict,
+        symbol: str,
+        side: str,
+        amount: str,
+        timeout_seconds: float,
+        poll_interval_seconds: float = 0.5,
+    ) -> dict:
+        order_id = order_result.get("order_id") or order_result.get("orderId")
+        if order_id is None:
+            raise RuntimeError("mexc spot limit order fill wait requires order_id")
+        return await poll_until_filled(
+            fetch_status=lambda: self._get_order(
+                {
+                    "symbol": self._spot_symbol(symbol),
+                    "orderId": order_id,
+                }
+            ),
+            timeout_seconds=timeout_seconds,
+            poll_interval_seconds=poll_interval_seconds,
+            timeout_message="mexc spot limit order fill timeout",
+        )
 
     async def close_position(
         self,

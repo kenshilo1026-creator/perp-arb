@@ -16,6 +16,7 @@ from eth_hash.auto import keccak
 
 from hydra_basis.adapters.base import fetch_json
 from hydra_basis.adapters.hyperliquid import fetch_hyperliquid_universe
+from hydra_basis.execution_engine.order_fill import poll_until_filled
 
 
 HYPERLIQUID_EXCHANGE_URL = "https://api.hyperliquid.xyz/exchange"
@@ -144,6 +145,19 @@ class HyperliquidExecutionAdapter:
                     raise RuntimeError(f"hyperliquid order rejected: {data}")
                 return data
 
+    async def _get_order_status(self, order_id: object) -> dict:
+        async with aiohttp.ClientSession() as session:
+            return await fetch_json(
+                session,
+                "POST",
+                HYPERLIQUID_INFO_URL,
+                json={
+                    "type": "orderStatus",
+                    "user": self.account_address,
+                    "oid": order_id,
+                },
+            )
+
     async def ensure_isolated_margin(self, symbol: str) -> int:
         asset_index = await self._get_asset_index(symbol)
         if asset_index in self._isolated_asset_indices:
@@ -218,6 +232,26 @@ class HyperliquidExecutionAdapter:
         data = await self._post_order(action)
         order_id = extract_hyperliquid_order_id(data, fill_type="resting")
         return {"ok": True, "order_id": order_id, "raw": data}
+
+    async def wait_for_order_fill(
+        self,
+        *,
+        order_result: dict,
+        symbol: str,
+        side: str,
+        amount: str,
+        timeout_seconds: float,
+        poll_interval_seconds: float = 0.5,
+    ) -> dict:
+        order_id = order_result.get("order_id") or order_result.get("oid")
+        if order_id is None:
+            raise RuntimeError("hyperliquid limit order fill wait requires order_id")
+        return await poll_until_filled(
+            fetch_status=lambda: self._get_order_status(order_id),
+            timeout_seconds=timeout_seconds,
+            poll_interval_seconds=poll_interval_seconds,
+            timeout_message="hyperliquid limit order fill timeout",
+        )
 
     async def place_market_order(
         self, *, symbol: str, side: str, amount: str, clip_usd: float

@@ -3,6 +3,8 @@ from __future__ import annotations
 import argparse
 import asyncio
 
+import aiohttp
+
 try:
     from _bootstrap import ensure_project_root_on_path
 except ModuleNotFoundError:  # pragma: no cover
@@ -10,7 +12,12 @@ except ModuleNotFoundError:  # pragma: no cover
 
 ensure_project_root_on_path()
 
-from hydra_basis.config import MARGIN_TOPUP_CONFIG_PATH, POSITION_REGISTRY_PATH
+from hydra_basis.config import (
+    FUNDING_RISK_CONFIG_PATH,
+    FUNDING_RISK_STATE_PATH,
+    MARGIN_TOPUP_CONFIG_PATH,
+    POSITION_REGISTRY_PATH,
+)
 from hydra_basis.env import load_environment
 from hydra_basis.execution_engine.aster_adapter import AsterExecutionAdapter
 from hydra_basis.execution_engine.lighter_adapter import LighterExecutionAdapter
@@ -30,6 +37,11 @@ from hydra_basis.risk_management.exchange_watchers import (
     HyperliquidUserEventsWatcher,
 )
 from hydra_basis.risk_management.manager import EmergencyRiskManager
+from hydra_basis.risk_management.funding_risk import load_funding_risk_config
+from hydra_basis.risk_management.funding_runtime import (
+    FundingHistoryRiskDataProvider,
+    process_funding_risk_once,
+)
 from hydra_basis.risk_management.margin_topup import (
     MarginTopupManager,
     build_snapshots_for_signal,
@@ -102,11 +114,13 @@ async def run_risk_manager(*, venues: set[str], live: bool) -> None:
     margin_watchers = build_margin_watchers(venues)
     closers = build_closers()
     margin_config = load_margin_topup_config(MARGIN_TOPUP_CONFIG_PATH)
+    funding_config = load_funding_risk_config(FUNDING_RISK_CONFIG_PATH)
     mode = "LIVE" if live else "DRY_RUN"
     print(f"risk manager running mode={mode} registry={POSITION_REGISTRY_PATH}")
     print(f"margin top-up config={MARGIN_TOPUP_CONFIG_PATH} enabled={margin_config.enabled}")
+    print(f"funding risk config={FUNDING_RISK_CONFIG_PATH} enabled={funding_config.enabled}")
     await send_telegram(f"風控監控已啟動 mode={mode}")
-    if not watchers and not margin_watchers:
+    if not watchers and not margin_watchers and not funding_config.enabled:
         raise RuntimeError("no risk or margin watchers enabled")
 
     async def run_one_watcher(watcher) -> None:
@@ -169,9 +183,28 @@ async def run_risk_manager(*, venues: set[str], live: bool) -> None:
                 registry.save(POSITION_REGISTRY_PATH)
             await asyncio.sleep(0)
 
+    async def run_funding_risk_loop() -> None:
+        async with aiohttp.ClientSession(headers={"User-Agent": "funding-arb-risk/0.1"}) as session:
+            provider = FundingHistoryRiskDataProvider(session=session)
+            while True:
+                result = await process_funding_risk_once(
+                    registry_path=POSITION_REGISTRY_PATH,
+                    state_path=FUNDING_RISK_STATE_PATH,
+                    provider=provider,
+                    closers=closers,
+                    config=funding_config,
+                    dry_run=dry_run,
+                )
+                for message in result.get("messages", []):
+                    text = f"資費風控\n{message}\nmode={mode}"
+                    print(text)
+                    await send_telegram(text)
+                await asyncio.sleep(funding_config.check_interval_seconds)
+
     await asyncio.gather(
         *(run_one_watcher(watcher) for watcher in watchers),
         *(run_one_margin_watcher(watcher) for watcher in margin_watchers),
+        *((run_funding_risk_loop(),) if funding_config.enabled else ()),
     )
 
 

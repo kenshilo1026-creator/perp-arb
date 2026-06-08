@@ -1,0 +1,13 @@
+{
+  // 是否啟用 pair-level 資費風控。
+  "enabled": true,
+
+  // 每隔多少秒檢查一次目前 funding，預設每小時一次。
+  "check_interval_seconds": 3600,
+
+  // 以較長 interval 那條腿為準，連續多少個長 interval window 淨資費為負才通知。
+  "consecutive_negative_windows": 2,
+
+  // 單個長 interval window 的預估/已結算淨資費虧損超過多少百分比時自動平倉。
+  "auto_close_negative_funding_pct": 0.1
+}

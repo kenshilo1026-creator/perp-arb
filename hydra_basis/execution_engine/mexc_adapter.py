@@ -9,6 +9,7 @@ import time
 import aiohttp
 
 from hydra_basis.adapters.mexc import mexc_contract_symbol
+from hydra_basis.execution_engine.order_fill import poll_until_filled
 
 
 # MEXC futures order sides
@@ -60,19 +61,21 @@ class MexcExecutionAdapter:
             hashlib.sha256,
         ).hexdigest()
 
+    def _signed_headers(self, body: str) -> dict[str, str]:
+        timestamp = self._timestamp_ms()
+        return {
+            "ApiKey": self.api_key,
+            "Request-Time": timestamp,
+            "Signature": self._sign(self.api_key, timestamp, body),
+            "Content-Type": "application/json",
+        }
+
     def _side(self, side: str) -> int:
         return _SIDE_OPEN_LONG if side.strip().upper() == "BUY" else _SIDE_OPEN_SHORT
 
     async def _post_order(self, body: dict) -> dict:
-        timestamp = self._timestamp_ms()
         body_str = json.dumps(body, separators=(",", ":"))
-        sig = self._sign(self.api_key, timestamp, body_str)
-        headers = {
-            "ApiKey": self.api_key,
-            "Request-Time": timestamp,
-            "Signature": sig,
-            "Content-Type": "application/json",
-        }
+        headers = self._signed_headers(body_str)
         async with aiohttp.ClientSession() as session:
             async with session.post(
                 f"{self.BASE_URL}/api/v1/private/order/submit",
@@ -83,6 +86,17 @@ class MexcExecutionAdapter:
                 if resp.status != 200 or not data.get("success"):
                     raise RuntimeError(f"mexc order {resp.status}: {data}")
                 return data
+
+    async def _get_order_status(self, order_id: object) -> dict:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                f"{self.BASE_URL}/api/v1/private/order/get/{order_id}",
+                headers=self._signed_headers(""),
+            ) as resp:
+                data = await resp.json()
+                if resp.status != 200 or not data.get("success"):
+                    raise RuntimeError(f"mexc order status {resp.status}: {data}")
+                return data.get("data", data)
 
     async def place_limit_order(
         self, *, symbol: str, side: str, amount: str, clip_usd: float, price: str
@@ -100,6 +114,26 @@ class MexcExecutionAdapter:
             "externalOid": "",
         })
         return {"ok": True, "order_id": data.get("data"), "raw": data}
+
+    async def wait_for_order_fill(
+        self,
+        *,
+        order_result: dict,
+        symbol: str,
+        side: str,
+        amount: str,
+        timeout_seconds: float,
+        poll_interval_seconds: float = 0.5,
+    ) -> dict:
+        order_id = order_result.get("order_id") or order_result.get("orderId")
+        if order_id is None:
+            raise RuntimeError("mexc limit order fill wait requires order_id")
+        return await poll_until_filled(
+            fetch_status=lambda: self._get_order_status(order_id),
+            timeout_seconds=timeout_seconds,
+            poll_interval_seconds=poll_interval_seconds,
+            timeout_message="mexc limit order fill timeout",
+        )
 
     async def place_market_order(
         self, *, symbol: str, side: str, amount: str, clip_usd: float

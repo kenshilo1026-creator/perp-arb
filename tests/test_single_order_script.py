@@ -420,6 +420,99 @@ class VariationalBrokerTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(result["ok"])
             self.assertIn("fill timeout", result["error"])
 
+    async def test_broker_forwards_cancel_order_to_extension_and_returns_result(self) -> None:
+        async with VariationalCommandBrokerServer(
+            host="127.0.0.1",
+            port=0,
+            fill_host="127.0.0.1",
+            fill_port=0,
+            quiet=True,
+            order_fill_timeout_seconds=1.0,
+        ) as server:
+            async with websockets.connect(server.ws_url) as extension:
+                await extension.send(json.dumps({"type": "REGISTER", "role": "extension"}))
+                self.assertTrue(json.loads(await extension.recv())["ok"])
+
+                async with websockets.connect(server.ws_url) as strategy:
+                    await strategy.send(json.dumps({"type": "REGISTER", "role": "strategy"}))
+                    self.assertTrue(json.loads(await strategy.recv())["ok"])
+
+                    await strategy.send(
+                        json.dumps(
+                            {
+                                "type": "CANCEL_ORDER",
+                                "requestId": "cancel-1",
+                                "symbol": "ETH",
+                                "side": "SELL",
+                                "amount": "0.003",
+                                "orderId": "var-timeout",
+                            }
+                        )
+                    )
+                    forwarded = json.loads(await extension.recv())
+                    self.assertEqual(forwarded["type"], "CANCEL_ORDER")
+                    self.assertEqual(forwarded["orderId"], "var-timeout")
+
+                    await extension.send(
+                        json.dumps(
+                            {
+                                "type": "CANCEL_RESULT",
+                                "requestId": "cancel-1",
+                                "ok": True,
+                                "orderId": "var-timeout",
+                            }
+                        )
+                    )
+                    result = json.loads(await strategy.recv())
+
+            self.assertTrue(result["ok"])
+            self.assertEqual(result["type"], "CANCEL_RESULT")
+
+    async def test_broker_forwards_limit_price_preview_to_extension_and_returns_result(self) -> None:
+        async with VariationalCommandBrokerServer(
+            host="127.0.0.1",
+            port=0,
+            quiet=True,
+        ) as server:
+            async with websockets.connect(server.ws_url) as extension:
+                await extension.send(json.dumps({"type": "REGISTER", "role": "extension"}))
+                self.assertTrue(json.loads(await extension.recv())["ok"])
+
+                async with websockets.connect(server.ws_url) as strategy:
+                    await strategy.send(json.dumps({"type": "REGISTER", "role": "strategy"}))
+                    self.assertTrue(json.loads(await strategy.recv())["ok"])
+
+                    await strategy.send(
+                        json.dumps(
+                            {
+                                "type": "PREVIEW_LIMIT_ORDER_PRICE",
+                                "requestId": "preview-1",
+                                "symbol": "BEAT",
+                                "side": "BUY",
+                                "amount": "100",
+                            }
+                        )
+                    )
+                    forwarded = json.loads(await extension.recv())
+                    self.assertEqual(forwarded["type"], "PREVIEW_LIMIT_ORDER_PRICE")
+                    self.assertEqual(forwarded["symbol"], "BEAT")
+
+                    await extension.send(
+                        json.dumps(
+                            {
+                                "type": "PRICE_PREVIEW_RESULT",
+                                "requestId": "preview-1",
+                                "ok": True,
+                                "price": "3.88806",
+                            }
+                        )
+                    )
+                    result = json.loads(await strategy.recv())
+
+            self.assertTrue(result["ok"])
+            self.assertEqual(result["type"], "PRICE_PREVIEW_RESULT")
+            self.assertEqual(result["price"], "3.88806")
+
     async def test_broker_handles_variational_fill_event_before_submit_ack(self) -> None:
         async with VariationalCommandBrokerServer(
             host="127.0.0.1",
@@ -636,6 +729,60 @@ class VariationalBrokerTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(result["filled"])
             self.assertEqual(result["details"]["fill"]["symbol"], "BEAT")
             self.assertEqual(result["orderId"], "90cf813a-5910-4680-bfa8-5edf1f50fe38")
+
+    async def test_broker_returns_live_position_from_variational_portfolio_ws_frame(self) -> None:
+        async with VariationalCommandBrokerServer(
+            host="127.0.0.1",
+            port=0,
+            fill_host="127.0.0.1",
+            fill_port=0,
+            quiet=True,
+        ) as server:
+            async with websockets.connect(server.fill_ws_url) as fill_feed:
+                await fill_feed.send(
+                    json.dumps(
+                        {
+                            "kind": "ws_frame",
+                            "direction": "received",
+                            "url": "wss://omni-ws-server.prod.ap-northeast-1.variational.io/portfolio",
+                            "payloadData": json.dumps(
+                                {
+                                    "type": "portfolio",
+                                    "positions": [
+                                        {
+                                            "instrument": {
+                                                "instrument_type": "perpetual_future",
+                                                "underlying": "BEAT",
+                                            },
+                                            "side": "long",
+                                            "qty": "10",
+                                        }
+                                    ],
+                                }
+                            ),
+                        }
+                    )
+                )
+
+                async with websockets.connect(server.ws_url) as strategy:
+                    await strategy.send(json.dumps({"type": "REGISTER", "role": "strategy"}))
+                    self.assertTrue(json.loads(await strategy.recv())["ok"])
+                    await strategy.send(
+                        json.dumps(
+                            {
+                                "type": "GET_OPEN_POSITION",
+                                "requestId": "pos-1",
+                                "symbol": "BEAT",
+                                "marketType": "perp",
+                            }
+                        )
+                    )
+                    result = json.loads(await strategy.recv())
+
+            self.assertTrue(result["ok"])
+            self.assertEqual(result["position"]["symbol"], "BEAT")
+            self.assertEqual(result["position"]["side"], "LONG")
+            self.assertEqual(result["position"]["quantity"], "10")
 
     async def test_broker_timeout_includes_fill_diagnostics(self) -> None:
         async with VariationalCommandBrokerServer(

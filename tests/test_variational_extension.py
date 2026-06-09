@@ -77,6 +77,35 @@ class VariationalExtensionCommandClientTests(unittest.TestCase):
         self.assertIn("explicitLimitPrice", background)
         self.assertIn("Mid", background)
 
+    def test_background_supports_cancel_order_command(self) -> None:
+        background = (EXT_DIR / "background.js").read_text(encoding="utf-8")
+
+        self.assertIn("CANCEL_ORDER", background)
+        self.assertIn("CANCEL_RESULT", background)
+        self.assertIn("executeVariationalCancelOrder", background)
+        self.assertIn("findCancelOrderButton", background)
+        self.assertIn("cancelled", background.lower())
+
+    def test_background_supports_limit_price_preview_without_submit(self) -> None:
+        background = (EXT_DIR / "background.js").read_text(encoding="utf-8")
+
+        self.assertIn("PREVIEW_LIMIT_ORDER_PRICE", background)
+        self.assertIn("PRICE_PREVIEW_RESULT", background)
+        self.assertIn("executeVariationalLimitPricePreview", background)
+        self.assertIn("readLimitPriceValue", background)
+        self.assertIn("previewOnly", background)
+
+    def test_background_preview_uses_dedicated_limit_flow(self) -> None:
+        background = (EXT_DIR / "background.js").read_text(encoding="utf-8")
+
+        self.assertIn("findPreviewLimitOrderTypeButton", background)
+        self.assertIn("waitForPreviewLimitPrice", background)
+        self.assertIn("Could not switch Variational order form to Limit", background)
+        self.assertNotIn(
+            'return executeVariationalOrder({ ...command, orderType: "LIMIT", previewOnly: true });',
+            background,
+        )
+
     def test_popup_exposes_command_endpoint_status(self) -> None:
         popup_html = (EXT_DIR / "popup.html").read_text(encoding="utf-8")
         popup_js = (EXT_DIR / "popup.js").read_text(encoding="utf-8")

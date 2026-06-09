@@ -8,6 +8,7 @@ import datetime as dt
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 from types import SimpleNamespace
+from aiohttp import WSServerHandshakeError
 
 from hydra_basis.async_utils import gather_limited
 from hydra_basis.alerts import select_best_alerts_by_symbol, select_best_spot_perp_alerts_by_symbol
@@ -62,6 +63,7 @@ from hydra_basis.backfill import (
     persist_backfill_progress,
     backfill_needs_top_up,
     backfill_incremental_start_ms,
+    capture_backfill_spread_snapshot_with_error,
 )
 from hydra_basis.runtime import configure_windows_event_loop_policy
 from hydra_basis.symbol_mapping import canonicalize_symbol, load_symbol_mappings
@@ -774,6 +776,54 @@ class BackfillSpreadSnapshotTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertFalse(stored)
         self.assertEqual(spreads, {("lighter", "BOT"): {"status": "no_orderbook"}})
+
+    async def test_rate_limited_spread_capture_does_not_raise_or_overwrite_existing_spread(self) -> None:
+        spreads: dict[tuple[str, str], dict[str, float | int]] = {
+            ("lighter", "ETH"): {"bid": 100.0, "ask": 100.1, "spread_pct": 0.001, "ts_ms": 1}
+        }
+        rate_limited = WSServerHandshakeError(
+            request_info=None,
+            history=(),
+            status=429,
+            message="Invalid response status",
+        )
+
+        with patch(
+            "hydra_basis.backfill.fetch_orderbook_snapshot",
+            new=AsyncMock(side_effect=rate_limited),
+        ):
+            stored = await capture_backfill_spread_snapshot(
+                session=object(),
+                spreads=spreads,
+                venue="lighter",
+                symbol="ETH",
+                clip_usd=1000.0,
+                force_refresh=True,
+            )
+
+        self.assertFalse(stored)
+        self.assertEqual(spreads[("lighter", "ETH")]["bid"], 100.0)
+
+    async def test_rate_limited_spread_capture_returns_alertable_error(self) -> None:
+        spreads: dict[tuple[str, str], dict[str, float | int]] = {}
+        rate_limited = RuntimeError("429 Too Many Requests")
+
+        with patch(
+            "hydra_basis.backfill.fetch_orderbook_snapshot",
+            new=AsyncMock(side_effect=rate_limited),
+        ):
+            result = await capture_backfill_spread_snapshot_with_error(
+                session=object(),
+                spreads=spreads,
+                venue="lighter",
+                symbol="ETH",
+                clip_usd=1000.0,
+                force_refresh=True,
+            )
+
+        self.assertFalse(result["stored"])
+        self.assertEqual(result["error_type"], "transient")
+        self.assertIn("429", result["error"])
 
     def test_persist_backfill_progress_saves_both_json_stores_immediately(self) -> None:
         history_store = unittest.mock.Mock()

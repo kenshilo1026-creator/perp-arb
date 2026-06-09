@@ -137,7 +137,7 @@ def build_adapter_for_venue(venue: str, *, leverage: int = 1, broker_url: str | 
     raise RuntimeError(f"no execution adapter for venue: {venue}")
 
 
-def validate_maker_fill_supported(maker_venue: str) -> None:
+def validate_maker_fill_supported(_maker_venue: str) -> None:
     return None
 
 
@@ -459,7 +459,7 @@ async def run_open_execution_once() -> None:
             port=VARIATIONAL_BROKER_PORT,
             fill_host=VARIATIONAL_BROKER_HOST,
             fill_port=VARIATIONAL_FILL_PORT,
-            order_fill_timeout_seconds=MAKER_FILL_TIMEOUT_SECONDS,
+            order_fill_timeout_seconds=None,
         ) as server:
             print(
                 "waiting for Variational extension command client "
@@ -573,7 +573,7 @@ async def run_close_execution_once() -> None:
             port=VARIATIONAL_BROKER_PORT,
             fill_host=VARIATIONAL_BROKER_HOST,
             fill_port=VARIATIONAL_FILL_PORT,
-            order_fill_timeout_seconds=MAKER_FILL_TIMEOUT_SECONDS,
+            order_fill_timeout_seconds=None,
         ) as server:
             print(
                 "waiting for Variational extension command client "

@@ -36,6 +36,9 @@ class GlobalRiskManagementTests(unittest.IsolatedAsyncioTestCase):
         calls: list[dict] = []
 
         class FakeCloser:
+            async def get_open_position(self, *, symbol: str, market_type: str):
+                return {"symbol": symbol, "market_type": market_type, "side": "LONG", "quantity": "100"}
+
             async def close_position(self, **kwargs):
                 calls.append(kwargs)
                 return {"ok": True, "order_id": f"{kwargs['venue']}-{kwargs['symbol']}"}
@@ -84,6 +87,12 @@ class GlobalRiskManagementTests(unittest.IsolatedAsyncioTestCase):
         calls: list[tuple[str, str]] = []
 
         class FakeCloser:
+            def __init__(self, side: str) -> None:
+                self.side = side
+
+            async def get_open_position(self, *, symbol: str, market_type: str):
+                return {"symbol": symbol, "market_type": market_type, "side": self.side, "quantity": "1"}
+
             async def close_position(self, **kwargs):
                 calls.append((kwargs["venue"], kwargs["side"]))
                 return {"ok": True}
@@ -98,7 +107,11 @@ class GlobalRiskManagementTests(unittest.IsolatedAsyncioTestCase):
         )
         manager = EmergencyRiskManager(
             registry=registry,
-            closers={"hyperliquid": FakeCloser(), "mexc": FakeCloser(), "aster": FakeCloser()},
+            closers={
+                "hyperliquid": FakeCloser("LONG"),
+                "mexc": FakeCloser("SHORT"),
+                "aster": FakeCloser("LONG"),
+            },
         )
 
         result = await manager.handle_event(
@@ -125,6 +138,54 @@ class GlobalRiskManagementTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(result["ok"])
         self.assertEqual(result["failed_leg_ids"], ["other"])
         self.assertEqual(registry.get_leg("other").status, "close_failed")
+
+    async def test_emergency_close_uses_live_position_quantity_not_registry_quantity(self) -> None:
+        calls: list[dict] = []
+
+        class FakeCloser:
+            async def get_open_position(self, *, symbol: str, market_type: str):
+                return {"symbol": symbol, "market_type": market_type, "side": "LONG", "quantity": "8"}
+
+            async def close_position(self, **kwargs):
+                calls.append(kwargs)
+                return {"ok": True}
+
+        registry = PositionRegistry(
+            legs=[
+                PositionLeg("arb-live", "trigger", "aster", "ETH", "perp", "SHORT", "999", "open"),
+                PositionLeg("arb-live", "other", "lighter", "ETH", "perp", "LONG", "999", "open"),
+            ]
+        )
+        manager = EmergencyRiskManager(registry=registry, closers={"lighter": FakeCloser()})
+
+        result = await manager.handle_event(
+            RiskEvent("arb-live", "trigger", "aster", "ETH", "ADL")
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(calls[0]["quantity"], "8")
+        self.assertEqual(calls[0]["side"], "SELL")
+
+    async def test_emergency_close_fails_when_live_position_query_is_unavailable(self) -> None:
+        class FakeCloser:
+            async def close_position(self, **kwargs):
+                raise AssertionError("must not close without live position query")
+
+        registry = PositionRegistry(
+            legs=[
+                PositionLeg("arb-live", "trigger", "aster", "ETH", "perp", "SHORT", "1", "open"),
+                PositionLeg("arb-live", "other", "lighter", "ETH", "perp", "LONG", "1", "open"),
+            ]
+        )
+        manager = EmergencyRiskManager(registry=registry, closers={"lighter": FakeCloser()})
+
+        result = await manager.handle_event(
+            RiskEvent("arb-live", "trigger", "aster", "ETH", "ADL")
+        )
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["failed_leg_ids"], ["other"])
+        self.assertIn("live position query unavailable", result["close_results"]["other"]["error"])
 
 
 class FundingRiskTests(unittest.TestCase):
@@ -257,6 +318,12 @@ class FundingRiskRuntimeTests(unittest.IsolatedAsyncioTestCase):
                     }
 
             class Closer:
+                def __init__(self, side: str) -> None:
+                    self.side = side
+
+                async def get_open_position(self, *, symbol: str, market_type: str):
+                    return {"symbol": symbol, "market_type": market_type, "side": self.side, "quantity": "100"}
+
                 async def close_position(self, **kwargs):
                     return {"ok": True, "kwargs": kwargs}
 
@@ -264,7 +331,7 @@ class FundingRiskRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 registry_path=registry_path,
                 state_path=state_path,
                 provider=Provider(),
-                closers={"aster": Closer(), "mexc": Closer()},
+                closers={"aster": Closer("SHORT"), "mexc": Closer("LONG")},
                 config=FundingRiskConfig(
                     enabled=True,
                     check_interval_seconds=3600,
@@ -466,6 +533,9 @@ class RiskRuntimeTests(unittest.IsolatedAsyncioTestCase):
                     )()
 
             class FakeCloser:
+                async def get_open_position(self, *, symbol: str, market_type: str):
+                    return {"symbol": symbol, "market_type": market_type, "side": "LONG", "quantity": "100"}
+
                 async def close_position(self, **kwargs):
                     return {"ok": True}
 

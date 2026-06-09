@@ -302,6 +302,48 @@ async function runVariationalOrderInjection(payload) {
   throw lastError;
 }
 
+async function runVariationalCancelInjection(payload) {
+  let lastError = null;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      const [injectionResult] = await chrome.scripting.executeScript({
+        target: { tabId: state.attachedTabId },
+        func: executeVariationalCancelOrder,
+        args: [{ ...payload, automationVersion: ORDER_AUTOMATION_VERSION }]
+      });
+      return injectionResult;
+    } catch (error) {
+      lastError = error;
+      if (attempt >= 1 || !isTransientFrameRemovalError(error)) {
+        throw error;
+      }
+      await sleep(1000);
+    }
+  }
+  throw lastError;
+}
+
+async function runVariationalPricePreviewInjection(payload) {
+  let lastError = null;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      const [injectionResult] = await chrome.scripting.executeScript({
+        target: { tabId: state.attachedTabId },
+        func: executeVariationalLimitPricePreview,
+        args: [{ ...payload, automationVersion: ORDER_AUTOMATION_VERSION, previewOnly: true }]
+      });
+      return injectionResult;
+    } catch (error) {
+      lastError = error;
+      if (attempt >= 1 || !isTransientFrameRemovalError(error)) {
+        throw error;
+      }
+      await sleep(1000);
+    }
+  }
+  throw lastError;
+}
+
 async function handleCommandMessage(raw) {
   let payload;
   try {
@@ -309,10 +351,21 @@ async function handleCommandMessage(raw) {
   } catch (error) {
     return;
   }
-  if (payload?.type !== "PLACE_ORDER") {
+  if (payload?.type === "PLACE_ORDER") {
+    await handlePlaceOrderCommand(payload);
     return;
   }
+  if (payload?.type === "CANCEL_ORDER") {
+    await handleCancelOrderCommand(payload);
+    return;
+  }
+  if (payload?.type === "PREVIEW_LIMIT_ORDER_PRICE") {
+    await handlePricePreviewCommand(payload);
+    return;
+  }
+}
 
+async function handlePlaceOrderCommand(payload) {
   const requestId = payload.requestId;
   try {
     if (state.attachedTabId == null) {
@@ -351,6 +404,100 @@ async function handleCommandMessage(raw) {
       "type": "ORDER_RESULT",
       requestId,
       ok: false,
+      error: error.message,
+      details: { automationVersion: ORDER_AUTOMATION_VERSION },
+      timestamp: nowIso()
+    });
+  }
+}
+
+async function handleCancelOrderCommand(payload) {
+  const requestId = payload.requestId;
+  try {
+    if (state.attachedTabId == null) {
+      throw new Error("No Variational tab attached. Click Start in the extension popup first.");
+    }
+    const injectionResult = await runVariationalCancelInjection(payload);
+    let result = injectionResult?.result || {};
+    if (!result || typeof result !== "object" || !("ok" in result)) {
+      const [diagnosticResult] = await chrome.scripting.executeScript({
+        target: { tabId: state.attachedTabId },
+        func: collectVariationalPageDiagnostics
+      });
+      result = {
+        ok: false,
+        error: "Cancel automation returned no result from Variational page.",
+        details: {
+          automationVersion: ORDER_AUTOMATION_VERSION,
+          diagnostics: diagnosticResult?.result || null
+        }
+      };
+    }
+    commandClient.send({
+      "type": "CANCEL_RESULT",
+      requestId,
+      ok: Boolean(result.ok),
+      orderId: result.orderId || payload.orderId || null,
+      error: result.error || null,
+      details: {
+        automationVersion: ORDER_AUTOMATION_VERSION,
+        ...(result.details || {})
+      },
+      timestamp: nowIso()
+    });
+  } catch (error) {
+    commandClient.send({
+      "type": "CANCEL_RESULT",
+      requestId,
+      ok: false,
+      orderId: payload.orderId || null,
+      error: error.message,
+      details: { automationVersion: ORDER_AUTOMATION_VERSION },
+      timestamp: nowIso()
+    });
+  }
+}
+
+async function handlePricePreviewCommand(payload) {
+  const requestId = payload.requestId;
+  try {
+    if (state.attachedTabId == null) {
+      throw new Error("No Variational tab attached. Click Start in the extension popup first.");
+    }
+    const injectionResult = await runVariationalPricePreviewInjection(payload);
+    let result = injectionResult?.result || {};
+    if (!result || typeof result !== "object" || !("ok" in result)) {
+      const [diagnosticResult] = await chrome.scripting.executeScript({
+        target: { tabId: state.attachedTabId },
+        func: collectVariationalPageDiagnostics
+      });
+      result = {
+        ok: false,
+        error: "Price preview returned no result from Variational page.",
+        details: {
+          automationVersion: ORDER_AUTOMATION_VERSION,
+          diagnostics: diagnosticResult?.result || null
+        }
+      };
+    }
+    commandClient.send({
+      "type": "PRICE_PREVIEW_RESULT",
+      requestId,
+      ok: Boolean(result.ok),
+      price: result.price || null,
+      error: result.error || null,
+      details: {
+        automationVersion: ORDER_AUTOMATION_VERSION,
+        ...(result.details || {})
+      },
+      timestamp: nowIso()
+    });
+  } catch (error) {
+    commandClient.send({
+      "type": "PRICE_PREVIEW_RESULT",
+      requestId,
+      ok: false,
+      price: null,
       error: error.message,
       details: { automationVersion: ORDER_AUTOMATION_VERSION },
       timestamp: nowIso()
@@ -398,6 +545,357 @@ function collectVariationalPageDiagnostics() {
         className: String(el.className || "").slice(0, 160)
       }))
   };
+}
+
+function executeVariationalCancelOrder(command) {
+  const automationVersion = command.automationVersion || "unknown";
+  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+  const clickableSelector = "button,[role='button'],a,[tabindex],div[class*='cursor-pointer'],div[class*='hover:bg']";
+
+  function visible(el) {
+    if (!el) {
+      return false;
+    }
+    const style = window.getComputedStyle(el);
+    const rect = el.getBoundingClientRect();
+    return style.visibility !== "hidden" && style.display !== "none" && rect.width > 0 && rect.height > 0;
+  }
+
+  function textOf(el) {
+    return `${el.innerText || ""} ${el.textContent || ""} ${el.getAttribute("aria-label") || ""}`
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+
+  function click(el) {
+    el.dispatchEvent(new MouseEvent("mouseover", { bubbles: true }));
+    el.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
+    el.dispatchEvent(new MouseEvent("mouseup", { bubbles: true }));
+    el.click();
+  }
+
+  function normalizeVariationalSymbol(value) {
+    return String(value || "")
+      .trim()
+      .toUpperCase()
+      .replace(/[-_\s]?PERP$/i, "")
+      .replace(/USDT$/i, "");
+  }
+
+  function findCancelOrderButton(orderId, requestedSymbol) {
+    const cancelPatterns = [/\bcancel\b/i, /取消/];
+    const candidates = Array.from(document.querySelectorAll(clickableSelector))
+      .filter(visible)
+      .filter((el) => !el.disabled && el.getAttribute("aria-disabled") !== "true")
+      .filter((el) => cancelPatterns.some((pattern) => pattern.test(textOf(el))));
+    if (!candidates.length) {
+      return null;
+    }
+
+    const normalizedSymbol = normalizeVariationalSymbol(requestedSymbol);
+    const scoped = candidates.filter((el) => {
+      const rowText = textOf(el.closest("tr") || el.closest("[role='row']") || el.parentElement || el);
+      const idMatches = orderId && rowText.includes(String(orderId));
+      const symbolMatches = normalizedSymbol && normalizeVariationalSymbol(rowText).includes(normalizedSymbol);
+      return idMatches || symbolMatches;
+    });
+    if (scoped.length === 1) {
+      return scoped[0];
+    }
+    if (scoped.length > 1 && orderId) {
+      return scoped[0];
+    }
+    return candidates.length === 1 ? candidates[0] : null;
+  }
+
+  function findCancelConfirmButton() {
+    const confirmPatterns = [
+      /\bconfirm\s+cancel\b/i,
+      /\bcancel\s+order\b/i,
+      /\byes\b/i,
+      /\bconfirm\b/i,
+      /確認/,
+    ];
+    return Array.from(document.querySelectorAll(clickableSelector))
+      .filter(visible)
+      .filter((el) => !el.disabled && el.getAttribute("aria-disabled") !== "true")
+      .find((el) => confirmPatterns.some((pattern) => pattern.test(textOf(el))));
+  }
+
+  function collectCancelDiagnostics() {
+    return {
+      url: window.location.href,
+      title: document.title,
+      buttons: Array.from(document.querySelectorAll(clickableSelector))
+        .filter(visible)
+        .slice(0, 120)
+        .map((el) => ({
+          text: textOf(el).slice(0, 160),
+          disabled: Boolean(el.disabled) || el.getAttribute("aria-disabled") === "true",
+          className: String(el.className || "").slice(0, 160)
+        }))
+    };
+  }
+
+  return (async () => {
+    const orderId = String(command.orderId || "").trim();
+    const symbol = normalizeVariationalSymbol(command.symbol || command.market);
+    if (!orderId) {
+      return { ok: false, error: "CANCEL_ORDER requires orderId.", details: { automationVersion } };
+    }
+
+    const cancelButton = findCancelOrderButton(orderId, symbol);
+    if (!cancelButton) {
+      return {
+        ok: false,
+        error: "Could not identify cancel button for Variational order.",
+        details: {
+          automationVersion,
+          orderId,
+          symbol,
+          diagnostics: collectCancelDiagnostics()
+        }
+      };
+    }
+
+    click(cancelButton);
+    await sleep(Number(command.confirmDelayMs || 300));
+    const confirmButton = findCancelConfirmButton();
+    if (confirmButton) {
+      click(confirmButton);
+      await sleep(300);
+    }
+
+    return {
+      ok: true,
+      orderId,
+      status: "cancelled",
+      details: {
+        automationVersion,
+        symbol,
+        clickedCancelText: textOf(cancelButton),
+        clickedConfirmText: confirmButton ? textOf(confirmButton) : null
+      }
+    };
+  })();
+}
+
+function executeVariationalLimitPricePreview(command) {
+  const automationVersion = command.automationVersion || "unknown";
+  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+  function visible(el) {
+    if (!el) {
+      return false;
+    }
+    const style = window.getComputedStyle(el);
+    const rect = el.getBoundingClientRect();
+    return style.visibility !== "hidden" && style.display !== "none" && rect.width > 0 && rect.height > 0;
+  }
+
+  function textOf(el) {
+    return `${el.innerText || ""} ${el.textContent || ""} ${el.getAttribute("aria-label") || ""}`
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+
+  function normalizedTextOf(el) {
+    return textOf(el).toLowerCase().replace(/\s+/g, " ").trim();
+  }
+
+  function click(el) {
+    el.dispatchEvent(new MouseEvent("mouseover", { bubbles: true }));
+    el.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
+    el.dispatchEvent(new MouseEvent("mouseup", { bubbles: true }));
+    el.click();
+  }
+
+  function normalizeVariationalSymbol(value) {
+    return String(value || "")
+      .trim()
+      .toUpperCase()
+      .replace(/[-_\s]?PERP$/i, "")
+      .replace(/USDT$/i, "");
+  }
+
+  function currentVariationalSymbol() {
+    try {
+      const url = new URL(window.location.href);
+      const parts = url.pathname.split("/").filter(Boolean);
+      const perpetualIndex = parts.findIndex((part) => part.toLowerCase() === "perpetual");
+      if (perpetualIndex >= 0 && parts[perpetualIndex + 1]) {
+        return normalizeVariationalSymbol(decodeURIComponent(parts[perpetualIndex + 1]));
+      }
+    } catch {
+      // Fall back to document title below.
+    }
+
+    const titleMatch = String(document.title || "").match(/\b([A-Z0-9]+)\s*[-_\s]?\s*PERP\b/i);
+    return titleMatch ? normalizeVariationalSymbol(titleMatch[1]) : "";
+  }
+
+  function inputContextText(el) {
+    return [
+      el.getAttribute("data-testid") || "",
+      el.getAttribute("name") || "",
+      el.getAttribute("id") || "",
+      el.getAttribute("placeholder") || "",
+      el.getAttribute("aria-label") || "",
+      el.parentElement?.innerText || "",
+      el.closest("label")?.innerText || "",
+      el.closest("[data-testid]")?.getAttribute("data-testid") || "",
+      el.closest("[data-testid]")?.innerText || "",
+    ].join(" ");
+  }
+
+  function isLimitPriceInput(el) {
+    const dataTestId = String(el.getAttribute("data-testid") || "").toLowerCase();
+    if (dataTestId.includes("limit-price") || dataTestId.includes("price-input")) {
+      return true;
+    }
+    return /\bprice\b/i.test(inputContextText(el));
+  }
+
+  function findLimitPriceInput() {
+    const exactPriceInput = Array.from(document.querySelectorAll(
+      'input[data-testid="limit-price-input"],textarea[data-testid="limit-price-input"]'
+    ))
+      .filter(visible)
+      .filter((el) => !el.disabled && el.getAttribute("aria-disabled") !== "true")[0];
+    if (exactPriceInput) {
+      return exactPriceInput;
+    }
+    return Array.from(document.querySelectorAll("input,textarea"))
+      .filter(visible)
+      .filter((el) => !el.disabled && el.getAttribute("aria-disabled") !== "true")
+      .find(isLimitPriceInput) || null;
+  }
+
+  function readLimitPriceValue(input) {
+    if (!input) {
+      return "";
+    }
+    return String(input.value || input.getAttribute("value") || "")
+      .replace(/,/g, "")
+      .trim();
+  }
+
+  function findPreviewLimitOrderTypeButton() {
+    const buttons = Array.from(document.querySelectorAll("button"))
+      .filter(visible)
+      .filter((el) => !el.disabled && el.getAttribute("aria-disabled") !== "true");
+    return buttons.find((el) => normalizedTextOf(el) === "limit")
+      || buttons.find((el) => /\blimit\b/i.test(textOf(el)) && !/\bmarket\b/i.test(textOf(el)));
+  }
+
+  function findPreviewMidButton() {
+    return Array.from(document.querySelectorAll("button"))
+      .filter(visible)
+      .filter((el) => !el.disabled && el.getAttribute("aria-disabled") !== "true")
+      .find((el) => normalizedTextOf(el) === "mid" || /\bmid\b/i.test(textOf(el)));
+  }
+
+  async function waitForPreviewLimitPrice(timeoutMs) {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() <= deadline) {
+      const priceInput = findLimitPriceInput();
+      const price = readLimitPriceValue(priceInput);
+      if (price && Number(price) > 0) {
+        return { price, priceInput };
+      }
+      await sleep(100);
+    }
+    return { price: "", priceInput: findLimitPriceInput() };
+  }
+
+  function collectPreviewDiagnostics() {
+    return {
+      url: window.location.href,
+      title: document.title,
+      buttons: Array.from(document.querySelectorAll("button"))
+        .filter(visible)
+        .slice(0, 80)
+        .map((el) => ({
+          text: textOf(el).slice(0, 120),
+          disabled: Boolean(el.disabled) || el.getAttribute("aria-disabled") === "true",
+          className: String(el.className || "").slice(0, 120)
+        })),
+      inputs: Array.from(document.querySelectorAll("input,textarea"))
+        .filter(visible)
+        .slice(0, 20)
+        .map((el) => ({
+          placeholder: String(el.getAttribute("placeholder") || "").slice(0, 120),
+          value: String(el.value || "").slice(0, 40),
+          dataTestId: String(el.getAttribute("data-testid") || "").slice(0, 80),
+          context: inputContextText(el).replace(/\s+/g, " ").trim().slice(0, 160)
+        }))
+    };
+  }
+
+  return (async () => {
+    const requestedSymbol = normalizeVariationalSymbol(command.symbol || command.market);
+    const currentSymbol = currentVariationalSymbol();
+    if (!requestedSymbol || !currentSymbol || requestedSymbol !== currentSymbol) {
+      return {
+        ok: false,
+        error: `Ticker mismatch: requested ${requestedSymbol || "unknown"} but current page is ${currentSymbol || "unknown"}.`,
+        details: {
+          automationVersion,
+          previewOnly: true,
+          requestedSymbol,
+          currentSymbol,
+          diagnostics: collectPreviewDiagnostics()
+        }
+      };
+    }
+
+    const limitButton = findPreviewLimitOrderTypeButton();
+    if (!limitButton) {
+      return {
+        ok: false,
+        error: "Could not switch Variational order form to Limit: Limit button not found.",
+        details: { automationVersion, previewOnly: true, diagnostics: collectPreviewDiagnostics() }
+      };
+    }
+    click(limitButton);
+    await sleep(300);
+
+    const midButton = findPreviewMidButton();
+    if (!midButton) {
+      return {
+        ok: false,
+        error: "Could not find Mid button for Variational limit price preview.",
+        details: { automationVersion, previewOnly: true, clickedLimitText: textOf(limitButton), diagnostics: collectPreviewDiagnostics() }
+      };
+    }
+    click(midButton);
+
+    const priceResult = await waitForPreviewLimitPrice(Number(command.previewPriceTimeoutMs || 3000));
+    if (!priceResult.price || Number(priceResult.price) <= 0) {
+      return {
+        ok: false,
+        error: "Could not read Variational limit price after Mid click.",
+        details: {
+          automationVersion,
+          previewOnly: true,
+          clickedLimitText: textOf(limitButton),
+          clickedMidText: textOf(midButton),
+          diagnostics: collectPreviewDiagnostics()
+        }
+      };
+    }
+
+    return {
+      ok: true,
+      price: priceResult.price,
+      details: {
+        automationVersion,
+        previewOnly: true,
+        clickedLimitText: textOf(limitButton),
+        clickedMidText: textOf(midButton)
+      }
+    };
+  })();
 }
 
 function executeVariationalOrder(command) {
@@ -469,6 +967,15 @@ function executeVariationalOrder(command) {
       .filter(visible)
       .filter((el) => !el.disabled && el.getAttribute("aria-disabled") !== "true");
     return inputs.find(isLimitPriceInput) || null;
+  }
+
+  function readLimitPriceValue(input) {
+    if (!input) {
+      return "";
+    }
+    return String(input.value || input.getAttribute("value") || "")
+      .replace(/,/g, "")
+      .trim();
   }
 
   function inputContextText(el) {
@@ -731,6 +1238,27 @@ function executeVariationalOrder(command) {
         };
       }
       excludedAmountInput = priceResult.priceInput || null;
+    }
+
+    if (command.previewOnly) {
+      const selectedPrice = readLimitPriceValue(excludedAmountInput || findLimitPriceInput());
+      if (!selectedPrice || Number(selectedPrice) <= 0) {
+        return {
+          ok: false,
+          error: "Could not read Variational limit price after Mid click.",
+          details: { automationVersion, previewOnly: true, diagnostics: collectOrderDomDiagnostics() }
+        };
+      }
+      return {
+        ok: true,
+        price: selectedPrice,
+        details: {
+          automationVersion,
+          previewOnly: true,
+          orderType,
+          explicitLimitPrice: explicitLimitPrice || null
+        }
+      };
     }
 
     const sideButton = side === "BUY"

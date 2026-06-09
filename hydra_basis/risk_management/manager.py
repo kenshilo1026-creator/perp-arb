@@ -7,6 +7,9 @@ from hydra_basis.risk_management.registry import PositionRegistry
 
 
 class PositionCloser(Protocol):
+    async def get_open_position(self, **kwargs) -> dict | None:
+        ...
+
     async def close_position(self, **kwargs) -> dict:
         ...
 
@@ -40,13 +43,39 @@ class EmergencyRiskManager:
         close_results: dict[str, dict] = {}
 
         for leg in legs_to_close:
-            side = close_side_for_position(leg.side)
             closer = self.closers.get(leg.venue)
             if closer is None:
                 self.registry.mark_status(leg.leg_id, "close_failed")
                 failed_leg_ids.append(leg.leg_id)
                 close_results[leg.leg_id] = {"ok": False, "error": f"missing closer for {leg.venue}"}
                 continue
+
+            live_position = await self._fetch_live_position(closer=closer, leg=leg)
+            if live_position is None:
+                self.registry.mark_status(leg.leg_id, "close_failed")
+                failed_leg_ids.append(leg.leg_id)
+                close_results[leg.leg_id] = {
+                    "ok": False,
+                    "error": f"no live open position for {leg.venue}:{leg.symbol}",
+                }
+                continue
+            if isinstance(live_position, dict) and live_position.get("ok") is False:
+                self.registry.mark_status(leg.leg_id, "close_failed")
+                failed_leg_ids.append(leg.leg_id)
+                close_results[leg.leg_id] = live_position
+                continue
+
+            live_side = str(live_position.get("side", "")).strip().upper()
+            live_quantity = str(live_position.get("quantity", "0")).strip()
+            if live_side not in {"LONG", "SHORT"} or not live_quantity:
+                self.registry.mark_status(leg.leg_id, "close_failed")
+                failed_leg_ids.append(leg.leg_id)
+                close_results[leg.leg_id] = {
+                    "ok": False,
+                    "error": f"invalid live position payload for {leg.venue}:{leg.symbol}: {live_position}",
+                }
+                continue
+            side = close_side_for_position(live_side)
 
             if self.dry_run:
                 result = {"ok": True, "dry_run": True}
@@ -58,7 +87,7 @@ class EmergencyRiskManager:
                     symbol=leg.symbol,
                     market_type=leg.market_type,
                     side=side,
-                    quantity=leg.quantity,
+                    quantity=live_quantity,
                     trigger_event=event.event_type,
                 )
 
@@ -78,3 +107,18 @@ class EmergencyRiskManager:
             "failed_leg_ids": failed_leg_ids,
             "close_results": close_results,
         }
+
+    async def _fetch_live_position(self, *, closer: PositionCloser, leg) -> dict | None:
+        getter = getattr(closer, "get_open_position", None)
+        if not callable(getter):
+            return {
+                "ok": False,
+                "error": f"live position query unavailable for {leg.venue}",
+            }
+        try:
+            return await getter(symbol=leg.symbol, market_type=leg.market_type)
+        except Exception as exc:
+            return {
+                "ok": False,
+                "error": f"live position query failed for {leg.venue}:{leg.symbol}: {exc}",
+            }

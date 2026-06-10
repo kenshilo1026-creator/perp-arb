@@ -149,6 +149,8 @@ class VariationalCommandBroker:
         self._last_fill_event: dict[str, Any] | None = None
         self._last_fill_candidate: dict[str, Any] | None = None
         self._last_fill_reject_reason: str | None = None
+        self._positions: dict[str, dict[str, Any]] = {}
+        self._portfolio_received = asyncio.Event()
 
     async def on_connect(self, websocket) -> None:
         self._roles[websocket] = "unknown"
@@ -207,6 +209,9 @@ class VariationalCommandBroker:
         if msg_type == "ORDER_RESULT":
             await self._handle_order_result(payload)
             return
+        if msg_type == "GET_OPEN_POSITION":
+            await self._handle_get_open_position(websocket, payload)
+            return
         await self._send_error(websocket, f"Unsupported message type: {msg_type or 'UNKNOWN'}")
 
     async def handle_fill_event_raw(self, raw: str) -> None:
@@ -220,9 +225,39 @@ class VariationalCommandBroker:
             if not self.quiet:
                 print(f"[VARIATIONAL_BROKER] fill event handling error: {exc!r}", flush=True)
 
+    def _update_positions_from_portfolio(self, positions: list) -> None:
+        self._positions.clear()
+        for pos in positions:
+            instrument = pos.get("instrument") or {}
+            symbol = normalize_variational_symbol(instrument)
+            if not symbol:
+                continue
+            side = str(pos.get("side") or "").strip().upper()
+            qty = str(pos.get("qty") or "0")
+            self._positions[symbol] = {
+                "symbol": symbol,
+                "side": side,
+                "quantity": qty,
+                "market_type": "perp",
+            }
+        self._portfolio_received.set()
+        if not self.quiet:
+            print(f"[VARIATIONAL_BROKER] positions updated count={len(self._positions)}", flush=True)
+
+    async def wait_for_portfolio(self, *, timeout_seconds: float = 15.0) -> None:
+        await asyncio.wait_for(self._portfolio_received.wait(), timeout=timeout_seconds)
+
     async def handle_fill_event(self, payload: dict[str, Any]) -> None:
         self._fill_events_seen += 1
         self._last_fill_event = compact_debug_payload(payload)
+        decoded = parse_forwarded_ws_payload(payload)
+        if not self.quiet:
+            url = payload.get("url", "") if isinstance(payload, dict) else ""
+            decoded_type = decoded.get("type") if isinstance(decoded, dict) else type(decoded).__name__
+            print(f"[VARIATIONAL_BROKER] fill_event url={url!r} type={decoded_type!r} keys={list(decoded.keys()) if isinstance(decoded, dict) else []}", flush=True)
+        if isinstance(decoded, dict) and decoded.get("type") == "portfolio":
+            self._update_positions_from_portfolio(decoded.get("positions") or [])
+            return
         fill = extract_variational_fill_event(payload)
         if fill is None:
             self._last_fill_reject_reason = "not_fill_event"
@@ -273,6 +308,25 @@ class VariationalCommandBroker:
             )
             return
         self._last_fill_reject_reason = "no_pending_match"
+
+    async def _handle_get_open_position(self, websocket, payload: dict[str, Any]) -> None:
+        request_id = str(payload.get("requestId") or uuid.uuid4())
+        symbol = normalize_variational_symbol(payload.get("symbol") or "")
+        position = self._positions.get(symbol)
+        if position is None:
+            await self._send(websocket, {
+                "type": "POSITION_RESULT",
+                "requestId": request_id,
+                "ok": False,
+                "error": f"no open position for {symbol}",
+            })
+        else:
+            await self._send(websocket, {
+                "type": "POSITION_RESULT",
+                "requestId": request_id,
+                "ok": True,
+                "position": position,
+            })
 
     async def _handle_register(self, websocket, payload: dict[str, Any]) -> None:
         role = str(payload.get("role", "")).strip().lower() or "unknown"
@@ -559,3 +613,6 @@ class VariationalCommandBrokerServer:
 
     async def wait_for_extension(self, *, timeout_seconds: float = 30.0) -> bool:
         return await self.broker.wait_for_extension(timeout_seconds=timeout_seconds)
+
+    async def wait_for_portfolio(self, *, timeout_seconds: float = 15.0) -> None:
+        await self.broker.wait_for_portfolio(timeout_seconds=timeout_seconds)

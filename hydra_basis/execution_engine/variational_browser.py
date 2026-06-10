@@ -123,6 +123,26 @@ class VariationalBrowserExecutionAdapter:
             timeout_ms=timeout_ms,
         )
 
+    async def get_open_position(self, *, symbol: str, market_type: str) -> dict | None:
+        request_id = str(uuid.uuid4())
+        async with ClientSession() as session:
+            async with session.ws_connect(self.broker_url, heartbeat=20) as ws:
+                await ws.send_json({"type": "REGISTER", "role": self.client_role})
+                await self._await_register_ack(ws)
+                await ws.send_json({
+                    "type": "GET_OPEN_POSITION",
+                    "requestId": request_id,
+                    "symbol": symbol,
+                    "marketType": market_type,
+                })
+                msg = await asyncio.wait_for(ws.receive(), timeout=self.timeout_seconds)
+        if msg.type != WSMsgType.TEXT:
+            raise RuntimeError(f"variational get_open_position unexpected message type: {msg.type}")
+        result = msg.json()
+        if not result.get("ok"):
+            raise RuntimeError(f"variational get_open_position failed for {symbol}: {result.get('error')}")
+        return result.get("position")
+
     async def wait_for_order_fill(
         self,
         *,

@@ -45,8 +45,8 @@ def resolve_pair_min_observations(
         return default_min_observations
 
     interval_hours = {
-        float(short_venue_points[0].interval_hours),
-        float(long_venue_points[0].interval_hours),
+        float(short_venue_points[-1].interval_hours),
+        float(long_venue_points[-1].interval_hours),
     }
     if interval_hours == {1.0}:
         return default_min_observations

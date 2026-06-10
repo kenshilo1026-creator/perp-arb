@@ -143,6 +143,30 @@
       "strategy_id": "manual-BEAT-1780997451553",
       "symbol": "BEAT",
       "venue": "variational"
+    },
+    {
+      "last_margin_topup_ts_ms": null,
+      "leg_id": "manual-BEAT-1781001694675:aster:short",
+      "margin_topups": 0,
+      "market_type": "perp",
+      "quantity": "10",
+      "side": "SHORT",
+      "status": "open",
+      "strategy_id": "manual-BEAT-1781001694675",
+      "symbol": "BEAT",
+      "venue": "aster"
+    },
+    {
+      "last_margin_topup_ts_ms": null,
+      "leg_id": "manual-BEAT-1781001694675:variational:long",
+      "margin_topups": 0,
+      "market_type": "perp",
+      "quantity": "10",
+      "side": "LONG",
+      "status": "open",
+      "strategy_id": "manual-BEAT-1781001694675",
+      "symbol": "BEAT",
+      "venue": "variational"
     }
   ]
 }

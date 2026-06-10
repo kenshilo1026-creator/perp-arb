@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import sys
 
 from _bootstrap import ensure_project_root_on_path
 
@@ -34,7 +35,7 @@ from hydra_basis.universe import build_symbol_venue_index, select_shared_symbols
 
 load_environment()
 
-async def run_once() -> None:
+async def run_once(analysis_days: int = 7) -> None:
     history_store = FundingHistoryStore(FUNDING_HISTORY_PATH)
     spread_store = OrderbookSpreadStore(ORDERBOOK_SPREADS_PATH)
     all_points: dict[tuple[str, str], list[FundingPoint]] = {
@@ -52,7 +53,7 @@ async def run_once() -> None:
     print(f"shared symbols ({len(symbols)}): {', '.join(symbols[:25])}{' ...' if len(symbols) > 25 else ''}")
 
     analysis_points = {
-        key: trim_points_to_analysis_days(merge_points_by_interval_bucket(points), analysis_days=7)
+        key: trim_points_to_analysis_days(merge_points_by_interval_bucket(points), analysis_days=analysis_days)
         for key, points in all_points.items()
     }
 
@@ -64,8 +65,8 @@ async def run_once() -> None:
     )
     for venue, symbol in sorted(required_history_pairs):
         points = analysis_points.get((venue, symbol), [])
-        if not funding_history_is_complete(points, required_days=7):
-            coverage = summarize_history_coverage(points, required_days=7)
+        if not funding_history_is_complete(points, required_days=analysis_days):
+            coverage = summarize_history_coverage(points, required_days=analysis_days)
             print(
                 f"history_incomplete venue={venue} symbol={symbol}: "
                 f"samples={coverage['samples']} "
@@ -147,5 +148,6 @@ async def run_once() -> None:
 
 
 if __name__ == "__main__":
+    _days = int(sys.argv[1]) if len(sys.argv) > 1 else 7
     configure_windows_event_loop_policy()
-    asyncio.run(run_once())
+    asyncio.run(run_once(analysis_days=_days))

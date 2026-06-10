@@ -1,6 +1,18 @@
 {
   "type": "ORDER_RESULT",
-  "requestId": "ff6110dc-f9ff-4766-ba55-d0846cf7f82d",
+  "requestId": "8b3017dd-4a3e-48bd-b6b9-4fe0ff469578",
   "ok": false,
-  "error": "browser reject"
+  "orderId": null,
+  "error": "Could not find LIMIT order type button on Variational page.",
+  "details": {
+    "automationVersion": "variational-order-automation-2026-06-05-2",
+    "diagnostics": {
+      "buttons": [],
+      "inputs": [],
+      "title": "",
+      "url": "https://omni.variational.io/perpetual/MERL"
+    },
+    "orderType": "LIMIT"
+  },
+  "timestamp": "2026-06-10T08:48:08.515Z"
 }

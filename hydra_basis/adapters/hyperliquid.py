@@ -22,6 +22,7 @@ def build_funding_history_payload(symbol: str, start_time_ms: int) -> dict:
 
 
 async def fetch_hyperliquid_universe(session) -> list[str]:
+    """Return ALL assets in raw order (including delisted) so indices match Hyperliquid's API."""
     url = "https://api.hyperliquid.xyz/info"
     payload = {"type": "meta"}
     data = await run_serialized(
@@ -30,19 +31,19 @@ async def fetch_hyperliquid_universe(session) -> list[str]:
         delay_seconds=HYPERLIQUID_REQUEST_DELAY_SECONDS,
     )
     universe = data.get("universe") or []
-
-    symbols: list[str] = []
-    for row in universe:
-        if row.get("isDelisted"):
-            continue
-        symbol = str(row.get("name") or "").upper()
-        if symbol:
-            symbols.append(symbol)
-    return symbols
+    return [str(row.get("name") or "").upper() for row in universe]
 
 
 async def list_symbols(session) -> set[str]:
-    return set(await fetch_hyperliquid_universe(session))
+    url = "https://api.hyperliquid.xyz/info"
+    payload = {"type": "meta"}
+    data = await run_serialized(
+        "hyperliquid",
+        lambda: fetch_json(session, "POST", url, json=payload),
+        delay_seconds=HYPERLIQUID_REQUEST_DELAY_SECONDS,
+    )
+    universe = data.get("universe") or []
+    return {str(row.get("name") or "").upper() for row in universe if not row.get("isDelisted")}
 
 
 async def fetch_hyperliquid_funding(session, symbol: str) -> list[FundingPoint]:

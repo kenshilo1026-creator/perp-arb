@@ -348,8 +348,6 @@ class VariationalCommandBroker:
                 "timestamp": utc_now(),
             },
         )
-        if not self.quiet:
-            print(f"[VARIATIONAL_BROKER] registered role={role}", flush=True)
 
     async def wait_for_extension(self, *, timeout_seconds: float = 30.0) -> bool:
         if self._extension is not None:

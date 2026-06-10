@@ -135,7 +135,7 @@ def build_adapter_for_venue(venue: str, *, leverage: int = 1, broker_url: str | 
 MAX_PRE_TRADE_PRICE_GAP = 0.01  # 1%
 
 
-def validate_maker_fill_supported(_maker_venue: str) -> None:
+def validate_maker_fill_supported() -> None:
     return None
 
 
@@ -298,17 +298,13 @@ async def scan_open_positions(
         try:
             getter = getattr(adapter, "get_open_position", None)
             if not callable(getter):
-                print(f"  {venue}: no get_open_position support")
                 continue
             payload = await getter(symbol=symbol, market_type="perp")
-            print(f"  {venue}: raw={payload}")
             if not payload:
-                print(f"  {venue}: no position")
                 continue
             side = str(payload.get("side", "")).strip().upper()
             qty = Decimal(str(payload.get("quantity") or "0"))
             if side not in {"LONG", "SHORT"} or qty <= 0:
-                print(f"  {venue}: skipped side={side!r} qty={qty}")
                 continue
             live_symbol = str(payload.get("symbol") or symbol).strip().upper()
             legs.append(PositionLeg(
@@ -321,9 +317,8 @@ async def scan_open_positions(
                 quantity=format(qty.normalize(), "f"),
                 status="open",
             ))
-            print(f"  {venue}: found {side} {qty}")
-        except Exception as exc:
-            print(f"  {venue}: ERROR — {exc}")
+        except Exception:
+            pass
         finally:
             await close_adapter_if_supported(adapter)
     return legs
@@ -369,16 +364,17 @@ async def run_open_execution_once() -> None:
             print("execution cancelled")
             return
 
-    answer = input("place real order for one clip? [y/N]: ").strip().lower()
+    num_batches = compute_token_batch_count(total_size, clip_size)
+    answer = input(f"execute {num_batches} batch(es)? [y/N]: ").strip().lower()
     if answer not in {"y", "yes"}:
         print("execution cancelled")
         return
 
-    quantity = clip_size
     clip_usd = preview.clip_usd
-    validate_maker_fill_supported(preview.maker_venue)
+    validate_maker_fill_supported()
 
-    async def execute_with_adapters(*, broker_url: str | None = None) -> dict[str, object]:
+    async def execute_one_batch(*, broker_url: str | None = None, batch_clip_size: Decimal) -> dict[str, object]:
+        batch_clip_usd = float(batch_clip_size) / float(clip_size) * clip_usd
         maker_adapter = build_adapter_for_venue(preview.maker_venue, leverage=leverage, broker_url=broker_url)
         taker_adapter = build_adapter_for_venue(preview.taker_venue, leverage=leverage, broker_url=broker_url)
         warm_up = getattr(taker_adapter, "warm_up", None)
@@ -386,8 +382,8 @@ async def run_open_execution_once() -> None:
             await warm_up()
         async with aiohttp.ClientSession(headers={"User-Agent": "funding-arb-execution-open/0.1"}) as _sess:
             _fresh = await asyncio.gather(
-                fetch_orderbook_snapshot(_sess, venue=preview.maker_venue, symbol=signal.symbol, clip_usd=clip_usd),
-                fetch_orderbook_snapshot(_sess, venue=preview.taker_venue, symbol=signal.symbol, clip_usd=clip_usd),
+                fetch_orderbook_snapshot(_sess, venue=preview.maker_venue, symbol=signal.symbol, clip_usd=batch_clip_usd),
+                fetch_orderbook_snapshot(_sess, venue=preview.taker_venue, symbol=signal.symbol, clip_usd=batch_clip_usd),
             )
         maker_book, taker_book = _fresh[0], _fresh[1]
         await check_pre_trade_price_gap(
@@ -396,12 +392,11 @@ async def run_open_execution_once() -> None:
             maker_book=maker_book,
             taker_book=taker_book,
         )
-        # Variational uses the Mid button in the UI — don't pass an explicit price
         use_maker_orderbook = None if preview.maker_venue == "variational" else maker_book
         return await execute_single_clip(
             symbol=signal.symbol,
-            clip_usd=clip_usd,
-            quantity=quantity,
+            clip_usd=batch_clip_usd,
+            quantity=batch_clip_size,
             maker_venue=preview.maker_venue,
             taker_venue=preview.taker_venue,
             short_venue=signal.short_venue,
@@ -415,6 +410,18 @@ async def run_open_execution_once() -> None:
             require_maker_fill_confirmation=True,
             maker_fill_timeout_seconds=MAKER_FILL_TIMEOUT_SECONDS,
         )
+
+    async def run_batches(*, broker_url: str | None = None) -> None:
+        remaining = total_size
+        for batch_idx in range(num_batches):
+            this_clip = min(clip_size, remaining)
+            remaining -= this_clip
+            print(f"\nbatch {batch_idx + 1}/{num_batches}  clip_size_token={this_clip}")
+            result = await execute_one_batch(broker_url=broker_url, batch_clip_size=this_clip)
+            print_execution_prices(result, maker_venue=preview.maker_venue, taker_venue=preview.taker_venue)
+            if not result.get("ok", False):
+                raise RuntimeError(f"batch {batch_idx + 1} failed — stopping")
+        print(f"\nopen complete: {num_batches} batch(es) executed")
 
     if "variational" in {preview.maker_venue, preview.taker_venue}:
         print(
@@ -438,11 +445,9 @@ async def run_open_execution_once() -> None:
             print("extension connected — waiting for portfolio data...")
             await server.wait_for_portfolio(timeout_seconds=15.0)
             print("portfolio data received")
-            result = await execute_with_adapters(broker_url=server.ws_url)
+            await run_batches(broker_url=server.ws_url)
     else:
-        result = await execute_with_adapters()
-    print("execution result")
-    print_execution_prices(result, maker_venue=preview.maker_venue, taker_venue=preview.taker_venue)
+        await run_batches()
 
 
 async def run_close_execution_once() -> None:
@@ -468,7 +473,7 @@ async def run_close_execution_once() -> None:
         broker_url: str = server.ws_url
         scan_venues = ALL_CLOSE_VENUES + ["variational"]
 
-        print(f"scanning {scan_venues} for open {symbol} positions...")
+        print(f"scanning for open {symbol} positions...")
         legs = await scan_open_positions(symbol=symbol, venues=scan_venues, broker_url=broker_url)
 
         if not legs:
@@ -496,60 +501,79 @@ async def run_close_execution_once() -> None:
         venues = [leg.venue for leg in selected_legs]
         print(f"pair: {short_leg.venue} SHORT {short_leg.quantity} / {long_leg.venue} LONG {long_leg.quantity}")
 
+        total_size = prompt_decimal("total_size_token")
         clip_size = prompt_decimal("clip_size_token")
+        num_batches = compute_token_batch_count(total_size, clip_size)
 
         priorities = load_execution_priorities(EXECUTION_VENUES_PATH)
-        initial_books = await fetch_close_orderbooks(symbol=symbol, venues=venues, clip_usd=1000.0)
-        initial_plan = build_close_position_plan(
+
+        # Preview using current price for clip_usd estimate
+        ref_books = await fetch_close_orderbooks(symbol=symbol, venues=venues, clip_usd=1000.0)
+        ref_mid = (orderbook_mid(ref_books[venues[0]]) + orderbook_mid(ref_books[venues[1]])) / 2
+        ref_clip_usd = float(clip_size) * ref_mid
+        ref_plan = build_close_position_plan(
             legs=selected_legs,
             clip_size=clip_size,
             priorities=priorities,
-            orderbooks=initial_books,
-        )
-        orderbooks = await fetch_close_orderbooks(symbol=symbol, venues=venues, clip_usd=initial_plan.clip_usd)
-        plan = build_close_position_plan(
-            legs=selected_legs,
-            clip_size=clip_size,
-            priorities=priorities,
-            orderbooks=orderbooks,
+            orderbooks=ref_books,
         )
 
         print("平倉預覽")
-        print(f"ticker: {plan.symbol}")
-        print(f"限價方: {plan.maker_venue} {plan.side_by_venue[plan.maker_venue]} price={plan.maker_price}")
-        print(f"市價方: {plan.taker_venue} {plan.side_by_venue[plan.taker_venue]}")
-        print(f"clip_size_token: {plan.quantity}")
-        print(f"estimated_clip_usd: {plan.clip_usd:.2f}")
-        for venue, spread in plan.spread_by_venue.items():
+        print(f"ticker: {ref_plan.symbol}")
+        print(f"total_size_token: {total_size}  clip_size_token: {clip_size}  batches: {num_batches}")
+        print(f"estimated_clip_usd: ~{ref_clip_usd:.2f}")
+        print(f"限價方: {ref_plan.maker_venue} {ref_plan.side_by_venue[ref_plan.maker_venue]}")
+        print(f"市價方: {ref_plan.taker_venue} {ref_plan.side_by_venue[ref_plan.taker_venue]}")
+        for venue, spread in ref_plan.spread_by_venue.items():
             print(f"{venue}_spread: {fmt_pct(spread)}")
-        answer = input("place real close order for one clip? [y/N]: ").strip().lower()
+
+        answer = input(f"execute {num_batches} close batch(es)? [y/N]: ").strip().lower()
         if answer not in {"y", "yes"}:
             print("close cancelled")
             return
 
-        exec_adapters = {
-            v: build_adapter_for_venue(v, broker_url=broker_url)
-            for v in venues
-        }
-        try:
-            for adapter in exec_adapters.values():
-                warm_up = getattr(adapter, "warm_up", None)
-                if callable(warm_up):
-                    await warm_up()
-            fresh_books = await fetch_close_orderbooks(symbol=plan.symbol, venues=venues, clip_usd=plan.clip_usd)
+        remaining = total_size
+        for batch_idx in range(num_batches):
+            this_clip = min(clip_size, remaining)
+            remaining -= this_clip
+            print(f"\nbatch {batch_idx + 1}/{num_batches}  clip_size_token={this_clip}")
+
+            fresh_books = await fetch_close_orderbooks(symbol=symbol, venues=venues, clip_usd=float(this_clip) * ref_mid)
+
+            plan = build_close_position_plan(
+                legs=selected_legs,
+                clip_size=this_clip,
+                priorities=priorities,
+                orderbooks=fresh_books,
+            )
+
             await check_pre_trade_price_gap(
                 maker_venue=plan.maker_venue,
                 taker_venue=plan.taker_venue,
                 maker_book=fresh_books[plan.maker_venue],
                 taker_book=fresh_books[plan.taker_venue],
             )
-            result = await execute_close_position_plan(plan=plan, adapters=exec_adapters)
-        finally:
-            for adapter in exec_adapters.values():
-                await close_adapter_if_supported(adapter)
 
-        print("close execution result")
-        print_execution_prices(result, maker_venue=plan.maker_venue, taker_venue=plan.taker_venue)
+            exec_adapters = {
+                v: build_adapter_for_venue(v, broker_url=broker_url)
+                for v in venues
+            }
+            try:
+                for adapter in exec_adapters.values():
+                    warm_up = getattr(adapter, "warm_up", None)
+                    if callable(warm_up):
+                        await warm_up()
+                result = await execute_close_position_plan(plan=plan, adapters=exec_adapters)
+            finally:
+                for adapter in exec_adapters.values():
+                    await close_adapter_if_supported(adapter)
+
+            print_execution_prices(result, maker_venue=plan.maker_venue, taker_venue=plan.taker_venue)
+
+            if not result.get("ok", False):
+                raise RuntimeError(f"batch {batch_idx + 1} failed — stopping")
+
+        print(f"\nclose complete: {num_batches} batch(es) executed")
 
 
 async def run_execution_once() -> None:

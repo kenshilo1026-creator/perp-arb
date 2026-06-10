@@ -294,11 +294,12 @@ class HyperliquidExecutionAdapter:
         mid = await self._get_mid_price(symbol)
         slippage = self.slippage_bps / 10000
         price = mid * (1 + slippage) if is_buy else mid * (1 - slippage)
+        size = float(amount)
         action = self._build_action(
             asset_index=asset_index,
             is_buy=is_buy,
             price=price,
-            size=float(amount),
+            size=size,
             tif="Ioc",
         )
         data = await self._post_order(action)

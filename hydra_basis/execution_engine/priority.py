@@ -17,13 +17,13 @@ def resolve_execution_legs(
     short_above = short_spread > spread_priority_threshold
     long_above = long_spread > spread_priority_threshold
 
-    if short_above and long_above:
-        if short_spread < long_spread:
+    # If either venue has a wide spread, the wider one should be maker (place limit to avoid paying it)
+    if short_above or long_above:
+        if long_spread > short_spread:
             return long_venue, short_venue
-        if long_spread < short_spread:
-            return short_venue, long_venue
         return short_venue, long_venue
 
+    # Both spreads are tight: use priority (higher number = preferred maker)
     short_priority = priorities[short_venue]
     long_priority = priorities[long_venue]
     if short_priority > long_priority:
@@ -31,10 +31,9 @@ def resolve_execution_legs(
     if long_priority > short_priority:
         return long_venue, short_venue
 
-    if short_spread < long_spread:
+    # Equal priority: tiebreak by spread (wider = maker)
+    if long_spread > short_spread:
         return long_venue, short_venue
-    if long_spread < short_spread:
-        return short_venue, long_venue
     return short_venue, long_venue
 
 

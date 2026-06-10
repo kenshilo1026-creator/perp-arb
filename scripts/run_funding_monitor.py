@@ -78,9 +78,11 @@ async def run_once(analysis_days: int = 7) -> None:
     opportunities: list[dict] = []
     spot_perp_opportunities: list[dict] = []
 
+    scaled_min_obs = max(3, round(24 * analysis_days / 7))
+
     for venue in venues:
         for symbol in venue_symbols.get(venue, set()):
-            stats = analyze_positive_funding(analysis_points.get((venue, symbol), []))
+            stats = analyze_positive_funding(analysis_points.get((venue, symbol), []), min_observations=scaled_min_obs)
             if not stats:
                 continue
             spot_perp_opportunities.append({"symbol": symbol, "venue": venue, "stats": stats})
@@ -107,11 +109,13 @@ async def run_once(analysis_days: int = 7) -> None:
                 stats = analyze_spread(
                     analysis_points.get((short_venue, symbol), []),
                     analysis_points.get((long_venue, symbol), []),
+                    analysis_days=analysis_days,
                 )
                 if not stats:
                     reason = explain_spread_skip(
                         analysis_points.get((short_venue, symbol), []),
                         analysis_points.get((long_venue, symbol), []),
+                        analysis_days=analysis_days,
                     )
                     print(symbol, f"SHORT {short_venue} / LONG {long_venue}", f"reason={reason}")
                     continue

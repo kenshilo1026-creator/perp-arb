@@ -38,21 +38,25 @@ def resolve_pair_min_observations(
     *,
     default_min_observations: int = DEFAULT_MIN_OBSERVATIONS,
     mixed_8h_min_observations: int = DEFAULT_MIXED_8H_MIN_OBSERVATIONS,
+    analysis_days: int = 7,
 ) -> int:
     if default_min_observations != DEFAULT_MIN_OBSERVATIONS:
         return default_min_observations
+    scale = analysis_days / 7
+    scaled_default = max(3, round(default_min_observations * scale))
+    scaled_8h = max(3, round(mixed_8h_min_observations * scale))
     if not short_venue_points or not long_venue_points:
-        return default_min_observations
+        return scaled_default
 
     interval_hours = {
         float(short_venue_points[-1].interval_hours),
         float(long_venue_points[-1].interval_hours),
     }
     if interval_hours == {1.0}:
-        return default_min_observations
+        return scaled_default
     if 8.0 in interval_hours:
-        return mixed_8h_min_observations
-    return default_min_observations
+        return scaled_8h
+    return scaled_default
 
 
 def prices_are_compatible(
@@ -123,6 +127,7 @@ def analyze_spread(
     max_std_multiple_of_avg: float = DEFAULT_MAX_STD_MULTIPLE_OF_AVG,
     min_observations: int = DEFAULT_MIN_OBSERVATIONS,
     max_single_interval_hourly_rate: float = DEFAULT_MAX_SINGLE_INTERVAL_HOURLY_RATE,
+    analysis_days: int = 7,
 ) -> dict[str, Any] | None:
     all_points = short_venue_points + long_venue_points
     if any(p.hourly_rate < -max_single_interval_hourly_rate for p in all_points):
@@ -131,6 +136,7 @@ def analyze_spread(
         short_venue_points,
         long_venue_points,
         default_min_observations=min_observations,
+        analysis_days=analysis_days,
     )
     pairs = align_on_coarser_interval(short_venue_points, long_venue_points)
     spreads = [short_point.hourly_rate - long_point.hourly_rate for short_point, long_point in pairs]
@@ -183,6 +189,7 @@ def explain_spread_skip(
     long_venue_points: list[FundingPoint],
     *,
     min_observations: int = DEFAULT_MIN_OBSERVATIONS,
+    analysis_days: int = 7,
 ) -> str:
     if not short_venue_points or not long_venue_points:
         return "missing_points"
@@ -190,6 +197,7 @@ def explain_spread_skip(
         short_venue_points,
         long_venue_points,
         default_min_observations=min_observations,
+        analysis_days=analysis_days,
     )
     pairs = align_on_coarser_interval(short_venue_points, long_venue_points)
     if not pairs:

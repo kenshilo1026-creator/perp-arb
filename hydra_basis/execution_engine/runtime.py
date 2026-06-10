@@ -6,6 +6,7 @@ from decimal import Decimal
 from hydra_basis.config import EXECUTION_VENUES_PATH, MONITOR_SIGNALS_PATH
 from hydra_basis.execution_engine.interfaces import FakeExecutionAdapter
 from hydra_basis.execution_engine.market_data import fetch_orderbook_snapshot
+from hydra_basis.execution_engine.models import ExecutionSignal
 from hydra_basis.execution_engine.preview import build_execution_preview
 from hydra_basis.execution_engine.priority import load_execution_priorities
 from hydra_basis.execution_engine.signal_store import load_best_signal_for_symbol
@@ -48,11 +49,18 @@ def estimate_clip_usd_from_size(*, clip_size: Decimal, short_book: dict, long_bo
     return float(clip_size) * mid
 
 
-async def prepare_execution_preview_for_size(*, symbol: str, total_size: Decimal, clip_size: Decimal):
+async def prepare_execution_preview_for_size(
+    *,
+    symbol: str,
+    total_size: Decimal,
+    clip_size: Decimal,
+    signal: ExecutionSignal | None = None,
+):
     if total_size <= 0 or clip_size <= 0:
         raise RuntimeError("total_size and clip_size must be positive")
 
-    signal = load_best_signal_for_symbol(path=MONITOR_SIGNALS_PATH, symbol=symbol)
+    if signal is None:
+        signal = load_best_signal_for_symbol(path=MONITOR_SIGNALS_PATH, symbol=symbol)
     priorities = load_execution_priorities(EXECUTION_VENUES_PATH)
 
     async with aiohttp.ClientSession() as session:

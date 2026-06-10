@@ -34,7 +34,8 @@ from hydra_basis.execution_engine.variational_broker import VariationalCommandBr
 from hydra_basis.execution_engine.variational_browser import VariationalBrowserExecutionAdapter
 from hydra_basis.formatting import fmt_pct
 from hydra_basis.risk_management.models import PositionLeg, close_side_for_position
-from hydra_basis.config import EXECUTION_VENUES_PATH
+from hydra_basis.config import EXECUTION_VENUES_PATH, MONITOR_SIGNALS_PATH
+from hydra_basis.execution_engine.signal_store import load_best_signal_for_symbol
 
 load_environment()
 
@@ -336,10 +337,20 @@ async def run_open_execution_once() -> None:
     clip_size = prompt_decimal("clip_size_token")
     leverage = prompt_int("leverage_x")
 
+    _sig = load_best_signal_for_symbol(path=MONITOR_SIGNALS_PATH, symbol=symbol)
+    print(f"1. SHORT {_sig.short_venue} / LONG {_sig.long_venue}")
+    print(f"2. SHORT {_sig.long_venue} / LONG {_sig.short_venue}")
+    direction = prompt_int("direction [1/2]")
+    if direction not in {1, 2}:
+        raise RuntimeError("direction must be 1 or 2")
+    if direction == 2:
+        _sig.short_venue, _sig.long_venue = _sig.long_venue, _sig.short_venue
+
     signal, preview, *_ = await prepare_execution_preview_for_size(
         symbol=symbol,
         total_size=total_size,
         clip_size=clip_size,
+        signal=_sig,
     )
 
     print("execution once")

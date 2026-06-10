@@ -5,7 +5,6 @@ from typing import Sequence, TypeVar
 from hydra_basis.execution_engine.market_data import fetch_orderbook_snapshot
 from hydra_basis.execution_engine.risk import compute_spread_pct
 from hydra_basis.history_store import funding_history_is_complete
-from hydra_basis.monitor_errors import should_raise_immediately
 
 
 T = TypeVar("T")
@@ -65,6 +64,25 @@ def backfill_needs_top_up(points: Sequence, *, now_ms: int) -> bool:
 NO_ORDERBOOK_SENTINEL = "no_orderbook"
 
 
+def _safe_error_text(error: Exception) -> str:
+    try:
+        return str(error)
+    except Exception:
+        return repr(error)
+
+
+def spread_error_is_transient(error: Exception) -> bool:
+    message = _safe_error_text(error).lower()
+    return (
+        "429" in message
+        or "too many requests" in message
+        or "rate limit" in message
+        or "timeout" in message
+        or "timed out" in message
+        or "invalid response status" in message
+    )
+
+
 async def capture_backfill_spread_snapshot(
     *,
     session,
@@ -74,8 +92,34 @@ async def capture_backfill_spread_snapshot(
     clip_usd: float,
     force_refresh: bool = False,
 ) -> bool:
+    result = await capture_backfill_spread_snapshot_with_error(
+        session=session,
+        spreads=spreads,
+        venue=venue,
+        symbol=symbol,
+        clip_usd=clip_usd,
+        force_refresh=force_refresh,
+    )
+    return bool(result["stored"])
+
+
+async def capture_backfill_spread_snapshot_with_error(
+    *,
+    session,
+    spreads: dict[tuple[str, str], dict[str, float | int]],
+    venue: str,
+    symbol: str,
+    clip_usd: float,
+    force_refresh: bool = False,
+) -> dict[str, object]:
     if not force_refresh and spreads.get((venue, symbol), {}).get("status") == NO_ORDERBOOK_SENTINEL:
-        return False
+        return {
+            "stored": False,
+            "venue": venue,
+            "symbol": symbol,
+            "error": None,
+            "error_type": "cached_no_orderbook",
+        }
 
     try:
         orderbook = await fetch_orderbook_snapshot(
@@ -85,11 +129,26 @@ async def capture_backfill_spread_snapshot(
             clip_usd=clip_usd,
         )
     except Exception as exc:
-        if should_raise_immediately(exc):
-            raise
-        print(f"backfill spread skipped {(venue, symbol)}: {exc}")
-        spreads[(venue, symbol)] = {"status": NO_ORDERBOOK_SENTINEL}
-        return False
+        message = _safe_error_text(exc)
+        if spread_error_is_transient(exc):
+            print(f"backfill spread error transient {(venue, symbol)}: {message}")
+            return {
+                "stored": False,
+                "venue": venue,
+                "symbol": symbol,
+                "error": message,
+                "error_type": "transient",
+            }
+        print(f"backfill spread skipped {(venue, symbol)}: {message}")
+        if (venue, symbol) not in spreads:
+            spreads[(venue, symbol)] = {"status": NO_ORDERBOOK_SENTINEL}
+        return {
+            "stored": False,
+            "venue": venue,
+            "symbol": symbol,
+            "error": message,
+            "error_type": "permanent",
+        }
 
     spreads[(venue, symbol)] = {
         "bid": float(orderbook["bid"]),
@@ -97,7 +156,13 @@ async def capture_backfill_spread_snapshot(
         "spread_pct": compute_spread_pct(orderbook),
         "ts_ms": int(orderbook["ts_ms"]),
     }
-    return True
+    return {
+        "stored": True,
+        "venue": venue,
+        "symbol": symbol,
+        "error": None,
+        "error_type": None,
+    }
 
 
 def persist_backfill_progress(

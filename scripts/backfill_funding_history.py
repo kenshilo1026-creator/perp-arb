@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import html
 
 import aiohttp
 
@@ -13,7 +14,7 @@ from hydra_basis.backfill import (
     build_spread_refresh_keys,
     chunk_sequence,
     split_loris_batched_keys,
-    capture_backfill_spread_snapshot,
+    capture_backfill_spread_snapshot_with_error,
     persist_backfill_progress,
     backfill_incremental_start_ms,
     backfill_needs_top_up,
@@ -38,6 +39,7 @@ from hydra_basis.history_store import (
     trim_points_to_lookback_ms,
 )
 from hydra_basis.monitor_errors import should_raise_immediately
+from hydra_basis.notifications.telegram import send_telegram
 from hydra_basis.runtime import configure_windows_event_loop_policy
 from hydra_basis.funding_engine.analysis import now_ms
 
@@ -47,6 +49,70 @@ load_environment()
 BACKFILL_BATCH_SIZE = 30
 BACKFILL_BATCH_SLEEP_SECONDS = 15
 PERSIST_EVERY_N = 200
+SPREAD_REFRESH_CONCURRENCY_BY_VENUE = {
+    "lighter": 1,
+}
+SPREAD_REFRESH_DELAY_BY_VENUE_SECONDS = {
+    "lighter": 1.0,
+}
+SPREAD_ERROR_ALERT_MAX_ITEMS = 10
+
+
+async def capture_spread_snapshot_with_venue_delay(
+    *,
+    session,
+    spreads,
+    venue: str,
+    symbol: str,
+) -> dict[str, object]:
+    result = await capture_backfill_spread_snapshot_with_error(
+        session=session,
+        spreads=spreads,
+        venue=venue,
+        symbol=symbol,
+        clip_usd=BACKFILL_SPREAD_CLIP_USD,
+        force_refresh=True,
+    )
+    delay = SPREAD_REFRESH_DELAY_BY_VENUE_SECONDS.get(venue, 0.0)
+    if delay > 0:
+        await asyncio.sleep(delay)
+    return result
+
+
+async def send_spread_error_alert(
+    *,
+    venue: str,
+    batch_index: int,
+    batch_count: int,
+    errors: list[dict[str, object]],
+) -> None:
+    if not errors:
+        return
+    transient_errors = [
+        item for item in errors
+        if item.get("error_type") == "transient"
+    ]
+    if not transient_errors:
+        return
+
+    lines = [
+        "<b>Backfill spread 抓取錯誤</b>",
+        f"交易所: <code>{html.escape(venue)}</code>",
+        f"批次: {batch_index}/{batch_count}",
+        f"錯誤數: {len(transient_errors)}",
+        "處理: 已保留舊 spread 快取，backfill 繼續；Lighter 已單線程並節流。",
+    ]
+    for item in transient_errors[:SPREAD_ERROR_ALERT_MAX_ITEMS]:
+        symbol = html.escape(str(item.get("symbol", "")))
+        error = html.escape(str(item.get("error", "")))[:240]
+        lines.append(f"<code>{symbol}</code>: {error}")
+    if len(transient_errors) > SPREAD_ERROR_ALERT_MAX_ITEMS:
+        lines.append(f"...另外 {len(transient_errors) - SPREAD_ERROR_ALERT_MAX_ITEMS} 個錯誤")
+
+    try:
+        await send_telegram("\n".join(lines))
+    except Exception as exc:
+        print(f"backfill spread telegram alert failed: {exc!r}")
 
 
 async def run_backfill() -> None:
@@ -227,36 +293,62 @@ async def run_backfill() -> None:
                 await asyncio.sleep(BACKFILL_BATCH_SLEEP_SECONDS)
 
         if spread_refresh_keys:
-            spread_batches = chunk_sequence(spread_refresh_keys, chunk_size=PERSIST_EVERY_N)
-            for batch_index, batch in enumerate(spread_batches, start=1):
-                print(f"backfill spread-batch {batch_index}/{len(spread_batches)} size={len(batch)}")
-                tasks = [
-                    capture_backfill_spread_snapshot(
-                        session=session,
-                        spreads=all_spreads,
-                        venue=venue,
-                        symbol=symbol,
-                        clip_usd=BACKFILL_SPREAD_CLIP_USD,
-                        force_refresh=True,
+            spread_keys_by_venue: dict[str, list[tuple[str, str]]] = {}
+            for key in spread_refresh_keys:
+                spread_keys_by_venue.setdefault(key[0], []).append(key)
+            for venue, venue_keys in spread_keys_by_venue.items():
+                spread_batches = chunk_sequence(venue_keys, chunk_size=PERSIST_EVERY_N)
+                spread_limit = SPREAD_REFRESH_CONCURRENCY_BY_VENUE.get(venue, FETCH_CONCURRENCY_LIMIT)
+                for batch_index, batch in enumerate(spread_batches, start=1):
+                    print(
+                        f"backfill spread-batch venue={venue} "
+                        f"{batch_index}/{len(spread_batches)} size={len(batch)} "
+                        f"concurrency={spread_limit}"
                     )
-                    for venue, symbol in batch
-                ]
-                results = await gather_limited(
-                    tasks,
-                    limit=FETCH_CONCURRENCY_LIMIT,
-                    return_exceptions=True,
-                )
-                for key, result in zip(batch, results):
-                    if isinstance(result, Exception):
-                        if should_raise_immediately(result):
-                            raise result
-                        print(f"backfill spread failed {key}: {result!r}")
-                persist_backfill_progress(
-                    history_store=store,
-                    spread_store=spread_store,
-                    funding_points=all_points,
-                    spreads=all_spreads,
-                )
+                    tasks = [
+                        capture_spread_snapshot_with_venue_delay(
+                            session=session,
+                            spreads=all_spreads,
+                            venue=item_venue,
+                            symbol=symbol,
+                        )
+                        for item_venue, symbol in batch
+                    ]
+                    results = await gather_limited(
+                        tasks,
+                        limit=spread_limit,
+                        return_exceptions=True,
+                    )
+                    spread_errors: list[dict[str, object]] = []
+                    for key, result in zip(batch, results):
+                        if isinstance(result, Exception):
+                            print(f"backfill spread failed {key}: {result!r}")
+                            spread_errors.append({
+                                "venue": key[0],
+                                "symbol": key[1],
+                                "error": repr(result),
+                                "error_type": "task_exception",
+                            })
+                            continue
+                        if result.get("error"):
+                            print(
+                                "backfill spread error "
+                                f"{key}: type={result.get('error_type')} "
+                                f"{result.get('error')}"
+                            )
+                            spread_errors.append(result)
+                    await send_spread_error_alert(
+                        venue=venue,
+                        batch_index=batch_index,
+                        batch_count=len(spread_batches),
+                        errors=spread_errors,
+                    )
+                    persist_backfill_progress(
+                        history_store=store,
+                        spread_store=spread_store,
+                        funding_points=all_points,
+                        spreads=all_spreads,
+                    )
 
 
 if __name__ == "__main__":

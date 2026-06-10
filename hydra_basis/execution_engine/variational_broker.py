@@ -4,6 +4,7 @@ import asyncio
 import json
 import uuid
 from datetime import datetime, timezone
+from decimal import Decimal
 from typing import Any
 
 import websockets
@@ -228,21 +229,28 @@ class VariationalCommandBroker:
     def _update_positions_from_portfolio(self, positions: list) -> None:
         self._positions.clear()
         for pos in positions:
-            instrument = pos.get("instrument") or {}
+            info = pos.get("position_info") or pos
+            instrument = info.get("instrument") or {}
             symbol = normalize_variational_symbol(instrument)
             if not symbol:
                 continue
-            side = str(pos.get("side") or "").strip().upper()
-            qty = str(pos.get("qty") or "0")
+            try:
+                qty = Decimal(str(info.get("qty") or "0"))
+            except Exception:
+                continue
+            if qty == 0:
+                continue
+            side = "LONG" if qty > 0 else "SHORT"
             self._positions[symbol] = {
                 "symbol": symbol,
                 "side": side,
-                "quantity": qty,
+                "quantity": format(abs(qty).normalize(), "f"),
                 "market_type": "perp",
             }
-        self._portfolio_received.set()
-        if not self.quiet:
-            print(f"[VARIATIONAL_BROKER] positions updated count={len(self._positions)}", flush=True)
+        if not self._portfolio_received.is_set():
+            self._portfolio_received.set()
+            if not self.quiet:
+                print(f"[VARIATIONAL_BROKER] portfolio received count={len(self._positions)} symbols={list(self._positions.keys())}", flush=True)
 
     async def wait_for_portfolio(self, *, timeout_seconds: float = 15.0) -> None:
         await asyncio.wait_for(self._portfolio_received.wait(), timeout=timeout_seconds)
@@ -251,11 +259,8 @@ class VariationalCommandBroker:
         self._fill_events_seen += 1
         self._last_fill_event = compact_debug_payload(payload)
         decoded = parse_forwarded_ws_payload(payload)
-        if not self.quiet:
-            url = payload.get("url", "") if isinstance(payload, dict) else ""
-            decoded_type = decoded.get("type") if isinstance(decoded, dict) else type(decoded).__name__
-            print(f"[VARIATIONAL_BROKER] fill_event url={url!r} type={decoded_type!r} keys={list(decoded.keys()) if isinstance(decoded, dict) else []}", flush=True)
-        if isinstance(decoded, dict) and decoded.get("type") == "portfolio":
+        url = payload.get("url", "") if isinstance(payload, dict) else ""
+        if isinstance(decoded, dict) and "/portfolio" in str(url):
             self._update_positions_from_portfolio(decoded.get("positions") or [])
             return
         fill = extract_variational_fill_event(payload)

@@ -497,7 +497,6 @@ async def run_close_execution_once() -> None:
         print(f"pair: {short_leg.venue} SHORT {short_leg.quantity} / {long_leg.venue} LONG {long_leg.quantity}")
 
         clip_size = prompt_decimal("clip_size_token")
-        leverage = prompt_int("leverage_x")
 
         priorities = load_execution_priorities(EXECUTION_VENUES_PATH)
         initial_books = await fetch_close_orderbooks(symbol=symbol, venues=venues, clip_usd=1000.0)
@@ -523,15 +522,13 @@ async def run_close_execution_once() -> None:
         print(f"estimated_clip_usd: {plan.clip_usd:.2f}")
         for venue, spread in plan.spread_by_venue.items():
             print(f"{venue}_spread: {fmt_pct(spread)}")
-        print(f"leverage_x: {leverage}")
-
         answer = input("place real close order for one clip? [y/N]: ").strip().lower()
         if answer not in {"y", "yes"}:
             print("close cancelled")
             return
 
         exec_adapters = {
-            v: build_adapter_for_venue(v, leverage=leverage, broker_url=broker_url)
+            v: build_adapter_for_venue(v, broker_url=broker_url)
             for v in venues
         }
         try:

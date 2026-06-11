@@ -95,6 +95,7 @@ class HyperliquidExecutionAdapter:
         account_address: str | None = None,
         leverage: int | None = None,
         slippage_bps: float = 50.0,
+        skip_margin_setup: bool = False,
     ) -> None:
         self.private_key = private_key or os.getenv("HYPERLIQUID_PRIVATE_KEY", "")
         if not self.private_key:
@@ -107,6 +108,7 @@ class HyperliquidExecutionAdapter:
         )
         self.slippage_bps = slippage_bps
         self.default_leverage = leverage if leverage is not None else int(os.getenv("HYPERLIQUID_LEVERAGE", "1"))
+        self.skip_margin_setup = skip_margin_setup
         self._universe: list[str] | None = None
         self._isolated_asset_indices: set[int] = set()
 
@@ -175,6 +177,8 @@ class HyperliquidExecutionAdapter:
             raise RuntimeError("hyperliquid live position query only supports perp")
         normalized_symbol = symbol.strip().upper()
         state = await self._fetch_clearinghouse_state()
+        raw_positions = state.get("assetPositions", [])
+        print(f"[hyperliquid] get_open_position symbol={normalized_symbol} querying_account={self.account_address} total_positions={len(raw_positions)}")
         for item in state.get("assetPositions", []):
             position = item.get("position", {})
             if str(position.get("coin", "")).strip().upper() != normalized_symbol:
@@ -193,7 +197,7 @@ class HyperliquidExecutionAdapter:
 
     async def ensure_isolated_margin(self, symbol: str) -> int:
         asset_index = await self._get_asset_index(symbol)
-        if asset_index in self._isolated_asset_indices:
+        if self.skip_margin_setup or asset_index in self._isolated_asset_indices:
             return asset_index
         action = {
             "type": "updateLeverage",

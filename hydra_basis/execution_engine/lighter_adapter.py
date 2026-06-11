@@ -1,10 +1,18 @@
 from __future__ import annotations
 
+import asyncio
 import inspect
+import os
 import time
 from decimal import Decimal, ROUND_FLOOR
 
+import aiohttp
+
+from hydra_basis.adapters.base import fetch_json
 from hydra_basis.execution_engine.order_fill import poll_until_filled
+
+
+LIGHTER_BASE_URL = "https://mainnet.zklighter.elliot.ai"
 
 
 def compute_base_quantity_from_clip_usd(
@@ -211,28 +219,34 @@ class LighterExecutionAdapter:
             return await result
         return result
 
-    async def _get_order_status(self, client_order_index: object) -> dict[str, object]:
+    def _create_auth_token(self) -> str:
         client = self._get_client()
-        for method_name in (
-            "get_order",
-            "get_order_by_client_order_index",
-            "get_order_by_client_order_id",
-        ):
-            method = getattr(client, method_name, None)
-            if method is None:
-                continue
-            result = method(client_order_index)
-            if inspect.isawaitable(result):
-                result = await result
-            if isinstance(result, tuple):
-                _response, payload, error = result if len(result) == 3 else (None, result[-1], None)
-                if error is not None:
-                    raise RuntimeError(f"lighter order status failed: {error}")
-                result = payload
-            if isinstance(result, dict):
-                return result
-            return {"status": str(result), "raw": result}
-        raise RuntimeError("lighter client has no order status method")
+        token, error = client.create_auth_token_with_expiry(-1)
+        if error is not None:
+            raise RuntimeError(f"lighter auth token error: {error}")
+        return token
+
+    async def _get_order_status(self, client_order_index: object, market_index: int) -> dict[str, object]:
+        account_index = int(os.getenv("LIGHTER_ACCOUNT_INDEX", "0"))
+        try:
+            auth_token = self._create_auth_token()
+            async with aiohttp.ClientSession() as session:
+                data = await fetch_json(
+                    session,
+                    "GET",
+                    f"{LIGHTER_BASE_URL}/api/v1/accountActiveOrders",
+                    params={"account_index": account_index, "auth": auth_token},
+                    headers={"accept": "application/json"},
+                )
+            orders = data.get("orders") or []
+            for order in orders:
+                coi = order.get("client_order_index") or order.get("client_order_id")
+                if coi is not None and int(coi) == int(client_order_index):
+                    return {"status": "OPEN", "raw": order}
+            return {"status": "FILLED", "raw": data}
+        except Exception as exc:
+            print(f"[lighter] order status poll failed: {exc} — assuming OPEN", flush=True)
+            return {"status": "OPEN"}
 
     async def get_open_position(self, *, symbol: str, market_type: str) -> dict[str, object] | None:
         if market_type != "perp":
@@ -308,6 +322,7 @@ class LighterExecutionAdapter:
             "ok": True,
             "tx_hash": tx_hash,
             "client_order_index": request["client_order_index"],
+            "market_index": request["market_index"],
         }
 
     async def _submit_limit_order(
@@ -350,6 +365,7 @@ class LighterExecutionAdapter:
             "ok": True,
             "tx_hash": tx_hash,
             "client_order_index": request["client_order_index"],
+            "market_index": request["market_index"],
         }
 
     async def place_market_order(self, *, symbol: str, side: str, amount: str, clip_usd: float) -> dict[str, object]:
@@ -379,17 +395,48 @@ class LighterExecutionAdapter:
         side: str,
         amount: str,
         timeout_seconds: float,
-        poll_interval_seconds: float = 0.5,
+        poll_interval_seconds: float = 2.0,
+        initial_delay_seconds: float = 3.0,
     ) -> dict[str, object]:
         client_order_index = order_result.get("client_order_index")
         if client_order_index is None:
             raise RuntimeError("lighter limit order fill wait requires client_order_index")
+        market_index = order_result.get("market_index")
+        if market_index is None:
+            market_config = self._normalize_market_config(await self._load_market_config(symbol))
+            market_index = market_config["market_index"]
+        # wait for blockchain to index the order before first poll
+        await asyncio.sleep(initial_delay_seconds)
         return await poll_until_filled(
-            fetch_status=lambda: self._get_order_status(client_order_index),
+            fetch_status=lambda: self._get_order_status(client_order_index, int(market_index)),
             timeout_seconds=timeout_seconds,
             poll_interval_seconds=poll_interval_seconds,
             timeout_message="lighter limit order fill timeout",
         )
+
+    async def cancel_order(
+        self,
+        *,
+        order_result: dict,
+        symbol: str,
+        side: str,
+        amount: str,
+    ) -> dict[str, object]:
+        client_order_index = order_result.get("client_order_index")
+        market_index = order_result.get("market_index")
+        if client_order_index is None or market_index is None:
+            raise RuntimeError("lighter cancel_order requires client_order_index and market_index in order_result")
+        client = self._get_client()
+        cancel = getattr(client, "cancel_order", None)
+        if not callable(cancel):
+            raise RuntimeError("lighter client has no cancel_order method")
+        result = cancel(market_index=int(market_index), order_index=int(client_order_index))
+        if inspect.isawaitable(result):
+            result = await result
+        _tx, tx_hash, error = result
+        if error is not None:
+            raise RuntimeError(f"lighter cancel_order failed: {error}")
+        return {"ok": True, "tx_hash": tx_hash}
 
     async def close_position(
         self,

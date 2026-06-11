@@ -152,6 +152,8 @@ class VariationalCommandBroker:
         self._last_fill_reject_reason: str | None = None
         self._positions: dict[str, dict[str, Any]] = {}
         self._portfolio_received = asyncio.Event()
+        self._pending_cancels: dict[str, dict[str, Any]] = {}
+        self._pending_prepares: dict[str, dict[str, Any]] = {}
 
     async def on_connect(self, websocket) -> None:
         self._roles[websocket] = "unknown"
@@ -184,8 +186,6 @@ class VariationalCommandBroker:
             pending = self._pending_requests.pop(request_id, None)
             if pending is not None:
                 self._cancel_pending_timeout(pending)
-        if not self.quiet:
-            print(f"[VARIATIONAL_BROKER] disconnected role={role}", flush=True)
 
     async def handle_raw_message(self, websocket, raw: str) -> None:
         try:
@@ -210,8 +210,20 @@ class VariationalCommandBroker:
         if msg_type == "ORDER_RESULT":
             await self._handle_order_result(payload)
             return
+        if msg_type == "CANCEL_RESULT":
+            await self._handle_cancel_result(payload)
+            return
         if msg_type == "GET_OPEN_POSITION":
             await self._handle_get_open_position(websocket, payload)
+            return
+        if msg_type == "CANCEL_ORDER":
+            await self._handle_cancel_order(websocket, payload)
+            return
+        if msg_type == "PREPARE_MARKET_ORDER":
+            await self._handle_prepare_market_order(websocket, payload)
+            return
+        if msg_type == "PREPARE_RESULT":
+            await self._handle_prepare_result(payload)
             return
         await self._send_error(websocket, f"Unsupported message type: {msg_type or 'UNKNOWN'}")
 
@@ -314,6 +326,81 @@ class VariationalCommandBroker:
             return
         self._last_fill_reject_reason = "no_pending_match"
 
+    async def _handle_cancel_result(self, payload: dict[str, Any]) -> None:
+        request_id = str(payload.get("requestId", "")).strip()
+        pending = self._pending_cancels.pop(request_id, None)
+        if pending is None:
+            return
+        future = pending.get("future")
+        if future is not None and not future.done():
+            future.set_result(payload)
+
+    async def _handle_cancel_order(self, websocket, payload: dict[str, Any]) -> None:
+        request_id = str(payload.get("requestId") or uuid.uuid4())
+        if self._extension is None:
+            await self._send(websocket, {
+                "type": "CANCEL_RESULT", "requestId": request_id,
+                "ok": False, "error": "No extension connected.",
+            })
+            return
+        future: asyncio.Future = asyncio.get_event_loop().create_future()
+        self._pending_cancels[request_id] = {"requester": websocket, "future": future}
+        await self._send(self._extension, {
+            "type": "CANCEL_ORDER",
+            "requestId": request_id,
+            "orderId": payload.get("orderId"),
+            "symbol": payload.get("symbol"),
+            "side": payload.get("side"),
+            "timestamp": utc_now(),
+        })
+        try:
+            result = await asyncio.wait_for(asyncio.shield(future), timeout=10.0)
+            await self._send(websocket, result)
+        except (asyncio.TimeoutError, asyncio.CancelledError):
+            self._pending_cancels.pop(request_id, None)
+            await self._send(websocket, {
+                "type": "CANCEL_RESULT", "requestId": request_id,
+                "ok": False, "error": "Cancel timeout — extension did not respond.",
+            })
+
+    async def _handle_prepare_result(self, payload: dict[str, Any]) -> None:
+        request_id = str(payload.get("requestId", "")).strip()
+        pending = self._pending_prepares.pop(request_id, None)
+        if pending is None:
+            return
+        future = pending.get("future")
+        if future is not None and not future.done():
+            future.set_result(payload)
+
+    async def _handle_prepare_market_order(self, websocket, payload: dict[str, Any]) -> None:
+        request_id = str(payload.get("requestId") or uuid.uuid4())
+        if self._extension is None:
+            await self._send(websocket, {
+                "type": "PREPARE_RESULT", "requestId": request_id,
+                "ok": False, "error": "No extension connected.",
+            })
+            return
+        future: asyncio.Future = asyncio.get_event_loop().create_future()
+        self._pending_prepares[request_id] = {"requester": websocket, "future": future}
+        await self._send(self._extension, {
+            "type": "PREPARE_MARKET_ORDER",
+            "requestId": request_id,
+            "symbol": payload.get("symbol"),
+            "side": payload.get("side"),
+            "amount": payload.get("amount"),
+            "orderType": "MARKET",
+            "timestamp": utc_now(),
+        })
+        try:
+            result = await asyncio.wait_for(asyncio.shield(future), timeout=15.0)
+            await self._send(websocket, result)
+        except (asyncio.TimeoutError, asyncio.CancelledError):
+            self._pending_prepares.pop(request_id, None)
+            await self._send(websocket, {
+                "type": "PREPARE_RESULT", "requestId": request_id,
+                "ok": False, "error": "Prepare market order timeout — extension did not respond.",
+            })
+
     async def _handle_get_open_position(self, websocket, payload: dict[str, Any]) -> None:
         request_id = str(payload.get("requestId") or uuid.uuid4())
         symbol = normalize_variational_symbol(payload.get("symbol") or "")
@@ -392,22 +479,22 @@ class VariationalCommandBroker:
             "orderId": None,
             "timeoutTask": None,
         }
-        await self._send(
-            self._extension,
-            {
-                "type": "PLACE_ORDER",
-                "requestId": request_id,
-                "symbol": payload.get("symbol"),
-                "side": side,
-                "amount": amount,
-                "orderType": payload.get("orderType"),
-                "price": payload.get("price"),
-                "market": payload.get("market"),
-                "account": payload.get("account"),
-                "timeoutMs": payload.get("timeoutMs"),
-                "timestamp": utc_now(),
-            },
-        )
+        ext_msg: dict[str, Any] = {
+            "type": "PLACE_ORDER",
+            "requestId": request_id,
+            "symbol": payload.get("symbol"),
+            "side": side,
+            "amount": amount,
+            "orderType": payload.get("orderType"),
+            "price": payload.get("price"),
+            "market": payload.get("market"),
+            "account": payload.get("account"),
+            "timeoutMs": payload.get("timeoutMs"),
+            "timestamp": utc_now(),
+        }
+        if payload.get("submitOnly"):
+            ext_msg["submitOnly"] = True
+        await self._send(self._extension, ext_msg)
         await self._send_order_result(websocket, request_id, ok=True, event_type="ORDER_DISPATCHED")
 
     async def _handle_order_result(self, payload: dict[str, Any]) -> None:

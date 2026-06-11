@@ -21,6 +21,8 @@
     "lighter": {},
     "mexc": {},
     "aster": {},
-    "variational": {}
+    "variational": {
+      "XCU": "COPPER"
+    }
   }
 }

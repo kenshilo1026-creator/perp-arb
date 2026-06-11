@@ -359,10 +359,52 @@ async function handleCommandMessage(raw) {
     await handleCancelOrderCommand(payload);
     return;
   }
+  if (payload?.type === "PREPARE_MARKET_ORDER") {
+    await handlePrepareMarketOrderCommand(payload);
+    return;
+  }
   if (payload?.type === "PREVIEW_LIMIT_ORDER_PRICE") {
     await handlePricePreviewCommand(payload);
     return;
   }
+}
+
+function isNotFoundError(error) {
+  const msg = String(error || "").toLowerCase();
+  if (msg.includes("could not find")) return true;
+  return false;
+}
+
+function reloadTabPromise(tabId) {
+  return new Promise((resolve, reject) => {
+    chrome.tabs.reload(tabId, {}, () => {
+      const err = chrome.runtime.lastError;
+      if (err) {
+        reject(new Error(err.message));
+      } else {
+        resolve();
+      }
+    });
+  });
+}
+
+async function runOrderInjectionWithReload(payload) {
+  let injectionResult = await runVariationalOrderInjection(payload);
+  let result = injectionResult?.result || {};
+
+  // Don't reload for submitOnly — the form was already prepared; a reload would wipe it
+  if (!payload.submitOnly && result && !result.ok && isNotFoundError(result.error)) {
+    console.log("[variational] not found — reloading page and retrying");
+    await reloadTabPromise(state.attachedTabId);
+    await sleep(5000);
+    injectionResult = await runVariationalOrderInjection(payload);
+    result = injectionResult?.result || {};
+    if (result && !result.ok) {
+      result.error = `[after reload] ${result.error || "unknown error"}`;
+    }
+  }
+
+  return result;
 }
 
 async function handlePlaceOrderCommand(payload) {
@@ -371,8 +413,7 @@ async function handlePlaceOrderCommand(payload) {
     if (state.attachedTabId == null) {
       throw new Error("No Variational tab attached. Click Start in the extension popup first.");
     }
-    const injectionResult = await runVariationalOrderInjection(payload);
-    let result = injectionResult?.result || {};
+    let result = await runOrderInjectionWithReload(payload);
     if (!result || typeof result !== "object" || !("ok" in result)) {
       const [diagnosticResult] = await chrome.scripting.executeScript({
         target: { tabId: state.attachedTabId },
@@ -451,6 +492,46 @@ async function handleCancelOrderCommand(payload) {
       requestId,
       ok: false,
       orderId: payload.orderId || null,
+      error: error.message,
+      details: { automationVersion: ORDER_AUTOMATION_VERSION },
+      timestamp: nowIso()
+    });
+  }
+}
+
+async function handlePrepareMarketOrderCommand(payload) {
+  const requestId = payload.requestId;
+  try {
+    if (state.attachedTabId == null) {
+      throw new Error("No Variational tab attached. Click Start in the extension popup first.");
+    }
+    let result = await runOrderInjectionWithReload({ ...payload, prepareOnly: true });
+    if (!result || typeof result !== "object" || !("ok" in result)) {
+      const [diagnosticResult] = await chrome.scripting.executeScript({
+        target: { tabId: state.attachedTabId },
+        func: collectVariationalPageDiagnostics
+      });
+      result = {
+        ok: false,
+        error: "Prepare market order automation returned no result.",
+        details: { automationVersion: ORDER_AUTOMATION_VERSION, diagnostics: diagnosticResult?.result || null }
+      };
+    }
+    commandClient.send({
+      type: "PREPARE_RESULT",
+      requestId,
+      ok: Boolean(result.ok),
+      prepared: Boolean(result.prepared),
+      error: result.error || null,
+      details: { automationVersion: ORDER_AUTOMATION_VERSION, ...(result.details || {}) },
+      timestamp: nowIso()
+    });
+  } catch (error) {
+    commandClient.send({
+      type: "PREPARE_RESULT",
+      requestId,
+      ok: false,
+      prepared: false,
       error: error.message,
       details: { automationVersion: ORDER_AUTOMATION_VERSION },
       timestamp: nowIso()
@@ -562,7 +643,7 @@ function executeVariationalCancelOrder(command) {
   }
 
   function textOf(el) {
-    return `${el.innerText || ""} ${el.textContent || ""} ${el.getAttribute("aria-label") || ""}`
+    return `${el.innerText || ""} ${el.textContent || ""} ${el.getAttribute("aria-label") || ""} ${el.getAttribute("title") || ""}`
       .replace(/\s+/g, " ")
       .trim();
   }
@@ -582,27 +663,63 @@ function executeVariationalCancelOrder(command) {
       .replace(/USDT$/i, "");
   }
 
-  function findCancelOrderButton(orderId, requestedSymbol) {
-    const cancelPatterns = [/\bcancel\b/i, /取消/];
+  function getOrderRow(el) {
+    return el.closest('[data-testid="orders-table-row"]')
+      || el.closest("tr")
+      || el.closest("[role='row']")
+      || el.parentElement
+      || el;
+  }
+
+  function ensureOpenOrdersTabVisible() {
+    const tabCandidates = Array.from(document.querySelectorAll("[role='tab'],button"))
+      .filter(visible)
+      .filter((el) => /open\s+orders/i.test(textOf(el)))
+      .filter((el) => !el.disabled && el.getAttribute("aria-disabled") !== "true")
+      .filter((el) => getComputedStyle(el).pointerEvents !== "none");
+    if (tabCandidates.length > 0) {
+      click(tabCandidates[0]);
+    }
+  }
+
+  function isCancelOnlyButton(el) {
+    const t = textOf(el).toLowerCase();
+    return /\bcancel\b/.test(t) && !/replace/i.test(t) && !/edit/i.test(t);
+  }
+
+  function findCancelOrderButton(orderId, requestedSymbol, side) {
+    const normalizedSymbol = normalizeVariationalSymbol(requestedSymbol);
+    const normalizedSide = String(side || "").trim().toLowerCase();
+
+    function rowMatches(el) {
+      const rowText = textOf(getOrderRow(el));
+      if (orderId && rowText.includes(String(orderId))) {
+        return true;
+      }
+      const symbolMatches = normalizedSymbol && normalizeVariationalSymbol(rowText).includes(normalizedSymbol);
+      const sideMatches = !normalizedSide || rowText.toLowerCase().includes(normalizedSide);
+      return symbolMatches && sideMatches;
+    }
+
+    // Prefer exact title="Cancel Order" buttons first
+    const exactCandidates = Array.from(document.querySelectorAll('button[title="Cancel Order"],button[aria-label="Cancel Order"]'))
+      .filter(visible)
+      .filter((el) => !el.disabled && el.getAttribute("aria-disabled") !== "true");
+    const exactScoped = exactCandidates.filter(rowMatches);
+    if (exactScoped.length >= 1) {
+      return exactScoped[0];
+    }
+
+    // Fallback: any cancel-only button (excludes "Cancel & Replace")
     const candidates = Array.from(document.querySelectorAll(clickableSelector))
       .filter(visible)
       .filter((el) => !el.disabled && el.getAttribute("aria-disabled") !== "true")
-      .filter((el) => cancelPatterns.some((pattern) => pattern.test(textOf(el))));
+      .filter(isCancelOnlyButton);
     if (!candidates.length) {
       return null;
     }
-
-    const normalizedSymbol = normalizeVariationalSymbol(requestedSymbol);
-    const scoped = candidates.filter((el) => {
-      const rowText = textOf(el.closest("tr") || el.closest("[role='row']") || el.parentElement || el);
-      const idMatches = orderId && rowText.includes(String(orderId));
-      const symbolMatches = normalizedSymbol && normalizeVariationalSymbol(rowText).includes(normalizedSymbol);
-      return idMatches || symbolMatches;
-    });
-    if (scoped.length === 1) {
-      return scoped[0];
-    }
-    if (scoped.length > 1 && orderId) {
+    const scoped = candidates.filter(rowMatches);
+    if (scoped.length >= 1) {
       return scoped[0];
     }
     return candidates.length === 1 ? candidates[0] : null;
@@ -640,19 +757,21 @@ function executeVariationalCancelOrder(command) {
   return (async () => {
     const orderId = String(command.orderId || "").trim();
     const symbol = normalizeVariationalSymbol(command.symbol || command.market);
-    if (!orderId) {
-      return { ok: false, error: "CANCEL_ORDER requires orderId.", details: { automationVersion } };
-    }
+    const side = String(command.side || "").trim().toLowerCase();
 
-    const cancelButton = findCancelOrderButton(orderId, symbol);
+    ensureOpenOrdersTabVisible();
+    await sleep(600);
+
+    const cancelButton = findCancelOrderButton(orderId, symbol, side);
     if (!cancelButton) {
       return {
         ok: false,
         error: "Could not identify cancel button for Variational order.",
         details: {
           automationVersion,
-          orderId,
+          orderId: orderId || null,
           symbol,
+          side,
           diagnostics: collectCancelDiagnostics()
         }
       };
@@ -668,11 +787,12 @@ function executeVariationalCancelOrder(command) {
 
     return {
       ok: true,
-      orderId,
+      orderId: orderId || null,
       status: "cancelled",
       details: {
         automationVersion,
         symbol,
+        side,
         clickedCancelText: textOf(cancelButton),
         clickedConfirmText: confirmButton ? textOf(confirmButton) : null
       }
@@ -1002,6 +1122,19 @@ function executeVariationalOrder(command) {
     return pricePatterns.some((pattern) => pattern.test(localText));
   }
 
+  async function waitForPriceInput(timeoutMs) {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() <= deadline) {
+      const input = findLimitPriceInput();
+      const val = input ? String(input.value || "").replace(/,/g, "").trim() : "";
+      if (val && Number(val) > 0) {
+        return input;
+      }
+      await sleep(100);
+    }
+    return findLimitPriceInput();
+  }
+
   async function setLimitPriceOrClickMid(explicitLimitPrice) {
     const priceInput = findLimitPriceInput();
     if (explicitLimitPrice) {
@@ -1018,9 +1151,19 @@ function executeVariationalOrder(command) {
     if (!midButton) {
       return { ok: false, usedMid: false, priceInput, error: "Could not find Mid button for Variational limit order." };
     }
+    // Clear existing price so waitForPriceInput waits for the mid button to populate a fresh value
+    const existingPriceInput = priceInput || findLimitPriceInput();
+    if (existingPriceInput && existingPriceInput.value) {
+      setInputValue(existingPriceInput, "");
+      await sleep(80);
+    }
     click(midButton);
-    await sleep(150);
-    return { ok: true, usedMid: true, priceInput: priceInput || findLimitPriceInput() };
+    const populatedInput = await waitForPriceInput(3000);
+    const priceVal = populatedInput ? String(populatedInput.value || "").replace(/,/g, "").trim() : "";
+    if (!priceVal || Number(priceVal) <= 0) {
+      return { ok: false, usedMid: true, priceInput: populatedInput, error: "Mid button clicked but price input did not populate within 3s." };
+    }
+    return { ok: true, usedMid: true, priceInput: populatedInput };
   }
 
   async function selectOrderType(orderType) {
@@ -1044,7 +1187,9 @@ function executeVariationalOrder(command) {
       "transaction history",
       "history",
       "orders",
-      "open orders"
+      "open orders",
+      "quoted price unavailable",
+      "price unavailable"
     ].some((item) => normalized.includes(item));
   }
 
@@ -1095,6 +1240,17 @@ function executeVariationalOrder(command) {
   }
 
   function findAmountInput(orderType, excludedInput = null) {
+    // Try exact data-testid first — skip strict visibility so a transitioning Market tab doesn't block us
+    for (const sel of ['input[data-testid="quantity-input"]', 'textarea[data-testid="quantity-input"]']) {
+      const el = document.querySelector(sel);
+      if (el && el !== excludedInput && !el.disabled && el.getAttribute("aria-disabled") !== "true") {
+        const style = window.getComputedStyle(el);
+        if (style.visibility !== "hidden" && style.display !== "none") {
+          return el;
+        }
+      }
+    }
+
     const allInputs = Array.from(document.querySelectorAll("input,textarea"))
       .filter(visible)
       .filter((el) => !el.disabled && el.getAttribute("aria-disabled") !== "true")
@@ -1213,13 +1369,46 @@ function executeVariationalOrder(command) {
       };
     }
 
+    // submitOnly: page state from prepareOnly may have reset, so redo the full market order flow
+    if (command.submitOnly) {
+      await selectOrderType("MARKET"); // MARKET button may be absent if already active — that's OK
+      const sideBtn = side === "BUY"
+        ? findButton([/\bbuy\b/i, /\blong\b/i])
+        : findButton([/\bsell\b/i, /\bshort\b/i]);
+      if (!sideBtn) {
+        return { ok: false, error: `Could not find ${side} button on Variational page (submitOnly).`, details: { automationVersion, diagnostics: collectOrderDomDiagnostics() } };
+      }
+      click(sideBtn);
+      await sleep(150);
+      const amountInput = findAmountInput("MARKET", null);
+      if (!amountInput) {
+        return { ok: false, error: "Could not find amount input on Variational page (submitOnly).", details: { automationVersion, diagnostics: collectOrderDomDiagnostics() } };
+      }
+      amountInput.focus();
+      setInputValue(amountInput, amount);
+      await sleep(300);
+      const { button: submitButton, disabledButton } = await waitForEnabledSubmitButton(side, Number(command.submitEnableTimeoutMs || 5000));
+      if (!submitButton) {
+        if (disabledButton) {
+          return { ok: false, error: "Submit button stayed disabled (submitOnly).", details: { automationVersion, amount, clickedSubmitText: textOf(disabledButton), diagnostics: collectOrderDomDiagnostics() } };
+        }
+        return { ok: false, error: "Could not find submit/order button on Variational page.", details: { automationVersion, diagnostics: collectOrderDomDiagnostics() } };
+      }
+      click(submitButton);
+      await sleep(Number(command.timeoutMs || 1500));
+      return { ok: true, details: { automationVersion, side, orderType, amount, submitOnly: true, clickedSubmitText: textOf(submitButton) } };
+    }
+
     const selectedOrderType = await selectOrderType(orderType);
     if (!selectedOrderType) {
-      return {
-        ok: false,
-        error: `Could not find ${orderType} order type button on Variational page.`,
-        details: { automationVersion, orderType, diagnostics: collectOrderDomDiagnostics() }
-      };
+      if (orderType === "LIMIT") {
+        return {
+          ok: false,
+          error: `Could not find ${orderType} order type button on Variational page.`,
+          details: { automationVersion, orderType, diagnostics: collectOrderDomDiagnostics() }
+        };
+      }
+      // MARKET: button may be absent because Market is already the active order type — continue
     }
 
     let excludedAmountInput = null;
@@ -1274,6 +1463,11 @@ function executeVariationalOrder(command) {
     click(sideButton);
     await sleep(150);
 
+    // prepareOnly (MARKET taker pre-stage): side is selected, no amount input needed — submit triggered separately
+    if (command.prepareOnly && orderType === "MARKET") {
+      return { ok: true, prepared: true, details: { automationVersion, side, orderType } };
+    }
+
     const amountInput = findAmountInput(orderType, excludedAmountInput);
     if (!amountInput) {
       return {
@@ -1288,7 +1482,7 @@ function executeVariationalOrder(command) {
 
     const { button: submitButton, disabledButton } = await waitForEnabledSubmitButton(
       side,
-      Number(command.submitEnableTimeoutMs || 3000)
+      Number(command.submitEnableTimeoutMs || 5000)
     );
     if (!submitButton) {
       if (disabledButton) {

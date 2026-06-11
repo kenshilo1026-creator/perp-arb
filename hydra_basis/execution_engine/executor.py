@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from decimal import Decimal
 import inspect
+from typing import Awaitable, Callable
 
 
 def passive_limit_price_from_orderbook(orderbook: dict[str, float | int], side: str) -> str:
@@ -182,6 +183,8 @@ async def execute_single_clip(
     maker_fill_timeout_seconds: float = 60.0,
     max_maker_reprice_attempts: int = 0,
     max_execution_price_gap_pct: float = 0.01,
+    maker_price_refresher: Callable[[], Awaitable[str]] | None = None,
+    taker_pre_hook: Callable[[], Awaitable[None]] | None = None,
 ) -> dict[str, object]:
     maker_side, taker_side = execution_sides_for_signal(
         maker_venue=maker_venue,
@@ -208,6 +211,8 @@ async def execute_single_clip(
         maker_fill_timeout_seconds=maker_fill_timeout_seconds,
         max_maker_reprice_attempts=max_maker_reprice_attempts,
         max_execution_price_gap_pct=max_execution_price_gap_pct,
+        maker_price_refresher=maker_price_refresher,
+        taker_pre_hook=taker_pre_hook,
     )
 
 
@@ -232,6 +237,8 @@ async def execute_single_clip_with_sides(
     maker_fill_timeout_seconds: float = 60.0,
     max_maker_reprice_attempts: int = 0,
     max_execution_price_gap_pct: float = 0.01,
+    maker_price_refresher: Callable[[], Awaitable[str]] | None = None,
+    taker_pre_hook: Callable[[], Awaitable[None]] | None = None,
 ) -> dict[str, object]:
     state_machine.to_preview_ready()
     state_machine.to_awaiting_confirm()
@@ -287,20 +294,26 @@ async def execute_single_clip_with_sides(
                 f"gap={format_decimal(pre_trade_gap)}"
             )
 
+    if taker_pre_hook is not None:
+        await taker_pre_hook()
+
     maker_fill_result: dict[str, object] | None = None
     maker_result: dict[str, object] | None = None
     maker_attempts: list[dict[str, object]] = []
-    for maker_attempt in range(max_maker_reprice_attempts + 1):
+    maker_attempt = 0
+    while True:
         state_machine.to_placing_maker_leg()
-        maker_result = await maker_adapter.place_limit_order(**maker_kwargs)
-        maker_attempts.append({"attempt": maker_attempt + 1, "maker_result": maker_result})
-        if not maker_result.get("ok", False):
-            raise RuntimeError(f"maker order failed on {maker_venue}")
-
-        if not require_maker_fill_confirmation:
-            break
-
+        attempt_record: dict[str, object] = {"attempt": maker_attempt + 1}
         try:
+            maker_result = await maker_adapter.place_limit_order(**maker_kwargs)
+            attempt_record["maker_result"] = maker_result
+            if not maker_result.get("ok", False):
+                raise RuntimeError(f"maker order failed on {maker_venue}")
+
+            if not require_maker_fill_confirmation:
+                maker_attempts.append(attempt_record)
+                break
+
             maker_fill_result = await wait_for_maker_fill(
                 maker_adapter,
                 maker_result=maker_result,
@@ -309,20 +322,38 @@ async def execute_single_clip_with_sides(
                 amount=str(quantity),
                 timeout_seconds=maker_fill_timeout_seconds,
             )
-            maker_attempts[-1]["maker_fill_result"] = maker_fill_result
+            attempt_record["maker_fill_result"] = maker_fill_result
+            maker_attempts.append(attempt_record)
             break
         except Exception as exc:
-            maker_attempts[-1]["maker_fill_error"] = str(exc)
-            if maker_attempt >= max_maker_reprice_attempts or not maker_fill_error_is_repriceable(exc):
+            attempt_record["maker_fill_error"] = str(exc)
+            maker_attempts.append(attempt_record)
+            exhausted = max_maker_reprice_attempts >= 0 and maker_attempt >= max_maker_reprice_attempts
+            if exhausted or not maker_fill_error_is_repriceable(exc):
                 raise
-            cancel_result = await cancel_maker_order(
-                maker_adapter,
-                maker_result=maker_result,
-                symbol=symbol,
-                side=maker_side,
-                amount=str(quantity),
-            )
-            maker_attempts[-1]["cancel_result"] = cancel_result
+            placed_result = attempt_record.get("maker_result") or maker_result or {}
+            print(f"[reprice] attempt {maker_attempt + 1} timed out — cancelling {maker_venue} {maker_side} {symbol}", flush=True)
+            try:
+                cancel_result = await cancel_maker_order(
+                    maker_adapter,
+                    maker_result=placed_result,
+                    symbol=symbol,
+                    side=maker_side,
+                    amount=str(quantity),
+                )
+                attempt_record["cancel_result"] = cancel_result
+                print(f"[reprice] cancel ok — placing new order (attempt {maker_attempt + 2})", flush=True)
+                await asyncio.sleep(1.0)
+            except Exception as cancel_exc:
+                raise RuntimeError(f"[reprice] cancel failed — stopping to avoid duplicate orders: {cancel_exc}") from cancel_exc
+            if maker_price_refresher is not None:
+                try:
+                    fresh_price = await maker_price_refresher()
+                    maker_kwargs["price"] = fresh_price
+                    print(f"[reprice] repriced to {fresh_price} (attempt {maker_attempt + 2})", flush=True)
+                except Exception as refresh_exc:
+                    print(f"[reprice] failed to refresh maker price: {refresh_exc}", flush=True)
+            maker_attempt += 1
 
     if maker_result is None:
         raise RuntimeError("maker order was not submitted")

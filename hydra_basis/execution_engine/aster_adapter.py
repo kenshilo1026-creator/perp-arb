@@ -80,6 +80,7 @@ class AsterExecutionAdapter:
         user_address: str | None = None,
         leverage: int = 1,
         slippage_bps: float = 20.0,
+        skip_margin_setup: bool = False,
     ) -> None:
         self.signer_address = (
             signer_address
@@ -90,6 +91,7 @@ class AsterExecutionAdapter:
         self.user_address = user_address or os.getenv("ASTER_USER_ADDRESS", "")
         self.leverage = leverage
         self.slippage_bps = slippage_bps
+        self.skip_margin_setup = skip_margin_setup
         self._symbol_metadata: dict | None = None
         self._exchange_info_by_symbol: dict[str, dict] | None = None
         self._last_nonce_ms = 0
@@ -227,6 +229,26 @@ class AsterExecutionAdapter:
                     raise RuntimeError(f"aster order {resp.status}: {result}")
                 return result
 
+    async def _delete_signed_query(self, url: str, params: dict) -> dict:
+        query = urlencode(params)
+        headers = {
+            "Content-Type": "application/x-www-form-urlencoded",
+            "User-Agent": "funding-arb-execution/0.1",
+        }
+        async with aiohttp.ClientSession() as session:
+            async with session.delete(f"{url}?{query}", headers=headers) as resp:
+                content_type = resp.headers.get("Content-Type", "")
+                if "application/json" not in content_type.lower():
+                    text = await resp.text()
+                    raise RuntimeError(
+                        f"aster cancel {resp.status}: unexpected content-type={content_type!r} "
+                        f"body={text[:300]!r}"
+                    )
+                result = await resp.json()
+                if resp.status != 200:
+                    raise RuntimeError(f"aster cancel {resp.status}: {result}")
+                return result
+
     def build_signed_params(self, params: dict) -> dict:
         if not self.signer_address:
             raise RuntimeError("ASTER_API_WALLET_ADDRESS is not set")
@@ -299,9 +321,28 @@ class AsterExecutionAdapter:
             timeout_message="aster limit order fill timeout",
         )
 
+    async def cancel_order(
+        self,
+        *,
+        order_result: dict,
+        symbol: str,
+        side: str,
+        amount: str,
+    ) -> dict:
+        order_id = order_result.get("order_id") or order_result.get("orderId")
+        if order_id is None:
+            raise RuntimeError("aster cancel_order requires order_id")
+        raw_symbol = await self._resolve_raw_symbol(symbol)
+        params = self.build_signed_params({
+            "symbol": raw_symbol,
+            "orderId": str(order_id),
+        })
+        data = await self._delete_signed_query(f"{self.BASE_URL}/fapi/v3/order", params)
+        return {"ok": True, "raw": data}
+
     async def ensure_isolated_margin(self, symbol: str) -> None:
         raw_symbol = await self._resolve_raw_symbol(symbol)
-        if raw_symbol in self._isolated_symbols:
+        if self.skip_margin_setup or raw_symbol in self._isolated_symbols:
             return
         params = self.build_signed_params({
             "symbol": raw_symbol,
@@ -317,7 +358,7 @@ class AsterExecutionAdapter:
 
     async def ensure_leverage(self, symbol: str) -> None:
         raw_symbol = await self._resolve_raw_symbol(symbol)
-        if raw_symbol in self._leveraged_symbols:
+        if self.skip_margin_setup or raw_symbol in self._leveraged_symbols:
             return
         params = self.build_signed_params({
             "symbol": raw_symbol,

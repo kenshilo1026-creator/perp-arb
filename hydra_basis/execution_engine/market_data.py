@@ -11,6 +11,7 @@ from hydra_basis.adapters.hyperliquid import fetch_hyperliquid_universe
 from hydra_basis.adapters.lighter import fetch_lighter_market_map
 from hydra_basis.adapters.mexc import mexc_contract_symbol
 from hydra_basis.adapters.variational import VARIATIONAL_BASE_URL
+from hydra_basis.symbol_mapping import canonicalize_symbol
 
 
 async def fetch_orderbook_snapshot(
@@ -30,7 +31,7 @@ async def fetch_orderbook_snapshot(
     if normalized == "lighter":
         return await fetch_lighter_orderbook(session, symbol)
     if normalized == "variational":
-        return await fetch_variational_quote(session, symbol, clip_usd=clip_usd)
+        return await fetch_variational_quote(session, canonicalize_symbol(symbol, venue="variational"), clip_usd=clip_usd)
     raise RuntimeError(f"unsupported preview venue={venue}")
 
 

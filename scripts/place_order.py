@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import asyncio
 import math
 from dataclasses import dataclass
@@ -16,7 +17,7 @@ from hydra_basis.env import load_environment
 from hydra_basis.execution_engine.aster_adapter import AsterExecutionAdapter
 import aiohttp
 
-from hydra_basis.execution_engine.executor import execute_single_clip, execute_single_clip_with_sides, passive_limit_price_from_orderbook
+from hydra_basis.execution_engine.executor import execute_single_clip, execute_single_clip_with_sides, passive_limit_price_from_orderbook, execution_sides_for_signal
 from hydra_basis.execution_engine.market_data import fetch_orderbook_snapshot
 from hydra_basis.execution_engine.hyperliquid_adapter import HyperliquidExecutionAdapter
 from hydra_basis.execution_engine.mexc_adapter import MexcExecutionAdapter
@@ -40,12 +41,6 @@ from hydra_basis.execution_engine.signal_store import load_best_signal_for_symbo
 load_environment()
 
 
-def compute_batch_count(total_usd: float, clip_usd: float) -> int:
-    if total_usd <= 0 or clip_usd <= 0:
-        raise RuntimeError("total_usd and clip_usd must be positive")
-    return math.ceil(total_usd / clip_usd)
-
-
 def compute_token_batch_count(total_size: Decimal, clip_size: Decimal) -> int:
     if total_size <= 0 or clip_size <= 0:
         raise RuntimeError("total_size and clip_size must be positive")
@@ -57,17 +52,6 @@ def prompt_text(label: str) -> str:
     if not value:
         raise RuntimeError(f"{label} cannot be empty")
     return value
-
-
-def prompt_float(label: str) -> float:
-    value = prompt_text(label)
-    try:
-        number = float(value)
-    except ValueError as exc:
-        raise RuntimeError(f"{label} must be a number") from exc
-    if number <= 0:
-        raise RuntimeError(f"{label} must be positive")
-    return number
 
 
 def prompt_decimal(label: str) -> Decimal:
@@ -92,6 +76,8 @@ def prompt_int(label: str) -> int:
     return number
 
 
+MAKER_REPRICE_ATTEMPTS = -1  # -1 = infinite: cancel + reprice every 60s until filled
+
 VARIATIONAL_BROKER_HOST = "127.0.0.1"
 VARIATIONAL_BROKER_PORT = 8768
 VARIATIONAL_FILL_PORT = 8766
@@ -112,7 +98,7 @@ class ClosePositionPlan:
     spread_by_venue: dict[str, float]
 
 
-def build_adapter_for_venue(venue: str, *, leverage: int = 1, broker_url: str | None = None):
+def build_adapter_for_venue(venue: str, *, leverage: int = 1, broker_url: str | None = None, skip_margin_setup: bool = False):
     v = venue.lower()
     if v == "lighter":
         return LighterExecutionAdapter(
@@ -122,22 +108,18 @@ def build_adapter_for_venue(venue: str, *, leverage: int = 1, broker_url: str | 
         )
     if v == "variational":
         if broker_url is not None:
-            return VariationalBrowserExecutionAdapter(broker_url=broker_url, timeout_seconds=VARIATIONAL_ORDER_TIMEOUT_SECONDS)
-        return VariationalBrowserExecutionAdapter(timeout_seconds=VARIATIONAL_ORDER_TIMEOUT_SECONDS)
+            return VariationalBrowserExecutionAdapter(broker_url=broker_url, timeout_seconds=VARIATIONAL_ORDER_TIMEOUT_SECONDS, fill_timeout_seconds=MAKER_FILL_TIMEOUT_SECONDS)
+        return VariationalBrowserExecutionAdapter(timeout_seconds=VARIATIONAL_ORDER_TIMEOUT_SECONDS, fill_timeout_seconds=MAKER_FILL_TIMEOUT_SECONDS)
     if v == "aster":
-        return AsterExecutionAdapter(leverage=leverage)
+        return AsterExecutionAdapter(leverage=leverage, skip_margin_setup=skip_margin_setup)
     if v == "hyperliquid":
-        return HyperliquidExecutionAdapter(leverage=leverage)
+        return HyperliquidExecutionAdapter(leverage=leverage, skip_margin_setup=skip_margin_setup)
     if v == "mexc":
         return MexcExecutionAdapter(leverage=leverage)
     raise RuntimeError(f"no execution adapter for venue: {venue}")
 
 
 MAX_PRE_TRADE_PRICE_GAP = 0.01  # 1%
-
-
-def validate_maker_fill_supported() -> None:
-    return None
 
 
 def orderbook_mid(book: dict[str, float | int]) -> float:
@@ -264,22 +246,44 @@ async def execute_close_position_plan(
     *,
     plan: ClosePositionPlan,
     adapters: dict[str, object],
+    symbol: str,
+    venues: list[str],
 ) -> dict[str, object]:
+    maker_side = plan.side_by_venue[plan.maker_venue]
+
+    async def _refresh_close_maker_price() -> str:
+        fresh_books = await fetch_close_orderbooks(symbol=symbol, venues=venues, clip_usd=plan.clip_usd)
+        return passive_limit_price_from_orderbook(fresh_books[plan.maker_venue], maker_side)
+
+    close_price_refresher = None if plan.maker_venue == "variational" else _refresh_close_maker_price
+
+    taker_side = plan.side_by_venue[plan.taker_venue]
+    taker_adapter = adapters[plan.taker_venue]
+    taker_pre_hook = None
+    prepare_fn = getattr(taker_adapter, "prepare_market_order", None)
+    if plan.taker_venue == "variational" and callable(prepare_fn):
+        async def _prepare_close_taker():
+            await prepare_fn(symbol=plan.symbol, side=taker_side, amount=str(plan.quantity), clip_usd=plan.clip_usd)
+        taker_pre_hook = _prepare_close_taker
+
     return await execute_single_clip_with_sides(
         symbol=plan.symbol,
         clip_usd=plan.clip_usd,
         quantity=plan.quantity,
         maker_venue=plan.maker_venue,
         taker_venue=plan.taker_venue,
-        maker_side=plan.side_by_venue[plan.maker_venue],
-        taker_side=plan.side_by_venue[plan.taker_venue],
+        maker_side=maker_side,
+        taker_side=taker_side,
         maker_adapter=adapters[plan.maker_venue],
-        taker_adapter=adapters[plan.taker_venue],
-        max_hedge_retries=2,
+        taker_adapter=taker_adapter,
+        max_hedge_retries=0,
         state_machine=ExecutionStateMachine(),
-        maker_price=plan.maker_price,
+        maker_price=None if plan.maker_venue == "variational" else plan.maker_price,
         require_maker_fill_confirmation=True,
         maker_fill_timeout_seconds=MAKER_FILL_TIMEOUT_SECONDS,
+        max_maker_reprice_attempts=MAKER_REPRICE_ATTEMPTS,
+        maker_price_refresher=close_price_refresher,
+        taker_pre_hook=taker_pre_hook,
     )
 
 
@@ -295,19 +299,22 @@ async def scan_open_positions(
 ) -> list[PositionLeg]:
     legs: list[PositionLeg] = []
     for venue in venues:
-        adapter = build_adapter_for_venue(venue, leverage=leverage, broker_url=broker_url)
+        adapter = None
         try:
+            adapter = build_adapter_for_venue(venue, leverage=leverage, broker_url=broker_url)
             getter = getattr(adapter, "get_open_position", None)
             if not callable(getter):
                 continue
             payload = await getter(symbol=symbol, market_type="perp")
             if not payload:
+                print(f"[scan] {venue}: no position")
                 continue
             side = str(payload.get("side", "")).strip().upper()
             qty = Decimal(str(payload.get("quantity") or "0"))
             if side not in {"LONG", "SHORT"} or qty <= 0:
                 continue
             live_symbol = str(payload.get("symbol") or symbol).strip().upper()
+            print(f"[scan] {venue}: {side} {qty} {live_symbol}")
             legs.append(PositionLeg(
                 strategy_id="live",
                 leg_id=f"live:{venue}:{live_symbol}",
@@ -318,10 +325,11 @@ async def scan_open_positions(
                 quantity=format(qty.normalize(), "f"),
                 status="open",
             ))
-        except Exception:
-            pass
+        except Exception as exc:
+            print(f"[scan] {venue}: error — {exc}")
         finally:
-            await close_adapter_if_supported(adapter)
+            if adapter is not None:
+                await close_adapter_if_supported(adapter)
     return legs
 
 
@@ -331,20 +339,33 @@ def find_close_pairs(legs: list[PositionLeg]) -> list[tuple[PositionLeg, Positio
     return [(s, l) for s in short_legs for l in long_legs]
 
 
-async def run_open_execution_once() -> None:
-    symbol = prompt_text("ticker").upper()
+async def run_open_execution_once(
+    *,
+    cli_ticker: str | None = None,
+    cli_short_venue: str | None = None,
+    cli_long_venue: str | None = None,
+    cli_maker_venue: str | None = None,
+    cli_taker_venue: str | None = None,
+) -> None:
+    symbol = cli_ticker.upper() if cli_ticker else prompt_text("ticker").upper()
     total_size = prompt_decimal("total_size_token")
     clip_size = prompt_decimal("clip_size_token")
     leverage = prompt_int("leverage_x")
 
     _sig = load_best_signal_for_symbol(path=MONITOR_SIGNALS_PATH, symbol=symbol)
-    print(f"1. SHORT {_sig.short_venue} / LONG {_sig.long_venue}")
-    print(f"2. SHORT {_sig.long_venue} / LONG {_sig.short_venue}")
-    direction = prompt_int("direction [1/2]")
-    if direction not in {1, 2}:
-        raise RuntimeError("direction must be 1 or 2")
-    if direction == 2:
-        _sig.short_venue, _sig.long_venue = _sig.long_venue, _sig.short_venue
+
+    if cli_short_venue and cli_long_venue:
+        _sig.short_venue = cli_short_venue.lower()
+        _sig.long_venue = cli_long_venue.lower()
+        print(f"SHORT {_sig.short_venue} / LONG {_sig.long_venue}")
+    else:
+        print(f"1. SHORT {_sig.short_venue} / LONG {_sig.long_venue}")
+        print(f"2. SHORT {_sig.long_venue} / LONG {_sig.short_venue}")
+        direction = prompt_int("direction [1/2]")
+        if direction not in {1, 2}:
+            raise RuntimeError("direction must be 1 or 2")
+        if direction == 2:
+            _sig.short_venue, _sig.long_venue = _sig.long_venue, _sig.short_venue
 
     signal, preview, *_ = await prepare_execution_preview_for_size(
         symbol=symbol,
@@ -352,6 +373,20 @@ async def run_open_execution_once() -> None:
         clip_size=clip_size,
         signal=_sig,
     )
+
+    _both_venues = {signal.short_venue, signal.long_venue}
+    if cli_maker_venue:
+        preview.maker_venue = cli_maker_venue.lower()
+        if not cli_taker_venue:
+            other = _both_venues - {preview.maker_venue}
+            if other:
+                preview.taker_venue = other.pop()
+    if cli_taker_venue:
+        preview.taker_venue = cli_taker_venue.lower()
+        if not cli_maker_venue:
+            other = _both_venues - {preview.taker_venue}
+            if other:
+                preview.maker_venue = other.pop()
 
     print("execution once")
     print(f"ticker: {preview.symbol}")
@@ -382,7 +417,6 @@ async def run_open_execution_once() -> None:
         return
 
     clip_usd = preview.clip_usd
-    validate_maker_fill_supported()
 
     async def execute_one_batch(*, broker_url: str | None = None, batch_clip_size: Decimal) -> dict[str, object]:
         batch_clip_usd = float(batch_clip_size) / float(clip_size) * clip_usd
@@ -403,7 +437,27 @@ async def run_open_execution_once() -> None:
             maker_book=maker_book,
             taker_book=taker_book,
         )
+        maker_side, taker_side = execution_sides_for_signal(
+            maker_venue=preview.maker_venue,
+            short_venue=signal.short_venue,
+            long_venue=signal.long_venue,
+        )
         use_maker_orderbook = None if preview.maker_venue == "variational" else maker_book
+
+        async def _refresh_open_maker_price() -> str:
+            async with aiohttp.ClientSession(headers={"User-Agent": "funding-arb-execution-open/0.1"}) as _s:
+                fresh_book = await fetch_orderbook_snapshot(_s, venue=preview.maker_venue, symbol=signal.symbol, clip_usd=batch_clip_usd)
+            return passive_limit_price_from_orderbook(fresh_book, maker_side)
+
+        open_price_refresher = None if preview.maker_venue == "variational" else _refresh_open_maker_price
+
+        taker_pre_hook = None
+        prepare_fn = getattr(taker_adapter, "prepare_market_order", None)
+        if preview.taker_venue == "variational" and callable(prepare_fn):
+            async def _prepare_open_taker():
+                await prepare_fn(symbol=signal.symbol, side=taker_side, amount=str(batch_clip_size), clip_usd=batch_clip_usd)
+            taker_pre_hook = _prepare_open_taker
+
         return await execute_single_clip(
             symbol=signal.symbol,
             clip_usd=batch_clip_usd,
@@ -414,12 +468,15 @@ async def run_open_execution_once() -> None:
             long_venue=signal.long_venue,
             maker_adapter=maker_adapter,
             taker_adapter=taker_adapter,
-            max_hedge_retries=2,
+            max_hedge_retries=0,
             state_machine=ExecutionStateMachine(),
             maker_orderbook=use_maker_orderbook,
             taker_orderbook=taker_book,
             require_maker_fill_confirmation=True,
             maker_fill_timeout_seconds=MAKER_FILL_TIMEOUT_SECONDS,
+            max_maker_reprice_attempts=MAKER_REPRICE_ATTEMPTS,
+            maker_price_refresher=open_price_refresher,
+            taker_pre_hook=taker_pre_hook,
         )
 
     async def run_batches(*, broker_url: str | None = None) -> None:
@@ -446,7 +503,7 @@ async def run_open_execution_once() -> None:
             port=VARIATIONAL_BROKER_PORT,
             fill_host=VARIATIONAL_BROKER_HOST,
             fill_port=VARIATIONAL_FILL_PORT,
-            order_fill_timeout_seconds=None,
+            order_fill_timeout_seconds=MAKER_FILL_TIMEOUT_SECONDS,
         ) as server:
             print(
                 "waiting for Variational extension command client "
@@ -461,8 +518,8 @@ async def run_open_execution_once() -> None:
         await run_batches()
 
 
-async def run_close_execution_once() -> None:
-    symbol = prompt_text("ticker").upper()
+async def run_close_execution_once(*, cli_ticker: str | None = None) -> None:
+    symbol = cli_ticker.upper() if cli_ticker else prompt_text("ticker").upper()
 
     async with VariationalCommandBrokerServer(
         host=VARIATIONAL_BROKER_HOST,
@@ -518,7 +575,6 @@ async def run_close_execution_once() -> None:
 
         priorities = load_execution_priorities(EXECUTION_VENUES_PATH)
 
-        # Preview using current price for clip_usd estimate
         ref_books = await fetch_close_orderbooks(symbol=symbol, venues=venues, clip_usd=1000.0)
         ref_mid = (orderbook_mid(ref_books[venues[0]]) + orderbook_mid(ref_books[venues[1]])) / 2
         ref_clip_usd = float(clip_size) * ref_mid
@@ -566,7 +622,7 @@ async def run_close_execution_once() -> None:
             )
 
             exec_adapters = {
-                v: build_adapter_for_venue(v, broker_url=broker_url)
+                v: build_adapter_for_venue(v, broker_url=broker_url, skip_margin_setup=True)
                 for v in venues
             }
             try:
@@ -574,7 +630,7 @@ async def run_close_execution_once() -> None:
                     warm_up = getattr(adapter, "warm_up", None)
                     if callable(warm_up):
                         await warm_up()
-                result = await execute_close_position_plan(plan=plan, adapters=exec_adapters)
+                result = await execute_close_position_plan(plan=plan, adapters=exec_adapters, symbol=symbol, venues=venues)
             finally:
                 for adapter in exec_adapters.values():
                     await close_adapter_if_supported(adapter)
@@ -587,16 +643,33 @@ async def run_close_execution_once() -> None:
         print(f"\nclose complete: {num_batches} batch(es) executed")
 
 
-async def run_execution_once() -> None:
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Place a perpetual arb order")
+    parser.add_argument("--ticker", type=str, default=None, help="token symbol, e.g. BTC")
+    parser.add_argument("--short_venue", type=str, default=None, help="venue to go short on")
+    parser.add_argument("--long_venue", type=str, default=None, help="venue to go long on")
+    parser.add_argument("--maker_venue", type=str, default=None, help="force this venue as maker (limit order)")
+    parser.add_argument("--taker_venue", type=str, default=None, help="force this venue as taker (market order)")
+    return parser.parse_args()
+
+
+async def run_place_order(args: argparse.Namespace) -> None:
     mode = normalize_execution_mode(prompt_text("mode [open/close/開倉/平倉]"))
     if mode == "open":
-        await run_open_execution_once()
-        return
-    await run_close_execution_once()
+        await run_open_execution_once(
+            cli_ticker=args.ticker,
+            cli_short_venue=args.short_venue,
+            cli_long_venue=args.long_venue,
+            cli_maker_venue=args.maker_venue,
+            cli_taker_venue=args.taker_venue,
+        )
+    else:
+        await run_close_execution_once(cli_ticker=args.ticker)
 
 
 def main() -> None:
-    asyncio.run(run_execution_once())
+    args = parse_args()
+    asyncio.run(run_place_order(args))
 
 
 if __name__ == "__main__":

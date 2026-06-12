@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import math
+import time
 from dataclasses import dataclass
 from decimal import Decimal
 
@@ -35,7 +36,8 @@ from hydra_basis.execution_engine.variational_broker import VariationalCommandBr
 from hydra_basis.execution_engine.variational_browser import VariationalBrowserExecutionAdapter
 from hydra_basis.formatting import fmt_pct
 from hydra_basis.risk_management.models import PositionLeg, close_side_for_position
-from hydra_basis.config import EXECUTION_VENUES_PATH, MONITOR_SIGNALS_PATH
+from hydra_basis.risk_management.recording import record_successful_live_legs
+from hydra_basis.config import EXECUTION_VENUES_PATH, MONITOR_SIGNALS_PATH, POSITION_REGISTRY_PATH
 from hydra_basis.execution_engine.signal_store import load_best_signal_for_symbol
 
 load_environment()
@@ -132,18 +134,23 @@ async def check_pre_trade_price_gap(
     taker_venue: str,
     maker_book: dict[str, float | int],
     taker_book: dict[str, float | int],
-) -> None:
+) -> bool:
+    """Returns True if user overrode the gap check (skip executor-level check too)."""
     maker_mid = orderbook_mid(maker_book)
     taker_mid = orderbook_mid(taker_book)
     if maker_mid <= 0 or taker_mid <= 0:
-        return
+        return False
     gap = abs(maker_mid - taker_mid) / ((maker_mid + taker_mid) / 2)
     print(f"pre-trade: {maker_venue}={maker_mid:g}  {taker_venue}={taker_mid:g}  gap={gap:.2%}")
     if gap > MAX_PRE_TRADE_PRICE_GAP:
-        raise RuntimeError(
-            f"pre-trade price gap {gap:.2%} > {MAX_PRE_TRADE_PRICE_GAP:.0%} "
-            f"maker={maker_mid:g} taker={taker_mid:g} — order cancelled"
-        )
+        answer = input(f"price gap {gap:.2%} > {MAX_PRE_TRADE_PRICE_GAP:.0%}, continue anyway? [y/N]: ").strip().lower()
+        if answer not in {"y", "yes"}:
+            raise RuntimeError(
+                f"pre-trade price gap {gap:.2%} > {MAX_PRE_TRADE_PRICE_GAP:.0%} "
+                f"maker={maker_mid:g} taker={taker_mid:g} — order cancelled"
+            )
+        return True
+    return False
 
 
 def print_execution_prices(result: dict, *, maker_venue: str, taker_venue: str) -> None:
@@ -175,6 +182,68 @@ async def close_adapter_if_supported(adapter: object) -> None:
     result = close()
     if asyncio.iscoroutine(result):
         await result
+
+
+async def fetch_required_perp_live_leg(
+    adapter: object,
+    *,
+    venue: str,
+    symbol: str,
+    expected_side: str,
+) -> dict:
+    getter = getattr(adapter, "get_open_position", None)
+    if not callable(getter):
+        raise RuntimeError(f"{venue} does not support live position query")
+    position = await getter(symbol=symbol, market_type="perp")
+    if not position:
+        raise RuntimeError(f"no live perp position found for {venue}:{symbol}")
+    side = str(position.get("side", "")).strip().upper()
+    quantity = str(position.get("quantity", "")).strip()
+    if side != expected_side:
+        raise RuntimeError(f"unexpected live side for {venue}:{symbol}: {side}, expected {expected_side}")
+    try:
+        if Decimal(quantity) <= 0:
+            raise ValueError
+    except Exception as exc:
+        raise RuntimeError(f"invalid live quantity for {venue}:{symbol}: {quantity}") from exc
+    return {
+        "venue": venue,
+        "symbol": symbol,
+        "market_type": "perp",
+        "side": side,
+        "quantity": quantity,
+    }
+
+
+async def record_open_execution_from_live_positions(
+    *,
+    execution_result: dict,
+    adapters_by_venue: dict[str, object],
+    symbol: str,
+    short_venue: str,
+    long_venue: str,
+    registry_path=POSITION_REGISTRY_PATH,
+) -> str:
+    short_leg = await fetch_required_perp_live_leg(
+        adapters_by_venue[short_venue],
+        venue=short_venue,
+        symbol=symbol,
+        expected_side="SHORT",
+    )
+    long_leg = await fetch_required_perp_live_leg(
+        adapters_by_venue[long_venue],
+        venue=long_venue,
+        symbol=symbol,
+        expected_side="LONG",
+    )
+    strategy_id = f"manual-{symbol.upper()}-{int(time.time() * 1000)}"
+    return record_successful_live_legs(
+        path=registry_path,
+        symbol=symbol,
+        execution_result=execution_result,
+        legs=[short_leg, long_leg],
+        strategy_id=strategy_id,
+    )
 
 
 def build_close_position_plan(
@@ -431,7 +500,7 @@ async def run_open_execution_once(
                 fetch_orderbook_snapshot(_sess, venue=preview.taker_venue, symbol=signal.symbol, clip_usd=batch_clip_usd),
             )
         maker_book, taker_book = _fresh[0], _fresh[1]
-        await check_pre_trade_price_gap(
+        gap_overridden = await check_pre_trade_price_gap(
             maker_venue=preview.maker_venue,
             taker_venue=preview.taker_venue,
             maker_book=maker_book,
@@ -458,7 +527,7 @@ async def run_open_execution_once(
                 await prepare_fn(symbol=signal.symbol, side=taker_side, amount=str(batch_clip_size), clip_usd=batch_clip_usd)
             taker_pre_hook = _prepare_open_taker
 
-        return await execute_single_clip(
+        result = await execute_single_clip(
             symbol=signal.symbol,
             clip_usd=batch_clip_usd,
             quantity=batch_clip_size,
@@ -477,7 +546,22 @@ async def run_open_execution_once(
             max_maker_reprice_attempts=MAKER_REPRICE_ATTEMPTS,
             maker_price_refresher=open_price_refresher,
             taker_pre_hook=taker_pre_hook,
+            max_execution_price_gap_pct=float("inf") if gap_overridden else MAX_PRE_TRADE_PRICE_GAP,
         )
+        if result.get("ok", False):
+            strategy_id = await record_open_execution_from_live_positions(
+                execution_result=result,
+                adapters_by_venue={
+                    preview.maker_venue: maker_adapter,
+                    preview.taker_venue: taker_adapter,
+                },
+                symbol=signal.symbol,
+                short_venue=signal.short_venue,
+                long_venue=signal.long_venue,
+            )
+            result["recorded_strategy_id"] = strategy_id
+            print(f"position_registry recorded strategy_id={strategy_id}")
+        return result
 
     async def run_batches(*, broker_url: str | None = None) -> None:
         remaining = total_size

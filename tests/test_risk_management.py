@@ -10,6 +10,7 @@ from hydra_basis.execution_engine.hyperliquid_adapter import extract_hyperliquid
 from hydra_basis.risk_management.closers import MarketTypeRouterCloser
 from hydra_basis.risk_management.manager import EmergencyRiskManager
 from hydra_basis.risk_management.models import PositionLeg, RiskEvent
+from hydra_basis.risk_management.reconciliation import reconcile_registry_positions
 from hydra_basis.risk_management.funding_risk import (
     FundingRiskConfig,
     FundingRiskManager,
@@ -20,7 +21,7 @@ from hydra_basis.risk_management.funding_risk import (
     load_funding_risk_config,
 )
 from hydra_basis.risk_management.funding_runtime import process_funding_risk_once
-from hydra_basis.risk_management.recording import record_successful_execution
+from hydra_basis.risk_management.recording import record_successful_execution, record_successful_live_legs
 from hydra_basis.risk_management.registry import PositionRegistry
 from hydra_basis.risk_management.runtime import process_watcher_once
 from hydra_basis.risk_management.watchers import (
@@ -186,6 +187,101 @@ class GlobalRiskManagementTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(result["ok"])
         self.assertEqual(result["failed_leg_ids"], ["other"])
         self.assertIn("live position query unavailable", result["close_results"]["other"]["error"])
+
+    async def test_emergency_close_retries_with_fresh_live_quantity(self) -> None:
+        calls: list[dict] = []
+
+        class FakeCloser:
+            def __init__(self) -> None:
+                self.query_count = 0
+
+            async def get_open_position(self, *, symbol: str, market_type: str):
+                self.query_count += 1
+                quantity = "8" if self.query_count == 1 else "7"
+                return {"symbol": symbol, "market_type": market_type, "side": "LONG", "quantity": quantity}
+
+            async def close_position(self, **kwargs):
+                calls.append(kwargs)
+                if len(calls) == 1:
+                    return {"ok": False, "error": "temporary exchange error"}
+                return {"ok": True, "order_id": "retry-ok"}
+
+        registry = PositionRegistry(
+            legs=[
+                PositionLeg("arb-retry", "trigger", "aster", "ETH", "perp", "SHORT", "1", "open"),
+                PositionLeg("arb-retry", "other", "mexc", "ETH", "spot", "999", "open"),
+            ]
+        )
+        manager = EmergencyRiskManager(
+            registry=registry,
+            closers={"mexc": FakeCloser()},
+            max_close_retries=1,
+        )
+
+        result = await manager.handle_event(RiskEvent("arb-retry", "trigger", "aster", "ETH", "ADL"))
+
+        self.assertTrue(result["ok"])
+        self.assertEqual([call["quantity"] for call in calls], ["8", "7"])
+        self.assertEqual(registry.get_leg("other").status, "emergency_closed")
+
+
+class RiskReconciliationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_reconcile_alerts_missing_live_position_and_side_mismatch(self) -> None:
+        class FakeCloser:
+            async def get_open_position(self, *, symbol: str, market_type: str):
+                if market_type == "spot":
+                    return None
+                return {"symbol": symbol, "market_type": market_type, "side": "LONG", "quantity": "1"}
+
+        registry = PositionRegistry(
+            legs=[
+                PositionLeg("arb-1", "short", "aster", "ETH", "perp", "SHORT", "1", "open"),
+                PositionLeg("arb-1", "spot", "mexc", "ETH", "spot", "LONG", "1", "open"),
+            ]
+        )
+
+        result = await reconcile_registry_positions(
+            registry=registry,
+            closers={"aster": FakeCloser(), "mexc": FakeCloser()},
+        )
+
+        self.assertEqual(result["mismatch_count"], 2)
+        self.assertTrue(any("side mismatch" in item for item in result["messages"]))
+        self.assertTrue(any("missing live position" in item for item in result["messages"]))
+
+    async def test_reconcile_updates_registry_quantity_to_live_quantity(self) -> None:
+        class FakeCloser:
+            async def get_open_position(self, *, symbol: str, market_type: str):
+                return {"symbol": symbol, "market_type": market_type, "side": "LONG", "quantity": "2.5"}
+
+        registry = PositionRegistry(
+            legs=[PositionLeg("arb-2", "long", "lighter", "SOL", "perp", "LONG", "1", "open")]
+        )
+
+        result = await reconcile_registry_positions(registry=registry, closers={"lighter": FakeCloser()})
+
+        self.assertEqual(result["updated_leg_ids"], ["long"])
+        self.assertEqual(registry.get_leg("long").quantity, "2.5")
+
+    async def test_reconcile_reports_unregistered_live_positions_when_supported(self) -> None:
+        class FakeCloser:
+            async def get_open_position(self, *, symbol: str, market_type: str):
+                return {"symbol": symbol, "market_type": market_type, "side": "LONG", "quantity": "1"}
+
+            async def list_open_positions(self):
+                return [
+                    {"symbol": "ETH", "market_type": "perp", "side": "LONG", "quantity": "1"},
+                    {"symbol": "BTC", "market_type": "perp", "side": "SHORT", "quantity": "0.1"},
+                ]
+
+        registry = PositionRegistry(
+            legs=[PositionLeg("arb-3", "eth-long", "hyperliquid", "ETH", "perp", "LONG", "1", "open")]
+        )
+
+        result = await reconcile_registry_positions(registry=registry, closers={"hyperliquid": FakeCloser()})
+
+        self.assertEqual(result["unregistered_count"], 1)
+        self.assertTrue(any("unregistered live position" in item for item in result["messages"]))
 
 
 class FundingRiskTests(unittest.TestCase):
@@ -428,6 +524,65 @@ class ExecutionRecordingTests(unittest.TestCase):
                     long_venue="mexc",
                     execution_result={"ok": False, "maker_result": {"ok": True}},
                     strategy_id="manual-LAB-2",
+                )
+
+            self.assertFalse(path.exists())
+
+    def test_record_successful_live_legs_writes_spot_perp_pair_with_live_quantities(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "position_registry.json"
+
+            strategy_id = record_successful_live_legs(
+                path=path,
+                symbol="BEAT",
+                execution_result={
+                    "ok": True,
+                    "maker_result": {"ok": True, "order_id": "maker-1"},
+                    "hedge_result": {"ok": True, "order_id": "taker-1"},
+                },
+                legs=[
+                    {
+                        "venue": "aster",
+                        "market_type": "perp",
+                        "side": "SHORT",
+                        "quantity": "9.8",
+                    },
+                    {
+                        "venue": "mexc_spot",
+                        "market_type": "spot",
+                        "side": "LONG",
+                        "quantity": "10.1",
+                    },
+                ],
+                strategy_id="spot-perp-BEAT-1",
+            )
+
+            self.assertEqual(strategy_id, "spot-perp-BEAT-1")
+            registry = PositionRegistry.load(path)
+            short_leg = registry.get_leg("spot-perp-BEAT-1:aster:perp:short")
+            spot_leg = registry.get_leg("spot-perp-BEAT-1:mexc_spot:spot:long")
+            self.assertEqual(short_leg.market_type, "perp")
+            self.assertEqual(short_leg.quantity, "9.8")
+            self.assertEqual(spot_leg.market_type, "spot")
+            self.assertEqual(spot_leg.quantity, "10.1")
+
+    def test_record_successful_live_legs_rejects_missing_live_quantity(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "position_registry.json"
+
+            with self.assertRaises(RuntimeError):
+                record_successful_live_legs(
+                    path=path,
+                    symbol="BEAT",
+                    execution_result={
+                        "ok": True,
+                        "maker_result": {"ok": True},
+                        "hedge_result": {"ok": True},
+                    },
+                    legs=[
+                        {"venue": "aster", "market_type": "perp", "side": "SHORT", "quantity": "0"},
+                    ],
+                    strategy_id="spot-perp-BEAT-2",
                 )
 
             self.assertFalse(path.exists())

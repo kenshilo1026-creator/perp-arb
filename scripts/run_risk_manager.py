@@ -48,10 +48,13 @@ from hydra_basis.risk_management.margin_topup import (
     load_margin_topup_config,
 )
 from hydra_basis.risk_management.registry import PositionRegistry
+from hydra_basis.risk_management.reconciliation import reconcile_registry_positions
 from hydra_basis.risk_management.runtime import process_watcher_once
 
 
 load_environment()
+
+RECONCILIATION_INTERVAL_SECONDS = 60
 
 
 def build_closers() -> dict[str, object]:
@@ -121,7 +124,7 @@ async def run_risk_manager(*, venues: set[str], live: bool) -> None:
     print(f"funding risk config={FUNDING_RISK_CONFIG_PATH} enabled={funding_config.enabled}")
     await send_telegram(f"風控監控已啟動 mode={mode}")
     if not watchers and not margin_watchers and not funding_config.enabled:
-        raise RuntimeError("no risk or margin watchers enabled")
+        print("risk manager watcher set is empty; running reconciliation loop only")
 
     async def run_one_watcher(watcher) -> None:
         while True:
@@ -201,7 +204,24 @@ async def run_risk_manager(*, venues: set[str], live: bool) -> None:
                     await send_telegram(text)
                 await asyncio.sleep(funding_config.check_interval_seconds)
 
+    async def run_reconciliation_loop() -> None:
+        while True:
+            registry = PositionRegistry.load(POSITION_REGISTRY_PATH)
+            result = await reconcile_registry_positions(registry=registry, closers=closers)
+            if result.get("updated_leg_ids"):
+                registry.save(POSITION_REGISTRY_PATH)
+            if result.get("messages"):
+                text = (
+                    "倉位同步檢查\n"
+                    + "\n".join(str(message) for message in result["messages"])
+                    + f"\nmode={mode}"
+                )
+                print(text)
+                await send_telegram(text)
+            await asyncio.sleep(RECONCILIATION_INTERVAL_SECONDS)
+
     await asyncio.gather(
+        run_reconciliation_loop(),
         *(run_one_watcher(watcher) for watcher in watchers),
         *(run_one_margin_watcher(watcher) for watcher in margin_watchers),
         *((run_funding_risk_loop(),) if funding_config.enabled else ()),

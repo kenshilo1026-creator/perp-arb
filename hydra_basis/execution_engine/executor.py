@@ -35,8 +35,75 @@ def format_decimal(value: Decimal) -> str:
     return format(value.normalize(), "f")
 
 
+def _decimal_from_mapping(payload: dict, keys: set[str]) -> Decimal | None:
+    for key, value in payload.items():
+        normalized_key = str(key).replace("-", "_").lower()
+        if normalized_key not in keys or value in (None, "", 0, "0"):
+            continue
+        try:
+            parsed = Decimal(str(value))
+        except Exception:
+            continue
+        if parsed > 0:
+            return parsed
+    return None
+
+
+def _average_price_from_quote_and_quantity(payload: dict) -> Decimal | None:
+    quantity = _decimal_from_mapping(
+        payload,
+        {
+            "executedqty",
+            "executed_qty",
+            "cumqty",
+            "cum_qty",
+            "filledqty",
+            "filled_qty",
+            "quantity",
+            "qty",
+        },
+    )
+    quote = _decimal_from_mapping(
+        payload,
+        {
+            "cummulativequoteqty",
+            "cumulativequoteqty",
+            "cumulative_quote_qty",
+            "cumquote",
+            "cum_quote",
+            "cumquoteqty",
+            "executedquoteqty",
+            "executed_quote_qty",
+            "quoteqty",
+            "quote_qty",
+        },
+    )
+    if quantity is None or quote is None or quantity <= 0:
+        return None
+    return quote / quantity
+
+
+def _average_price_from_fills(fills: object) -> Decimal | None:
+    if not isinstance(fills, list):
+        return None
+    total_qty = Decimal("0")
+    total_quote = Decimal("0")
+    for fill in fills:
+        if not isinstance(fill, dict):
+            continue
+        price = _decimal_from_mapping(fill, {"price", "fillprice", "fill_price"})
+        qty = _decimal_from_mapping(fill, {"qty", "quantity", "executedqty", "executed_qty"})
+        if price is None or qty is None:
+            continue
+        total_qty += qty
+        total_quote += price * qty
+    if total_qty <= 0:
+        return None
+    return total_quote / total_qty
+
+
 def extract_average_price(payload: object) -> Decimal | None:
-    price_keys = {
+    average_price_keys = {
         "avgprice",
         "avg_price",
         "averageprice",
@@ -45,21 +112,27 @@ def extract_average_price(payload: object) -> Decimal | None:
         "executed_price",
         "fillprice",
         "fill_price",
+    }
+    fallback_price_keys = {
         "price",
     }
     if isinstance(payload, dict):
-        for key, value in payload.items():
-            if str(key).replace("-", "_").lower() in price_keys and value not in (None, "", 0, "0"):
-                try:
-                    parsed = Decimal(str(value))
-                except Exception:
-                    continue
-                if parsed > 0:
-                    return parsed
+        average_price = _decimal_from_mapping(payload, average_price_keys)
+        if average_price is not None:
+            return average_price
+        computed_price = _average_price_from_quote_and_quantity(payload)
+        if computed_price is not None:
+            return computed_price
+        fills_price = _average_price_from_fills(payload.get("fills"))
+        if fills_price is not None:
+            return fills_price
         for value in payload.values():
             found = extract_average_price(value)
             if found is not None:
                 return found
+        fallback_price = _decimal_from_mapping(payload, fallback_price_keys)
+        if fallback_price is not None:
+            return fallback_price
     elif isinstance(payload, list):
         for item in payload:
             found = extract_average_price(item)

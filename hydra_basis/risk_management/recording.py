@@ -62,3 +62,68 @@ def record_successful_execution(
     )
     registry.save(path)
     return resolved_strategy_id
+
+
+def _normalize_live_leg(payload: dict) -> dict[str, str]:
+    venue = str(payload.get("venue", "")).strip().lower()
+    symbol = str(payload.get("symbol", "")).strip().upper()
+    market_type = str(payload.get("market_type", "")).strip().lower()
+    side = str(payload.get("side", "")).strip().upper()
+    quantity = str(payload.get("quantity", "")).strip()
+    if not venue:
+        raise RuntimeError(f"live leg missing venue: {payload}")
+    if not symbol:
+        raise RuntimeError(f"live leg missing symbol: {payload}")
+    if market_type not in {"perp", "spot"}:
+        raise RuntimeError(f"live leg has invalid market_type: {payload}")
+    if side not in {"LONG", "SHORT"}:
+        raise RuntimeError(f"live leg has invalid side: {payload}")
+    try:
+        if float(quantity) <= 0:
+            raise ValueError
+    except ValueError as exc:
+        raise RuntimeError(f"live leg has invalid quantity: {payload}") from exc
+    return {
+        "venue": venue,
+        "symbol": symbol,
+        "market_type": market_type,
+        "side": side,
+        "quantity": quantity,
+    }
+
+
+def record_successful_live_legs(
+    *,
+    path: Path,
+    symbol: str,
+    execution_result: dict,
+    legs: list[dict],
+    strategy_id: str | None = None,
+) -> str:
+    _assert_successful_two_leg_execution(execution_result)
+
+    symbol_normalized = symbol.strip().upper()
+    resolved_strategy_id = strategy_id or _default_strategy_id(symbol_normalized)
+    normalized_legs = [_normalize_live_leg({**leg, "symbol": leg.get("symbol") or symbol_normalized}) for leg in legs]
+    if len(normalized_legs) < 2:
+        raise RuntimeError("at least two live legs are required before recording risk legs")
+
+    registry = PositionRegistry.load(path)
+    for leg in normalized_legs:
+        venue = leg["venue"]
+        market_type = leg["market_type"]
+        side = leg["side"]
+        registry.add_leg(
+            PositionLeg(
+                strategy_id=resolved_strategy_id,
+                leg_id=f"{resolved_strategy_id}:{venue}:{market_type}:{side.lower()}",
+                venue=venue,
+                symbol=leg["symbol"],
+                market_type=market_type,  # type: ignore[arg-type]
+                side=side,  # type: ignore[arg-type]
+                quantity=leg["quantity"],
+                status="open",
+            )
+        )
+    registry.save(path)
+    return resolved_strategy_id

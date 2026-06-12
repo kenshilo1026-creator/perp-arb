@@ -114,6 +114,21 @@ class MexcSpotExecutionAdapter:
             return normalized
         return f"{normalized}USDT"
 
+    async def _enrich_order_with_status(self, *, symbol: str, order_data: dict) -> dict:
+        order_id = order_data.get("orderId")
+        if order_id is None:
+            return order_data
+        try:
+            status = await self._get_order(
+                {
+                    "symbol": self._spot_symbol(symbol),
+                    "orderId": order_id,
+                }
+            )
+        except Exception:
+            return order_data
+        return {**order_data, **status}
+
     async def place_market_order(
         self, *, symbol: str, side: str, amount: str, clip_usd: float
     ) -> dict:
@@ -125,6 +140,7 @@ class MexcSpotExecutionAdapter:
                 "quantity": amount,
             }
         )
+        data = await self._enrich_order_with_status(symbol=symbol, order_data=data)
         return {"ok": True, "order_id": data.get("orderId"), "raw": data}
 
     async def place_limit_order(

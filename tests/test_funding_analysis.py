@@ -540,6 +540,28 @@ class VariationalAdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertAlmostEqual(points[0].raw_rate, -0.05)
         self.assertAlmostEqual(points[0].hourly_rate, -0.00625)
 
+    async def test_fetch_variational_funding_sends_loris_browser_origin_headers_without_api_key(self) -> None:
+        _VARIATIONAL_STATS_CACHE.clear()
+        stats_payload = {
+            "listings": [
+                {"ticker": "BTC", "funding_rate": "0.0001", "funding_interval_s": 28800},
+            ]
+        }
+        historical_payload = {
+            "symbol": "BTC",
+            "series": {"variational": [{"t": "2026-05-22T00:00:00Z", "y": 0.3848}]},
+            "notices": [],
+        }
+
+        with patch("hydra_basis.adapters.variational.fetch_json", new=AsyncMock(side_effect=[stats_payload, historical_payload])) as mocked:
+            await fetch_variational_funding(session=object(), symbol="BTC")
+
+        loris_call = mocked.await_args_list[1]
+        headers = loris_call.kwargs["headers"]
+        self.assertEqual(headers["Origin"], "https://loris.tools")
+        self.assertEqual(headers["Referer"], "https://loris.tools/")
+        self.assertNotIn("Authorization", headers)
+
     def test_parse_stats_listings_extracts_funding_and_interval(self) -> None:
         parsed = parse_stats_listings(
             {
@@ -601,6 +623,30 @@ class VariationalAdapterTests(unittest.IsolatedAsyncioTestCase):
             new=AsyncMock(side_effect=[stats_payload, gateway_error, historical_payload]),
         ) as mocked:
             points = await fetch_variational_funding(session=object(), symbol="BTC")
+
+        self.assertEqual(len(points), 1)
+        self.assertEqual(mocked.await_count, 3)
+
+    async def test_fetch_variational_funding_retries_loris_unauthorized_once(self) -> None:
+        stats_payload = {
+            "listings": [
+                {"ticker": "COOKIE", "funding_rate": "0.0001", "funding_interval_s": 28800},
+            ]
+        }
+        historical_payload = {
+            "symbol": "COOKIE",
+            "series": {"variational": [{"t": "2026-06-11T03:00:00Z", "y": 1.0}]},
+            "notices": [],
+        }
+        unauthorized_error = RuntimeError("missing api key")
+        unauthorized_error.status = 401
+        unauthorized_error.request_info = SimpleNamespace(real_url="https://api.loris.tools/funding/historical")
+
+        with patch(
+            "hydra_basis.adapters.variational.fetch_json",
+            new=AsyncMock(side_effect=[stats_payload, unauthorized_error, historical_payload]),
+        ) as mocked:
+            points = await fetch_variational_funding(session=object(), symbol="COOKIE")
 
         self.assertEqual(len(points), 1)
         self.assertEqual(mocked.await_count, 3)

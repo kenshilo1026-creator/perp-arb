@@ -14,13 +14,17 @@ LORIS_HISTORICAL_URL = "https://api.loris.tools/funding/historical"
 _VARIATIONAL_STATS_CACHE: dict[int, dict[str, dict[str, float]]] = {}
 LORIS_GATEWAY_RETRIES = 2
 LORIS_COMPARISON_INTERVAL_HOURS = 8.0
+LORIS_BROWSER_HEADERS = {
+    "Origin": "https://loris.tools",
+    "Referer": "https://loris.tools/",
+}
 
 
-def is_retryable_loris_gateway_error(exc: Exception) -> bool:
+def is_retryable_loris_historical_error(exc: Exception) -> bool:
     status = getattr(exc, "status", None)
     request_info = getattr(exc, "request_info", None)
     real_url = getattr(request_info, "real_url", "")
-    return status in {502, 503, 504} and "api.loris.tools/funding/historical" in str(real_url)
+    return status in {401, 502, 503, 504} and "api.loris.tools/funding/historical" in str(real_url)
 
 
 def parse_stats_listings(data: dict) -> dict[str, dict[str, float]]:
@@ -101,6 +105,7 @@ async def fetch_variational_funding_since(session, symbol: str, start_time_ms: i
     if entry is None:
         return []
     end_ms = end_time_ms if end_time_ms is not None else now_ms()
+    loris_headers = dict(LORIS_BROWSER_HEADERS)
     data = None
     for attempt in range(LORIS_GATEWAY_RETRIES + 1):
         try:
@@ -115,12 +120,13 @@ async def fetch_variational_funding_since(session, symbol: str, start_time_ms: i
                         "start": isoformat_z(start_time_ms),
                         "end": isoformat_z(end_ms),
                     },
+                    headers=loris_headers,
                 ),
                 delay_seconds=VARIATIONAL_REQUEST_DELAY_SECONDS,
             )
             break
         except Exception as exc:
-            if not is_retryable_loris_gateway_error(exc) or attempt >= LORIS_GATEWAY_RETRIES:
+            if not is_retryable_loris_historical_error(exc) or attempt >= LORIS_GATEWAY_RETRIES:
                 raise
     return parse_loris_historical_series(
         data or {},

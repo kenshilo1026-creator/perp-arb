@@ -47,7 +47,7 @@ from hydra_basis.funding_engine.analysis import now_ms
 load_environment()
 
 BACKFILL_BATCH_SIZE = 30
-BACKFILL_BATCH_SLEEP_SECONDS = 15
+BACKFILL_BATCH_SLEEP_SECONDS = 0
 PERSIST_EVERY_N = 200
 SPREAD_REFRESH_CONCURRENCY_BY_VENUE = {
     "lighter": 1,
@@ -288,9 +288,6 @@ async def run_backfill() -> None:
                     spreads=all_spreads,
                 )
                 #print(f"backfill stored {key}: {len(all_points[key])} points")
-            if batch_index < len(batches):
-                print(f"backfill sleep {BACKFILL_BATCH_SLEEP_SECONDS}s")
-                await asyncio.sleep(BACKFILL_BATCH_SLEEP_SECONDS)
 
         if spread_refresh_keys:
             spread_keys_by_venue: dict[str, list[tuple[str, str]]] = {}

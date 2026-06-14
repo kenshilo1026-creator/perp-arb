@@ -30,6 +30,7 @@ from hydra_basis.adapters.lighter import fetch_lighter_funding, signed_rate_from
 from hydra_basis.adapters.lighter import list_symbols as list_lighter_symbols
 from hydra_basis.adapters.hyperliquid import build_funding_history_payload
 from hydra_basis.adapters.hyperliquid import list_symbols as list_hyperliquid_symbols
+from hydra_basis.adapters.hyperliquid import fetch_hyperliquid_funding_since
 from hydra_basis.adapters.mexc import resolve_funding_interval_hours
 from hydra_basis.adapters.mexc import list_symbols as list_mexc_symbols
 from hydra_basis.adapters.mexc import mexc_contract_symbol
@@ -43,6 +44,8 @@ from hydra_basis.adapters.variational import (
     fetch_variational_stats,
     _VARIATIONAL_STATS_CACHE,
 )
+from hydra_basis.adapters.loris_browser import _fetch_loris_historical_with_nodriver_inner
+import hydra_basis.adapters.loris_browser as loris_browser
 from hydra_basis.funding_engine.analysis import analyze_spread
 from hydra_basis.funding_engine.analysis import analyze_positive_funding
 from hydra_basis.funding_engine.analysis import explain_spread_skip
@@ -257,6 +260,17 @@ class RuntimeTests(unittest.TestCase):
 
         set_policy.assert_called_once()
 
+    def test_configure_windows_event_loop_policy_keeps_proactor_for_loris_nodriver(self) -> None:
+        if not hasattr(asyncio, "WindowsSelectorEventLoopPolicy"):
+            self.skipTest("Windows selector policy not available on this platform")
+
+        with patch.dict(os.environ, {"LORIS_USE_NODRIVER": "true"}, clear=False):
+            with patch("hydra_basis.runtime.sys.platform", "win32"):
+                with patch("hydra_basis.runtime.asyncio.set_event_loop_policy") as set_policy:
+                    configure_windows_event_loop_policy()
+
+        set_policy.assert_not_called()
+
     def test_funding_config_no_longer_has_interval_hours(self) -> None:
         config = FundingConfig("demo", enabled=True)
         self.assertFalse(hasattr(config, "interval_hours"))
@@ -307,6 +321,136 @@ class LighterAdapterTests(unittest.IsolatedAsyncioTestCase):
             signed_rate_from_history_row({"rate": "0.0012", "direction": "short"}),
             -0.000012,
         )
+
+
+class LorisBrowserTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self) -> None:
+        loris_browser._shared_browser = None
+        loris_browser._shared_page = None
+        loris_browser._shared_loop = None
+        loris_browser._browser_context_lock = None
+
+    async def asyncTearDown(self) -> None:
+        loris_browser._shared_browser = None
+        loris_browser._shared_page = None
+        loris_browser._shared_loop = None
+        loris_browser._browser_context_lock = None
+
+    async def test_nodriver_fetch_includes_api_key_header_when_configured(self) -> None:
+        browser = AsyncMock()
+        page = AsyncMock()
+        browser.get.return_value = page
+        page.get = AsyncMock(return_value=page)
+        page.evaluate = AsyncMock(
+            return_value=json.dumps(
+                {
+                    "bodyText": json.dumps({"series": {"variational": []}}),
+                    "preText": "",
+                }
+            )
+        )
+
+        with patch.dict(
+            os.environ,
+            {"LORIS_API_KEY": "demo-key", "LORIS_API_KEY_HEADER": "X-API-Key"},
+            clear=False,
+        ):
+            with patch("nodriver.start", new=AsyncMock(return_value=browser)):
+                await _fetch_loris_historical_with_nodriver_inner(
+                    symbol="BTC",
+                    start="2026-06-11T00:00:00.000Z",
+                    end="2026-06-12T00:00:00.000Z",
+                )
+
+        browser.get.assert_awaited_once()
+        page.get.assert_awaited_once()
+
+    async def test_nodriver_fetch_reads_json_document_after_navigation(self) -> None:
+        browser = AsyncMock()
+        page = AsyncMock()
+        browser.get = AsyncMock(return_value=page)
+        page.get = AsyncMock(return_value=page)
+        page.evaluate = AsyncMock(
+            return_value=json.dumps(
+                {
+                    "bodyText": json.dumps({"series": {"variational": [{"t": "2026-06-11T03:00:00Z", "y": 1.0}]}}),
+                    "preText": "",
+                }
+            )
+        )
+
+        with patch.dict(os.environ, {}, clear=True):
+            with patch("nodriver.start", new=AsyncMock(return_value=browser)):
+                payload = await _fetch_loris_historical_with_nodriver_inner(
+                    symbol="BTC",
+                    start="2026-06-11T00:00:00.000Z",
+                    end="2026-06-12T00:00:00.000Z",
+                )
+
+        self.assertIn("variational", payload["series"])
+        self.assertEqual(browser.get.await_count, 1)
+        page.get.assert_awaited_once()
+
+    async def test_nodriver_fetch_reuses_shared_browser_between_requests(self) -> None:
+        browser = AsyncMock()
+        page = AsyncMock()
+        browser.get = AsyncMock(return_value=page)
+        page.get = AsyncMock(return_value=page)
+        page.evaluate = AsyncMock(
+            side_effect=[
+                json.dumps(
+                    {
+                        "bodyText": json.dumps({"series": {"variational": [{"t": "2026-06-11T03:00:00Z", "y": 1.0}]}}),
+                        "preText": "",
+                    }
+                ),
+                json.dumps(
+                    {
+                        "bodyText": json.dumps({"series": {"variational": [{"t": "2026-06-11T04:00:00Z", "y": 2.0}]}}),
+                        "preText": "",
+                    }
+                ),
+            ]
+        )
+
+        with patch.dict(os.environ, {}, clear=True):
+            with patch("nodriver.start", new=AsyncMock(return_value=browser)) as start_browser:
+                first = await _fetch_loris_historical_with_nodriver_inner(
+                    symbol="BTC",
+                    start="2026-06-11T00:00:00.000Z",
+                    end="2026-06-12T00:00:00.000Z",
+                )
+                second = await _fetch_loris_historical_with_nodriver_inner(
+                    symbol="ETH",
+                    start="2026-06-11T00:00:00.000Z",
+                    end="2026-06-12T00:00:00.000Z",
+                )
+
+        self.assertIn("variational", first["series"])
+        self.assertIn("variational", second["series"])
+        start_browser.assert_awaited_once()
+        browser.get.assert_awaited_once()
+        self.assertEqual(page.get.await_count, 2)
+
+    async def test_nodriver_fetch_raises_clear_error_when_navigation_body_missing(self) -> None:
+        browser = AsyncMock()
+        page = AsyncMock()
+        browser.get = AsyncMock(return_value=page)
+        page.get = AsyncMock(return_value=page)
+        page.evaluate = AsyncMock(
+            side_effect=RuntimeError("navigation body empty")
+        )
+
+        with patch.dict(os.environ, {}, clear=True):
+            with patch("nodriver.start", new=AsyncMock(return_value=browser)):
+                with self.assertRaises(RuntimeError) as ctx:
+                    await _fetch_loris_historical_with_nodriver_inner(
+                        symbol="BTC",
+                        start="2026-06-11T00:00:00.000Z",
+                        end="2026-06-12T00:00:00.000Z",
+                    )
+
+        self.assertIn("loris nodriver navigation fetch failed", str(ctx.exception))
 
 
 class MexcAdapterTests(unittest.IsolatedAsyncioTestCase):
@@ -433,6 +577,59 @@ class HyperliquidAdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["type"], "fundingHistory")
         self.assertEqual(payload["coin"], "BTC")
         self.assertEqual(payload["startTime"], 123456789)
+
+    async def test_fetch_hyperliquid_funding_since_retries_429_then_succeeds(self) -> None:
+        rate_limited = RuntimeError("429 Too Many Requests")
+        payload = [
+            {"time": 1_717_000_000_000, "fundingRate": "0.0001"},
+            {"time": 1_717_003_600_000, "fundingRate": "0.0002"},
+            {"time": 1_717_007_200_000, "fundingRate": "0.0003"},
+        ]
+
+        with patch(
+            "hydra_basis.adapters.hyperliquid.fetch_json",
+            new=AsyncMock(side_effect=[rate_limited, payload]),
+        ) as mocked:
+            with patch("hydra_basis.adapters.hyperliquid.asyncio.sleep", new=AsyncMock()) as sleep_mock:
+                points = await fetch_hyperliquid_funding_since(
+                    session=object(),
+                    symbol="BTC",
+                    start_time_ms=1_717_000_000_000,
+                )
+
+        self.assertEqual(len(points), 3)
+        self.assertEqual(mocked.await_count, 2)
+        self.assertTrue(any(call.args == (3.0,) for call in sleep_mock.await_args_list))
+
+    async def test_fetch_hyperliquid_funding_since_still_raises_non_retryable_errors(self) -> None:
+        with patch(
+            "hydra_basis.adapters.hyperliquid.fetch_json",
+            new=AsyncMock(side_effect=RuntimeError("403 Forbidden")),
+        ):
+            with self.assertRaises(RuntimeError):
+                await fetch_hyperliquid_funding_since(
+                    session=object(),
+                    symbol="BTC",
+                    start_time_ms=1_717_000_000_000,
+                )
+
+    async def test_fetch_hyperliquid_funding_since_uses_1h_default_for_short_incremental_response(self) -> None:
+        payload = [
+            {"time": 1_717_000_000_000, "fundingRate": "0.0001"},
+        ]
+
+        with patch(
+            "hydra_basis.adapters.hyperliquid.fetch_json",
+            new=AsyncMock(return_value=payload),
+        ):
+            points = await fetch_hyperliquid_funding_since(
+                session=object(),
+                symbol="ZEN",
+                start_time_ms=1_717_000_000_000,
+            )
+
+        self.assertEqual(len(points), 1)
+        self.assertEqual(points[0].interval_hours, 1.0)
 
 
 class AsterAdapterTests(unittest.IsolatedAsyncioTestCase):
@@ -650,6 +847,35 @@ class VariationalAdapterTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(len(points), 1)
         self.assertEqual(mocked.await_count, 3)
+
+    async def test_fetch_variational_funding_uses_loris_nodriver_when_enabled(self) -> None:
+        stats_payload = {
+            "listings": [
+                {"ticker": "AZTEC", "funding_rate": "0.0001", "funding_interval_s": 28800},
+            ]
+        }
+        historical_payload = {
+            "symbol": "AZTEC",
+            "series": {"variational": [{"t": "2026-06-11T03:00:00Z", "y": 1.0}]},
+            "notices": [],
+        }
+
+        with patch.dict(os.environ, {"LORIS_USE_NODRIVER": "true"}, clear=False):
+            with patch(
+                "hydra_basis.adapters.variational.fetch_json",
+                new=AsyncMock(return_value=stats_payload),
+            ) as mocked:
+                with patch(
+                    "hydra_basis.adapters.variational.fetch_loris_historical_with_nodriver",
+                    new=AsyncMock(return_value=historical_payload),
+                ) as browser_fetch:
+                    points = await fetch_variational_funding(session=object(), symbol="AZTEC")
+
+        self.assertEqual(len(points), 1)
+        self.assertEqual(points[0].symbol, "AZTEC")
+        self.assertAlmostEqual(points[0].raw_rate, 0.0001)
+        self.assertEqual(mocked.await_count, 1)
+        browser_fetch.assert_awaited_once()
 
     async def test_fetch_variational_funding_still_raises_after_loris_gateway_retries(self) -> None:
         stats_payload = {

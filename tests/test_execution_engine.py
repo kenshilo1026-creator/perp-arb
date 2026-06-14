@@ -1880,6 +1880,26 @@ class MexcSpotExecutionAdapterTests(unittest.IsolatedAsyncioTestCase):
                 poll_interval_seconds=0.0,
             )
 
+    async def test_cancel_order_posts_signed_spot_cancel(self) -> None:
+        calls: list[dict] = []
+
+        class Adapter(MexcSpotExecutionAdapter):
+            async def _delete_order(self, params: dict) -> dict:
+                calls.append(dict(params))
+                return {"orderId": "spot-2", "status": "CANCELED"}
+
+        result = await Adapter(api_key="k", api_secret="s").cancel_order(
+            order_result={"ok": True, "order_id": "spot-2"},
+            symbol="eth",
+            side="BUY",
+            amount="0.1",
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(calls[0]["symbol"], "ETHUSDT")
+        self.assertEqual(calls[0]["orderId"], "spot-2")
+        self.assertEqual(result["raw"]["status"], "CANCELED")
+
     async def test_mexc_spot_get_open_position_returns_free_and_locked_balance(self) -> None:
         class Adapter(MexcSpotExecutionAdapter):
             async def _get_account(self) -> dict:
@@ -2048,15 +2068,40 @@ class LighterLivePositionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(position["side"], "SHORT")
         self.assertEqual(position["quantity"], "1.5")
 
-    async def test_lighter_get_open_position_rejects_clients_without_position_method(self) -> None:
-        adapter = LighterExecutionAdapter(
+    async def test_lighter_get_open_position_rejects_when_no_client_method_and_snapshot_has_no_positions(self) -> None:
+        class Adapter(LighterExecutionAdapter):
+            async def _fetch_account_snapshot(self) -> dict[str, object]:
+                return {"account_index": 1}
+
+        adapter = Adapter(
             signer_client_factory=lambda: object(),
             market_config_loader=lambda symbol: {},
             orderbook_loader=lambda symbol: {},
         )
 
-        with self.assertRaisesRegex(RuntimeError, "no live position query method"):
+        with self.assertRaisesRegex(RuntimeError, "account snapshot had no positions"):
             await adapter.get_open_position(symbol="ETH", market_type="perp")
+
+    async def test_lighter_get_open_position_falls_back_to_account_snapshot(self) -> None:
+        class Adapter(LighterExecutionAdapter):
+            async def _fetch_account_snapshot(self) -> dict[str, object]:
+                return {
+                    "positions": [
+                        {"symbol": "BTC", "sign": 1, "position": "0"},
+                        {"symbol": "ETH", "sign": -1, "position": "-2.5"},
+                    ]
+                }
+
+        adapter = Adapter(
+            signer_client_factory=lambda: object(),
+            market_config_loader=lambda symbol: {},
+            orderbook_loader=lambda symbol: {},
+        )
+
+        position = await adapter.get_open_position(symbol="ETH", market_type="perp")
+
+        self.assertEqual(position["side"], "SHORT")
+        self.assertEqual(position["quantity"], "2.5")
 
 
 class ExecutionPreviewCliTests(unittest.TestCase):

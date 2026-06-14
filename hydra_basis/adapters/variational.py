@@ -3,6 +3,11 @@ from __future__ import annotations
 import datetime as dt
 
 from hydra_basis.adapters.base import fetch_json
+from hydra_basis.adapters.loris_browser import (
+    fetch_loris_historical_with_nodriver,
+    loris_auth_headers,
+    loris_nodriver_enabled,
+)
 from hydra_basis.adapters.request_limiters import run_serialized
 from hydra_basis.config import VARIATIONAL_REQUEST_DELAY_SECONDS
 from hydra_basis.funding_engine.analysis import now_ms
@@ -15,11 +20,23 @@ _VARIATIONAL_STATS_CACHE: dict[int, dict[str, dict[str, float]]] = {}
 LORIS_GATEWAY_RETRIES = 2
 LORIS_COMPARISON_INTERVAL_HOURS = 8.0
 LORIS_BROWSER_HEADERS = {
+    "Accept": "*/*",
+    "Accept-Language": "zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7",
+    "Content-Type": "application/json",
     "Origin": "https://loris.tools",
     "Referer": "https://loris.tools/",
+    "Sec-CH-UA": '"Google Chrome";v="147", "Not.A/Brand";v="8", "Chromium";v="147"',
+    "Sec-CH-UA-Mobile": "?0",
+    "Sec-CH-UA-Platform": '"Windows"',
+    "Sec-Fetch-Dest": "empty",
+    "Sec-Fetch-Mode": "cors",
+    "Sec-Fetch-Site": "same-site",
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/147.0.0.0 Safari/537.36"
+    ),
 }
-
-
 def is_retryable_loris_historical_error(exc: Exception) -> bool:
     status = getattr(exc, "status", None)
     request_info = getattr(exc, "request_info", None)
@@ -105,7 +122,27 @@ async def fetch_variational_funding_since(session, symbol: str, start_time_ms: i
     if entry is None:
         return []
     end_ms = end_time_ms if end_time_ms is not None else now_ms()
+    start_iso = isoformat_z(start_time_ms)
+    end_iso = isoformat_z(end_ms)
+    if loris_nodriver_enabled():
+        data = await run_serialized(
+            "variational",
+            lambda: fetch_loris_historical_with_nodriver(
+                symbol=symbol.upper(),
+                start=start_iso,
+                end=end_iso,
+            ),
+            delay_seconds=VARIATIONAL_REQUEST_DELAY_SECONDS,
+        )
+        return parse_loris_historical_series(
+            data or {},
+            symbol=symbol,
+            venue="variational",
+            interval_hours=max(float(entry["interval_hours"]), LORIS_COMPARISON_INTERVAL_HOURS),
+        )
+
     loris_headers = dict(LORIS_BROWSER_HEADERS)
+    loris_headers.update(loris_auth_headers())
     data = None
     for attempt in range(LORIS_GATEWAY_RETRIES + 1):
         try:
@@ -117,8 +154,8 @@ async def fetch_variational_funding_since(session, symbol: str, start_time_ms: i
                     LORIS_HISTORICAL_URL,
                     params={
                         "symbol": symbol.upper(),
-                        "start": isoformat_z(start_time_ms),
-                        "end": isoformat_z(end_ms),
+                        "start": start_iso,
+                        "end": end_iso,
                     },
                     headers=loris_headers,
                 ),
@@ -126,6 +163,17 @@ async def fetch_variational_funding_since(session, symbol: str, start_time_ms: i
             )
             break
         except Exception as exc:
+            if loris_nodriver_enabled() and is_retryable_loris_historical_error(exc):
+                data = await run_serialized(
+                    "variational",
+                    lambda: fetch_loris_historical_with_nodriver(
+                        symbol=symbol.upper(),
+                        start=start_iso,
+                        end=end_iso,
+                    ),
+                    delay_seconds=VARIATIONAL_REQUEST_DELAY_SECONDS,
+                )
+                break
             if not is_retryable_loris_historical_error(exc) or attempt >= LORIS_GATEWAY_RETRIES:
                 raise
     return parse_loris_historical_series(

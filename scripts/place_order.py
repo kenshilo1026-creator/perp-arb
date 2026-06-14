@@ -491,89 +491,99 @@ async def run_open_execution_once(
         batch_clip_usd = float(batch_clip_size) / float(clip_size) * clip_usd
         maker_adapter = build_adapter_for_venue(preview.maker_venue, leverage=leverage, broker_url=broker_url)
         taker_adapter = build_adapter_for_venue(preview.taker_venue, leverage=leverage, broker_url=broker_url)
-        warm_up = getattr(taker_adapter, "warm_up", None)
-        if callable(warm_up):
-            await warm_up()
-        async with aiohttp.ClientSession(headers={"User-Agent": "funding-arb-execution-open/0.1"}) as _sess:
-            _fresh = await asyncio.gather(
-                fetch_orderbook_snapshot(_sess, venue=preview.maker_venue, symbol=signal.symbol, clip_usd=batch_clip_usd),
-                fetch_orderbook_snapshot(_sess, venue=preview.taker_venue, symbol=signal.symbol, clip_usd=batch_clip_usd),
+        try:
+            warm_up = getattr(taker_adapter, "warm_up", None)
+            if callable(warm_up):
+                await warm_up()
+            async with aiohttp.ClientSession(headers={"User-Agent": "funding-arb-execution-open/0.1"}) as _sess:
+                _fresh = await asyncio.gather(
+                    fetch_orderbook_snapshot(_sess, venue=preview.maker_venue, symbol=signal.symbol, clip_usd=batch_clip_usd),
+                    fetch_orderbook_snapshot(_sess, venue=preview.taker_venue, symbol=signal.symbol, clip_usd=batch_clip_usd),
+                )
+            maker_book, taker_book = _fresh[0], _fresh[1]
+            gap_overridden = await check_pre_trade_price_gap(
+                maker_venue=preview.maker_venue,
+                taker_venue=preview.taker_venue,
+                maker_book=maker_book,
+                taker_book=taker_book,
             )
-        maker_book, taker_book = _fresh[0], _fresh[1]
-        gap_overridden = await check_pre_trade_price_gap(
-            maker_venue=preview.maker_venue,
-            taker_venue=preview.taker_venue,
-            maker_book=maker_book,
-            taker_book=taker_book,
-        )
-        maker_side, taker_side = execution_sides_for_signal(
-            maker_venue=preview.maker_venue,
-            short_venue=signal.short_venue,
-            long_venue=signal.long_venue,
-        )
-        use_maker_orderbook = None if preview.maker_venue == "variational" else maker_book
-
-        async def _refresh_open_maker_price() -> str:
-            async with aiohttp.ClientSession(headers={"User-Agent": "funding-arb-execution-open/0.1"}) as _s:
-                fresh_book = await fetch_orderbook_snapshot(_s, venue=preview.maker_venue, symbol=signal.symbol, clip_usd=batch_clip_usd)
-            return passive_limit_price_from_orderbook(fresh_book, maker_side)
-
-        open_price_refresher = None if preview.maker_venue == "variational" else _refresh_open_maker_price
-
-        taker_pre_hook = None
-        prepare_fn = getattr(taker_adapter, "prepare_market_order", None)
-        if preview.taker_venue == "variational" and callable(prepare_fn):
-            async def _prepare_open_taker():
-                await prepare_fn(symbol=signal.symbol, side=taker_side, amount=str(batch_clip_size), clip_usd=batch_clip_usd)
-            taker_pre_hook = _prepare_open_taker
-
-        result = await execute_single_clip(
-            symbol=signal.symbol,
-            clip_usd=batch_clip_usd,
-            quantity=batch_clip_size,
-            maker_venue=preview.maker_venue,
-            taker_venue=preview.taker_venue,
-            short_venue=signal.short_venue,
-            long_venue=signal.long_venue,
-            maker_adapter=maker_adapter,
-            taker_adapter=taker_adapter,
-            max_hedge_retries=0,
-            state_machine=ExecutionStateMachine(),
-            maker_orderbook=use_maker_orderbook,
-            taker_orderbook=taker_book,
-            require_maker_fill_confirmation=True,
-            maker_fill_timeout_seconds=MAKER_FILL_TIMEOUT_SECONDS,
-            max_maker_reprice_attempts=MAKER_REPRICE_ATTEMPTS,
-            maker_price_refresher=open_price_refresher,
-            taker_pre_hook=taker_pre_hook,
-            max_execution_price_gap_pct=float("inf") if gap_overridden else MAX_PRE_TRADE_PRICE_GAP,
-        )
-        if result.get("ok", False):
-            strategy_id = await record_open_execution_from_live_positions(
-                execution_result=result,
-                adapters_by_venue={
-                    preview.maker_venue: maker_adapter,
-                    preview.taker_venue: taker_adapter,
-                },
-                symbol=signal.symbol,
+            maker_side, taker_side = execution_sides_for_signal(
+                maker_venue=preview.maker_venue,
                 short_venue=signal.short_venue,
                 long_venue=signal.long_venue,
             )
-            result["recorded_strategy_id"] = strategy_id
-            print(f"position_registry recorded strategy_id={strategy_id}")
-        return result
+            use_maker_orderbook = None if preview.maker_venue == "variational" else maker_book
+
+            async def _refresh_open_maker_price() -> str:
+                async with aiohttp.ClientSession(headers={"User-Agent": "funding-arb-execution-open/0.1"}) as _s:
+                    fresh_book = await fetch_orderbook_snapshot(_s, venue=preview.maker_venue, symbol=signal.symbol, clip_usd=batch_clip_usd)
+                return passive_limit_price_from_orderbook(fresh_book, maker_side)
+
+            open_price_refresher = None if preview.maker_venue == "variational" else _refresh_open_maker_price
+
+            taker_pre_hook = None
+            prepare_fn = getattr(taker_adapter, "prepare_market_order", None)
+            if preview.taker_venue == "variational" and callable(prepare_fn):
+                async def _prepare_open_taker():
+                    await prepare_fn(symbol=signal.symbol, side=taker_side, amount=str(batch_clip_size), clip_usd=batch_clip_usd)
+                taker_pre_hook = _prepare_open_taker
+
+            result = await execute_single_clip(
+                symbol=signal.symbol,
+                clip_usd=batch_clip_usd,
+                quantity=batch_clip_size,
+                maker_venue=preview.maker_venue,
+                taker_venue=preview.taker_venue,
+                short_venue=signal.short_venue,
+                long_venue=signal.long_venue,
+                maker_adapter=maker_adapter,
+                taker_adapter=taker_adapter,
+                max_hedge_retries=0,
+                state_machine=ExecutionStateMachine(),
+                maker_orderbook=use_maker_orderbook,
+                taker_orderbook=taker_book,
+                require_maker_fill_confirmation=True,
+                maker_fill_timeout_seconds=MAKER_FILL_TIMEOUT_SECONDS,
+                max_maker_reprice_attempts=MAKER_REPRICE_ATTEMPTS,
+                maker_price_refresher=open_price_refresher,
+                taker_pre_hook=taker_pre_hook,
+                max_execution_price_gap_pct=float("inf") if gap_overridden else MAX_PRE_TRADE_PRICE_GAP,
+            )
+            if result.get("ok", False):
+                strategy_id = await record_open_execution_from_live_positions(
+                    execution_result=result,
+                    adapters_by_venue={
+                        preview.maker_venue: maker_adapter,
+                        preview.taker_venue: taker_adapter,
+                    },
+                    symbol=signal.symbol,
+                    short_venue=signal.short_venue,
+                    long_venue=signal.long_venue,
+                )
+                result["recorded_strategy_id"] = strategy_id
+                print(f"position_registry recorded strategy_id={strategy_id}")
+            return result
+        finally:
+            await close_adapter_if_supported(maker_adapter)
+            if taker_adapter is not maker_adapter:
+                await close_adapter_if_supported(taker_adapter)
 
     async def run_batches(*, broker_url: str | None = None) -> None:
         remaining = total_size
-        for batch_idx in range(num_batches):
+        batch_idx = 0
+        while remaining > 0:
+            batch_idx += 1
             this_clip = min(clip_size, remaining)
-            remaining -= this_clip
-            print(f"\nbatch {batch_idx + 1}/{num_batches}  clip_size_token={this_clip}")
+            print(f"\nbatch {batch_idx}/{num_batches}  clip_size_token={this_clip}")
             result = await execute_one_batch(broker_url=broker_url, batch_clip_size=this_clip)
             print_execution_prices(result, maker_venue=preview.maker_venue, taker_venue=preview.taker_venue)
             if not result.get("ok", False):
-                raise RuntimeError(f"batch {batch_idx + 1} failed — stopping")
-        print(f"\nopen complete: {num_batches} batch(es) executed")
+                raise RuntimeError(f"batch {batch_idx} failed — stopping")
+            executed_quantity = Decimal(str(result.get("executed_quantity") or this_clip))
+            if executed_quantity <= 0:
+                raise RuntimeError(f"batch {batch_idx} executed zero quantity — stopping")
+            remaining = max(Decimal("0"), remaining - executed_quantity)
+        print(f"\nopen complete: {batch_idx} batch(es) executed")
 
     if "variational" in {preview.maker_venue, preview.taker_venue}:
         print(
@@ -684,10 +694,11 @@ async def run_close_execution_once(*, cli_ticker: str | None = None) -> None:
             return
 
         remaining = total_size
-        for batch_idx in range(num_batches):
+        batch_idx = 0
+        while remaining > 0:
+            batch_idx += 1
             this_clip = min(clip_size, remaining)
-            remaining -= this_clip
-            print(f"\nbatch {batch_idx + 1}/{num_batches}  clip_size_token={this_clip}")
+            print(f"\nbatch {batch_idx}/{num_batches}  clip_size_token={this_clip}")
 
             fresh_books = await fetch_close_orderbooks(symbol=symbol, venues=venues, clip_usd=float(this_clip) * ref_mid)
 
@@ -722,9 +733,13 @@ async def run_close_execution_once(*, cli_ticker: str | None = None) -> None:
             print_execution_prices(result, maker_venue=plan.maker_venue, taker_venue=plan.taker_venue)
 
             if not result.get("ok", False):
-                raise RuntimeError(f"batch {batch_idx + 1} failed — stopping")
+                raise RuntimeError(f"batch {batch_idx} failed — stopping")
+            executed_quantity = Decimal(str(result.get("executed_quantity") or this_clip))
+            if executed_quantity <= 0:
+                raise RuntimeError(f"batch {batch_idx} executed zero quantity — stopping")
+            remaining = max(Decimal("0"), remaining - executed_quantity)
 
-        print(f"\nclose complete: {num_batches} batch(es) executed")
+        print(f"\nclose complete: {batch_idx} batch(es) executed")
 
 
 def parse_args() -> argparse.Namespace:

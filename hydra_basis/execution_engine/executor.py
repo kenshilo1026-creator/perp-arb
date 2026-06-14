@@ -5,6 +5,8 @@ from decimal import Decimal
 import inspect
 from typing import Awaitable, Callable
 
+from hydra_basis.execution_engine.order_fill import extract_filled_quantity
+
 
 def passive_limit_price_from_orderbook(orderbook: dict[str, float | int], side: str) -> str:
     normalized = side.strip().upper()
@@ -178,6 +180,21 @@ def maker_fill_error_is_repriceable(error: Exception) -> bool:
     return "timeout" in message or "timed out" in message
 
 
+def resolve_executed_quantity(
+    *,
+    requested_quantity: Decimal,
+    maker_result: dict[str, object] | None,
+    maker_fill_result: dict[str, object] | None,
+) -> Decimal:
+    for payload in (maker_fill_result, maker_result):
+        if not isinstance(payload, dict):
+            continue
+        filled_quantity = extract_filled_quantity(payload, allow_terminal_quantity_fallback=True)
+        if filled_quantity is not None and filled_quantity > 0:
+            return min(filled_quantity, requested_quantity)
+    return requested_quantity
+
+
 async def wait_for_maker_fill(
     maker_adapter,
     *,
@@ -198,6 +215,7 @@ async def wait_for_maker_fill(
             side=side,
             amount=amount,
             timeout_seconds=timeout_seconds,
+            allow_partial_fill=True,
         )
         if inspect.isawaitable(result):
             result = await result
@@ -372,6 +390,7 @@ async def execute_single_clip_with_sides(
 
     maker_fill_result: dict[str, object] | None = None
     maker_result: dict[str, object] | None = None
+    maker_cancel_result: dict[str, object] | None = None
     maker_attempts: list[dict[str, object]] = []
     maker_attempt = 0
     while True:
@@ -431,15 +450,35 @@ async def execute_single_clip_with_sides(
     if maker_result is None:
         raise RuntimeError("maker order was not submitted")
 
+    requested_quantity = Decimal(str(quantity))
+    executed_quantity = resolve_executed_quantity(
+        requested_quantity=requested_quantity,
+        maker_result=maker_result,
+        maker_fill_result=maker_fill_result,
+    )
+    if executed_quantity <= 0:
+        raise RuntimeError("maker execution produced zero filled quantity")
+
+    partial_fill = executed_quantity < requested_quantity
+    if partial_fill:
+        maker_cancel_result = await cancel_maker_order(
+            maker_adapter,
+            maker_result=maker_result,
+            symbol=symbol,
+            side=maker_side,
+            amount=str(quantity),
+        )
+
     state_machine.to_hedging_taker_leg()
     last_error: Exception | None = None
     for attempt in range(max_hedge_retries + 1):
         try:
+            hedge_clip_usd = clip_usd * float(executed_quantity / requested_quantity)
             hedge_result = await taker_adapter.place_market_order(
                 symbol=symbol,
                 side=taker_side,
-                amount=str(quantity),
-                clip_usd=clip_usd,
+                amount=str(executed_quantity),
+                clip_usd=hedge_clip_usd,
             )
             maker_avg_price = (
                 extract_average_price(maker_fill_result)
@@ -463,7 +502,12 @@ async def execute_single_clip_with_sides(
                 "maker_result": maker_result,
                 "maker_attempts": maker_attempts,
                 "maker_fill_result": maker_fill_result,
+                "maker_cancel_result": maker_cancel_result,
                 "hedge_result": hedge_result,
+                "requested_quantity": format(requested_quantity.normalize(), "f"),
+                "executed_quantity": format(executed_quantity.normalize(), "f"),
+                "remaining_quantity": format((requested_quantity - executed_quantity).normalize(), "f"),
+                "partial_fill": partial_fill,
                 "execution_price_summary": execution_price_summary,
             }
         except Exception as exc:

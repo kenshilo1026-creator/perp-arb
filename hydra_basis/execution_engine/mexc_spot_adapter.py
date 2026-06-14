@@ -95,6 +95,19 @@ class MexcSpotExecutionAdapter:
                     raise RuntimeError(f"mexc spot order status {resp.status}: {data}")
                 return data
 
+    async def _delete_order(self, params: dict) -> dict:
+        signed_params = self._signed_order_params(params)
+        async with aiohttp.ClientSession() as session:
+            async with session.delete(
+                f"{self.BASE_URL}/api/v3/order",
+                params=signed_params,
+                headers=self._order_headers(),
+            ) as resp:
+                data = await resp.json()
+                if resp.status != 200:
+                    raise RuntimeError(f"mexc spot cancel {resp.status}: {data}")
+                return data
+
     async def _get_account(self) -> dict:
         signed_params = self._signed_order_params({})
         async with aiohttp.ClientSession() as session:
@@ -167,6 +180,7 @@ class MexcSpotExecutionAdapter:
         amount: str,
         timeout_seconds: float,
         poll_interval_seconds: float = 0.5,
+        allow_partial_fill: bool = False,
     ) -> dict:
         order_id = order_result.get("order_id") or order_result.get("orderId")
         if order_id is None:
@@ -181,7 +195,31 @@ class MexcSpotExecutionAdapter:
             timeout_seconds=timeout_seconds,
             poll_interval_seconds=poll_interval_seconds,
             timeout_message="mexc spot limit order fill timeout",
+            return_on_partial_fill=allow_partial_fill,
         )
+
+    async def cancel_order(
+        self,
+        *,
+        order_result: dict,
+        symbol: str,
+        side: str,
+        amount: str,
+    ) -> dict:
+        order_id = order_result.get("order_id") or order_result.get("orderId")
+        if order_id is None:
+            raw = order_result.get("raw")
+            if isinstance(raw, dict):
+                order_id = raw.get("orderId")
+        if order_id is None:
+            raise RuntimeError("mexc spot cancel_order requires order_id")
+        data = await self._delete_order(
+            {
+                "symbol": self._spot_symbol(symbol),
+                "orderId": order_id,
+            }
+        )
+        return {"ok": True, "order_id": data.get("orderId", order_id), "raw": data}
 
     async def get_open_position(self, *, symbol: str, market_type: str) -> dict | None:
         if market_type != "spot":

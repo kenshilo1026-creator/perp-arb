@@ -279,6 +279,7 @@ class HyperliquidExecutionAdapter:
         amount: str,
         timeout_seconds: float,
         poll_interval_seconds: float = 0.5,
+        allow_partial_fill: bool = False,
     ) -> dict:
         order_id = order_result.get("order_id") or order_result.get("oid")
         if order_id is None:
@@ -288,6 +289,7 @@ class HyperliquidExecutionAdapter:
             timeout_seconds=timeout_seconds,
             poll_interval_seconds=poll_interval_seconds,
             timeout_message="hyperliquid limit order fill timeout",
+            return_on_partial_fill=allow_partial_fill,
         )
 
     async def place_market_order(

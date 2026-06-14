@@ -159,6 +159,23 @@ def _lighter_position_size(item: dict) -> Decimal:
     return Decimal("0")
 
 
+def _normalize_lighter_live_position(*, symbol: str, item: dict) -> dict[str, object] | None:
+    normalized_symbol = symbol.strip().upper()
+    item_symbol = _lighter_position_symbol(item)
+    if item_symbol and item_symbol != normalized_symbol:
+        return None
+    size = _lighter_position_size(item)
+    if size == 0:
+        return None
+    return {
+        "symbol": normalized_symbol,
+        "market_type": "perp",
+        "side": "LONG" if size > 0 else "SHORT",
+        "quantity": format(abs(size).normalize(), "f"),
+        "raw": item,
+    }
+
+
 class LighterExecutionAdapter:
     def __init__(
         self,
@@ -226,6 +243,17 @@ class LighterExecutionAdapter:
             raise RuntimeError(f"lighter auth token error: {error}")
         return token
 
+    async def _fetch_account_snapshot(self) -> dict[str, object]:
+        account_index = int(os.getenv("LIGHTER_ACCOUNT_INDEX", "0"))
+        async with aiohttp.ClientSession() as session:
+            return await fetch_json(
+                session,
+                "GET",
+                f"{LIGHTER_BASE_URL}/api/v1/account",
+                params={"by": "index", "value": str(account_index)},
+                headers={"accept": "application/json"},
+            )
+
     async def _get_order_status(self, client_order_index: object, market_index: int) -> dict[str, object]:
         account_index = int(os.getenv("LIGHTER_ACCOUNT_INDEX", "0"))
         try:
@@ -264,23 +292,24 @@ class LighterExecutionAdapter:
             result = method()
             if inspect.isawaitable(result):
                 result = await result
-            normalized_symbol = symbol.strip().upper()
             for item in _lighter_payload_items(result):
-                item_symbol = _lighter_position_symbol(item)
-                if item_symbol and item_symbol != normalized_symbol:
-                    continue
-                size = _lighter_position_size(item)
-                if size == 0:
-                    continue
-                return {
-                    "symbol": normalized_symbol,
-                    "market_type": "perp",
-                    "side": "LONG" if size > 0 else "SHORT",
-                    "quantity": format(abs(size).normalize(), "f"),
-                    "raw": item,
-                }
+                normalized = _normalize_lighter_live_position(symbol=symbol, item=item)
+                if normalized is not None:
+                    return normalized
             return None
-        raise RuntimeError("lighter client has no live position query method")
+
+        snapshot = await self._fetch_account_snapshot()
+        positions = snapshot.get("positions")
+        if isinstance(positions, list):
+            for item in positions:
+                if not isinstance(item, dict):
+                    continue
+                normalized = _normalize_lighter_live_position(symbol=symbol, item=item)
+                if normalized is not None:
+                    return normalized
+            return None
+
+        raise RuntimeError("lighter client has no live position query method and account snapshot had no positions")
 
     async def _submit_market_order(
         self,
@@ -397,6 +426,7 @@ class LighterExecutionAdapter:
         timeout_seconds: float,
         poll_interval_seconds: float = 2.0,
         initial_delay_seconds: float = 3.0,
+        allow_partial_fill: bool = False,
     ) -> dict[str, object]:
         client_order_index = order_result.get("client_order_index")
         if client_order_index is None:
@@ -412,6 +442,7 @@ class LighterExecutionAdapter:
             timeout_seconds=timeout_seconds,
             poll_interval_seconds=poll_interval_seconds,
             timeout_message="lighter limit order fill timeout",
+            return_on_partial_fill=allow_partial_fill,
         )
 
     async def cancel_order(

@@ -237,6 +237,7 @@ class VariationalBrowserExecutionAdapter:
         amount: str,
         timeout_seconds: float,
         poll_interval_seconds: float = 0.5,
+        allow_partial_fill: bool = False,
     ) -> dict[str, object]:
         if bool(order_result.get("filled")) or status_dict_looks_filled(order_result):
             return {"ok": True, "raw": order_result}

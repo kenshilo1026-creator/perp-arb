@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 import uuid
 from pathlib import Path
+from typing import Awaitable, Callable
 
 from aiohttp import ClientSession, WSMsgType
 
@@ -46,6 +48,8 @@ def build_place_order_payload(
 
 
 class VariationalBrowserExecutionAdapter:
+    _last_order_ts_by_broker: dict[str, float] = {}
+
     def __init__(
         self,
         *,
@@ -54,16 +58,34 @@ class VariationalBrowserExecutionAdapter:
         timeout_seconds: float = 10.0,
         fill_timeout_seconds: float | None = None,
         debug_payload_path: Path | None = Path("data/variational_order_debug.json"),
+        min_seconds_between_orders: float = 10.0,
+        clock: Callable[[], float] = time.monotonic,
+        sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     ) -> None:
         self.broker_url = broker_url
         self.client_role = client_role
         self.timeout_seconds = timeout_seconds
         self.fill_timeout_seconds = fill_timeout_seconds
         self.debug_payload_path = debug_payload_path
+        self.min_seconds_between_orders = min_seconds_between_orders
+        self._clock = clock
+        self._sleep = sleep
         self._market_prepared = False
 
     def _map_symbol(self, symbol: str) -> str:
         return canonicalize_symbol(symbol, venue="variational")
+
+    async def _wait_for_order_cooldown(self) -> None:
+        if self.min_seconds_between_orders <= 0:
+            return
+        last_order_ts = self._last_order_ts_by_broker.get(self.broker_url)
+        now = self._clock()
+        if last_order_ts is not None:
+            wait_seconds = self.min_seconds_between_orders - (now - last_order_ts)
+            if wait_seconds > 0:
+                print(f"[variational] order cooldown sleeping {wait_seconds:.2f}s", flush=True)
+                await self._sleep(wait_seconds)
+        self._last_order_ts_by_broker[self.broker_url] = self._clock()
 
     async def _place_order(
         self,
@@ -82,6 +104,7 @@ class VariationalBrowserExecutionAdapter:
     ) -> dict[str, object]:
         symbol = self._map_symbol(symbol)
         request_id = str(uuid.uuid4())
+        await self._wait_for_order_cooldown()
         async with ClientSession() as session:
             async with session.ws_connect(self.broker_url, heartbeat=20) as ws:
                 await ws.send_json({"type": "REGISTER", "role": self.client_role})

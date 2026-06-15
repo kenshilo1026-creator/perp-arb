@@ -167,10 +167,16 @@ def _normalize_lighter_live_position(*, symbol: str, item: dict) -> dict[str, ob
     size = _lighter_position_size(item)
     if size == 0:
         return None
+    # Lighter returns position as absolute value; sign field: 1=long, -1=short
+    try:
+        sign = int(item.get("sign", 1))
+    except (TypeError, ValueError):
+        sign = 1
+    signed_size = size * sign
     return {
         "symbol": normalized_symbol,
         "market_type": "perp",
-        "side": "LONG" if size > 0 else "SHORT",
+        "side": "LONG" if signed_size > 0 else "SHORT",
         "quantity": format(abs(size).normalize(), "f"),
         "raw": item,
     }
@@ -299,8 +305,9 @@ class LighterExecutionAdapter:
             return None
 
         snapshot = await self._fetch_account_snapshot()
-        positions = snapshot.get("positions")
-        if isinstance(positions, list):
+        accounts = snapshot.get("accounts") or []
+        if accounts:
+            positions = accounts[0].get("positions") or []
             for item in positions:
                 if not isinstance(item, dict):
                     continue
@@ -309,7 +316,7 @@ class LighterExecutionAdapter:
                     return normalized
             return None
 
-        raise RuntimeError("lighter client has no live position query method and account snapshot had no positions")
+        raise RuntimeError("lighter account snapshot returned no accounts")
 
     async def _submit_market_order(
         self,

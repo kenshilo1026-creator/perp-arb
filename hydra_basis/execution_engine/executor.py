@@ -33,6 +33,12 @@ def price_gap_pct(price_a: Decimal, price_b: Decimal) -> Decimal:
     return abs(price_a - price_b) / mid
 
 
+def price_change_pct(old_price: Decimal, new_price: Decimal) -> Decimal:
+    if old_price <= 0 or new_price <= 0:
+        raise RuntimeError("price change requires positive prices")
+    return abs(new_price - old_price) / old_price
+
+
 def format_decimal(value: Decimal) -> str:
     return format(value.normalize(), "f")
 
@@ -274,6 +280,7 @@ async def execute_single_clip(
     maker_fill_timeout_seconds: float = 60.0,
     max_maker_reprice_attempts: int = 0,
     max_execution_price_gap_pct: float = 0.01,
+    maker_reprice_min_change_pct: float = 0.0,
     maker_price_refresher: Callable[[], Awaitable[str]] | None = None,
     taker_pre_hook: Callable[[], Awaitable[None]] | None = None,
 ) -> dict[str, object]:
@@ -302,6 +309,7 @@ async def execute_single_clip(
         maker_fill_timeout_seconds=maker_fill_timeout_seconds,
         max_maker_reprice_attempts=max_maker_reprice_attempts,
         max_execution_price_gap_pct=max_execution_price_gap_pct,
+        maker_reprice_min_change_pct=maker_reprice_min_change_pct,
         maker_price_refresher=maker_price_refresher,
         taker_pre_hook=taker_pre_hook,
     )
@@ -328,6 +336,7 @@ async def execute_single_clip_with_sides(
     maker_fill_timeout_seconds: float = 60.0,
     max_maker_reprice_attempts: int = 0,
     max_execution_price_gap_pct: float = 0.01,
+    maker_reprice_min_change_pct: float = 0.0,
     maker_price_refresher: Callable[[], Awaitable[str]] | None = None,
     taker_pre_hook: Callable[[], Awaitable[None]] | None = None,
 ) -> dict[str, object]:
@@ -393,11 +402,18 @@ async def execute_single_clip_with_sides(
     maker_cancel_result: dict[str, object] | None = None
     maker_attempts: list[dict[str, object]] = []
     maker_attempt = 0
+    reuse_existing_maker_result = False
     while True:
         state_machine.to_placing_maker_leg()
         attempt_record: dict[str, object] = {"attempt": maker_attempt + 1}
         try:
-            maker_result = await maker_adapter.place_limit_order(**maker_kwargs)
+            if reuse_existing_maker_result and maker_result is not None:
+                reuse_existing_maker_result = False
+                attempt_record["maker_result"] = maker_result
+                attempt_record["reused_existing_order"] = True
+            else:
+                maker_result = await maker_adapter.place_limit_order(**maker_kwargs)
+                attempt_record["maker_result"] = maker_result
             attempt_record["maker_result"] = maker_result
             if not maker_result.get("ok", False):
                 raise RuntimeError(f"maker order failed on {maker_venue}")
@@ -424,6 +440,27 @@ async def execute_single_clip_with_sides(
             if exhausted or not maker_fill_error_is_repriceable(exc):
                 raise
             placed_result = attempt_record.get("maker_result") or maker_result or {}
+            fresh_price: str | None = None
+            if maker_price_refresher is not None:
+                try:
+                    fresh_price = await maker_price_refresher()
+                    current_price = maker_kwargs.get("price")
+                    if maker_reprice_min_change_pct > 0 and current_price not in (None, ""):
+                        change = price_change_pct(Decimal(str(current_price)), Decimal(str(fresh_price)))
+                        attempt_record["fresh_price"] = fresh_price
+                        attempt_record["price_change_pct"] = format_decimal(change)
+                        if change < Decimal(str(maker_reprice_min_change_pct)):
+                            attempt_record["reprice_skipped"] = True
+                            print(
+                                "[reprice] refreshed price barely moved "
+                                f"old={current_price} new={fresh_price} "
+                                f"change={format_decimal(change)} — keep existing order",
+                                flush=True,
+                            )
+                            reuse_existing_maker_result = True
+                            continue
+                except Exception as refresh_exc:
+                    print(f"[reprice] failed to refresh maker price before cancel: {refresh_exc}", flush=True)
             print(f"[reprice] attempt {maker_attempt + 1} timed out — cancelling {maker_venue} {maker_side} {symbol}", flush=True)
             try:
                 cancel_result = await cancel_maker_order(
@@ -438,13 +475,9 @@ async def execute_single_clip_with_sides(
                 await asyncio.sleep(1.0)
             except Exception as cancel_exc:
                 raise RuntimeError(f"[reprice] cancel failed — stopping to avoid duplicate orders: {cancel_exc}") from cancel_exc
-            if maker_price_refresher is not None:
-                try:
-                    fresh_price = await maker_price_refresher()
-                    maker_kwargs["price"] = fresh_price
-                    print(f"[reprice] repriced to {fresh_price} (attempt {maker_attempt + 2})", flush=True)
-                except Exception as refresh_exc:
-                    print(f"[reprice] failed to refresh maker price: {refresh_exc}", flush=True)
+            if fresh_price is not None:
+                maker_kwargs["price"] = fresh_price
+                print(f"[reprice] repriced to {fresh_price} (attempt {maker_attempt + 2})", flush=True)
             maker_attempt += 1
 
     if maker_result is None:

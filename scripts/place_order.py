@@ -42,6 +42,8 @@ from hydra_basis.execution_engine.signal_store import load_best_signal_for_symbo
 
 load_environment()
 
+VARIATIONAL_MAKER_REPRICE_MIN_CHANGE_PCT = 0.0005
+
 
 def compute_token_batch_count(total_size: Decimal, clip_size: Decimal) -> int:
     if total_size <= 0 or clip_size <= 0:
@@ -351,6 +353,11 @@ async def execute_close_position_plan(
         require_maker_fill_confirmation=True,
         maker_fill_timeout_seconds=MAKER_FILL_TIMEOUT_SECONDS,
         max_maker_reprice_attempts=MAKER_REPRICE_ATTEMPTS,
+        maker_reprice_min_change_pct=(
+            VARIATIONAL_MAKER_REPRICE_MIN_CHANGE_PCT
+            if plan.maker_venue == "variational"
+            else 0.0
+        ),
         maker_price_refresher=close_price_refresher,
         taker_pre_hook=taker_pre_hook,
     )
@@ -545,6 +552,11 @@ async def run_open_execution_once(
                 require_maker_fill_confirmation=True,
                 maker_fill_timeout_seconds=MAKER_FILL_TIMEOUT_SECONDS,
                 max_maker_reprice_attempts=MAKER_REPRICE_ATTEMPTS,
+                maker_reprice_min_change_pct=(
+                    VARIATIONAL_MAKER_REPRICE_MIN_CHANGE_PCT
+                    if preview.maker_venue == "variational"
+                    else 0.0
+                ),
                 maker_price_refresher=open_price_refresher,
                 taker_pre_hook=taker_pre_hook,
                 max_execution_price_gap_pct=float("inf") if gap_overridden else MAX_PRE_TRADE_PRICE_GAP,

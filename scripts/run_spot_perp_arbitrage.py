@@ -36,6 +36,7 @@ from hydra_basis.risk_management.recording import record_successful_live_legs
 from scripts.place_order import (
     MAKER_FILL_TIMEOUT_SECONDS,
     MAKER_REPRICE_ATTEMPTS,
+    VARIATIONAL_MAKER_REPRICE_MIN_CHANGE_PCT,
     build_adapter_for_venue,
 )
 
@@ -350,6 +351,11 @@ async def execute_spot_perp_plan(
             require_maker_fill_confirmation=True,
             maker_fill_timeout_seconds=MAKER_FILL_TIMEOUT_SECONDS,
             max_maker_reprice_attempts=MAKER_REPRICE_ATTEMPTS,
+            maker_reprice_min_change_pct=(
+                VARIATIONAL_MAKER_REPRICE_MIN_CHANGE_PCT
+                if plan.maker_venue == "variational"
+                else 0.0
+            ),
             maker_price_refresher=lambda: refresh_spot_perp_maker_price(plan),
             max_execution_price_gap_pct=(
                 plan.maker_taker_price_gap_pct

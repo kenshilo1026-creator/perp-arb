@@ -16,8 +16,9 @@ from scripts.run_spot_perp_arbitrage import (
     run_spot_perp_arbitrage,
     spot_perp_sides,
 )
-from hydra_basis.execution_engine.executor import extract_average_price
+from hydra_basis.execution_engine.executor import execute_single_clip, extract_average_price
 from hydra_basis.execution_engine.mexc_spot_adapter import MexcSpotExecutionAdapter
+from hydra_basis.execution_engine.variational_browser import VariationalBrowserExecutionAdapter
 from hydra_basis.risk_management.registry import PositionRegistry
 from scripts.place_order import record_open_execution_from_live_positions
 
@@ -520,6 +521,75 @@ class SpotPerpArbitrageRecordingTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(prices, ["10.1", "11.1"])
 
+    async def test_maker_timeout_keeps_existing_order_when_refreshed_price_barely_moves(self) -> None:
+        events: list[str] = []
+        prices: list[str | None] = []
+
+        class MakerAdapter:
+            async def place_limit_order(self, **kwargs):
+                events.append("maker:place_limit")
+                prices.append(kwargs.get("price"))
+                return {"ok": True, "order_id": "maker-1"}
+
+            async def wait_for_order_fill(self, **kwargs):
+                events.append("maker:wait_fill")
+                if events.count("maker:wait_fill") == 1:
+                    raise RuntimeError("maker fill timeout")
+                return {"ok": True, "filled": True, "status": "FILLED"}
+
+            async def cancel_order(self, **kwargs):
+                events.append("maker:cancel")
+                return {"ok": True}
+
+        class TakerAdapter:
+            async def place_market_order(self, **kwargs):
+                events.append("taker:place_market")
+                return {"ok": True}
+
+        async def barely_changed_price() -> str:
+            events.append("maker:refresh_price")
+            return "10.1001"
+
+        result = await execute_single_clip(
+            symbol="BEAT",
+            clip_usd=100.0,
+            quantity=Decimal("10"),
+            maker_venue="variational",
+            taker_venue="aster",
+            short_venue="aster",
+            long_venue="variational",
+            maker_adapter=MakerAdapter(),
+            taker_adapter=TakerAdapter(),
+            max_hedge_retries=0,
+            state_machine=SimpleNamespace(
+                to_preview_ready=lambda: None,
+                to_awaiting_confirm=lambda: None,
+                to_placing_maker_leg=lambda: None,
+                to_hedging_taker_leg=lambda: None,
+                to_completed=lambda: None,
+                to_retrying_hedge=lambda: None,
+                to_emergency_exit=lambda: None,
+            ),
+            maker_price="10.1",
+            require_maker_fill_confirmation=True,
+            max_maker_reprice_attempts=-1,
+            maker_price_refresher=barely_changed_price,
+            maker_reprice_min_change_pct=0.0005,
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(
+            events,
+            [
+                "maker:place_limit",
+                "maker:wait_fill",
+                "maker:refresh_price",
+                "maker:wait_fill",
+                "taker:place_market",
+            ],
+        )
+        self.assertEqual(prices, ["10.1"])
+
     async def test_execution_fetches_fresh_maker_price_before_first_order(self) -> None:
         prices: list[str | None] = []
 
@@ -704,6 +774,30 @@ class SpotPerpArbitrageRecordingTests(unittest.IsolatedAsyncioTestCase):
             registry = PositionRegistry.load(registry_path)
             self.assertEqual(registry.get_leg(f"{strategy_id}:aster:perp:short").quantity, "99")
             self.assertEqual(registry.get_leg(f"{strategy_id}:lighter:perp:long").quantity, "100")
+
+
+class VariationalBrowserAdapterTests(unittest.IsolatedAsyncioTestCase):
+    async def test_order_cooldown_waits_until_ten_seconds_after_previous_order(self) -> None:
+        now = [100.0]
+        sleeps: list[float] = []
+
+        async def fake_sleep(seconds: float) -> None:
+            sleeps.append(seconds)
+            now[0] += seconds
+
+        adapter = VariationalBrowserExecutionAdapter(
+            broker_url="ws://127.0.0.1:8768",
+            min_seconds_between_orders=10.0,
+            clock=lambda: now[0],
+            sleep=fake_sleep,
+        )
+        adapter._last_order_ts_by_broker.clear()
+
+        await adapter._wait_for_order_cooldown()
+        now[0] = 105.0
+        await adapter._wait_for_order_cooldown()
+
+        self.assertEqual(sleeps, [5.0])
 
 
 if __name__ == "__main__":

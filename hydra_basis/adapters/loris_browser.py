@@ -17,6 +17,7 @@ _browser_context_lock: asyncio.Lock | None = None
 _shared_browser: Any | None = None
 _shared_page: Any | None = None
 _shared_loop: asyncio.AbstractEventLoop | None = None
+_shared_start_error: BaseException | None = None
 
 
 def env_flag(name: str, *, default: bool = False) -> bool:
@@ -94,11 +95,12 @@ async def _read_json_document(page: Any) -> dict:
 
 
 async def _stop_shared_browser() -> None:
-    global _shared_browser, _shared_page, _shared_loop
+    global _shared_browser, _shared_page, _shared_loop, _shared_start_error
     browser = _shared_browser
     _shared_browser = None
     _shared_page = None
     _shared_loop = None
+    _shared_start_error = None
     if browser is not None:
         await _maybe_await(browser.stop())
 
@@ -115,10 +117,15 @@ async def _navigate_page(*, browser: Any, page: Any, url: str) -> Any:
 
 
 async def _acquire_browser_context(uc: Any, *, headless: bool, user_data_dir: str | None) -> tuple[Any, Any]:
-    global _shared_browser, _shared_page, _shared_loop
+    global _shared_browser, _shared_page, _shared_loop, _shared_start_error
 
     current_loop = asyncio.get_running_loop()
     async with _browser_lock():
+        if _shared_start_error is not None:
+            raise RuntimeError(
+                f"previous loris nodriver browser start failed: {_shared_start_error}"
+            ) from _shared_start_error
+
         if _shared_browser is not None and _shared_loop is not current_loop:
             await _stop_shared_browser()
 
@@ -126,7 +133,11 @@ async def _acquire_browser_context(uc: Any, *, headless: bool, user_data_dir: st
             start_kwargs: dict[str, Any] = {"headless": headless}
             if user_data_dir is not None:
                 start_kwargs["user_data_dir"] = user_data_dir
-            _shared_browser = await uc.start(**start_kwargs)
+            try:
+                _shared_browser = await uc.start(**start_kwargs)
+            except Exception as exc:
+                _shared_start_error = exc
+                raise
             _shared_page = await _shared_browser.get(LORIS_HOME_URL)
             _shared_loop = current_loop
         return _shared_browser, _shared_page

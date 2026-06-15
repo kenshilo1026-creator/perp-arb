@@ -329,12 +329,14 @@ class LorisBrowserTests(unittest.IsolatedAsyncioTestCase):
         loris_browser._shared_page = None
         loris_browser._shared_loop = None
         loris_browser._browser_context_lock = None
+        loris_browser._shared_start_error = None
 
     async def asyncTearDown(self) -> None:
         loris_browser._shared_browser = None
         loris_browser._shared_page = None
         loris_browser._shared_loop = None
         loris_browser._browser_context_lock = None
+        loris_browser._shared_start_error = None
 
     async def test_nodriver_fetch_includes_api_key_header_when_configured(self) -> None:
         browser = AsyncMock()
@@ -431,6 +433,26 @@ class LorisBrowserTests(unittest.IsolatedAsyncioTestCase):
         start_browser.assert_awaited_once()
         browser.get.assert_awaited_once()
         self.assertEqual(page.get.await_count, 2)
+
+    async def test_nodriver_start_failure_is_cached_to_avoid_reopening_browser_per_symbol(self) -> None:
+        start_browser = AsyncMock(side_effect=RuntimeError("chrome start failed"))
+
+        with patch.dict(os.environ, {}, clear=True):
+            with patch("nodriver.start", new=start_browser):
+                with self.assertRaisesRegex(RuntimeError, "chrome start failed"):
+                    await _fetch_loris_historical_with_nodriver_inner(
+                        symbol="BTC",
+                        start="2026-06-11T00:00:00.000Z",
+                        end="2026-06-12T00:00:00.000Z",
+                    )
+                with self.assertRaisesRegex(RuntimeError, "previous loris nodriver browser start failed"):
+                    await _fetch_loris_historical_with_nodriver_inner(
+                        symbol="ETH",
+                        start="2026-06-11T00:00:00.000Z",
+                        end="2026-06-12T00:00:00.000Z",
+                    )
+
+        start_browser.assert_awaited_once()
 
     async def test_nodriver_fetch_raises_clear_error_when_navigation_body_missing(self) -> None:
         browser = AsyncMock()

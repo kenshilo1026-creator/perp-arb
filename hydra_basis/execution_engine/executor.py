@@ -43,6 +43,12 @@ def format_decimal(value: Decimal) -> str:
     return format(value.normalize(), "f")
 
 
+def filled_notional_usd(*, clip_usd: float, requested_quantity: Decimal, executed_quantity: Decimal) -> Decimal:
+    if requested_quantity <= 0:
+        raise RuntimeError("requested quantity must be positive")
+    return Decimal(str(clip_usd)) * executed_quantity / requested_quantity
+
+
 def _decimal_from_mapping(payload: dict, keys: set[str]) -> Decimal | None:
     for key, value in payload.items():
         normalized_key = str(key).replace("-", "_").lower()
@@ -283,6 +289,7 @@ async def execute_single_clip(
     maker_reprice_min_change_pct: float = 0.0,
     maker_price_refresher: Callable[[], Awaitable[str]] | None = None,
     taker_pre_hook: Callable[[], Awaitable[None]] | None = None,
+    min_hedge_notional_usd: float = 0.0,
 ) -> dict[str, object]:
     maker_side, taker_side = execution_sides_for_signal(
         maker_venue=maker_venue,
@@ -312,6 +319,7 @@ async def execute_single_clip(
         maker_reprice_min_change_pct=maker_reprice_min_change_pct,
         maker_price_refresher=maker_price_refresher,
         taker_pre_hook=taker_pre_hook,
+        min_hedge_notional_usd=min_hedge_notional_usd,
     )
 
 
@@ -339,6 +347,7 @@ async def execute_single_clip_with_sides(
     maker_reprice_min_change_pct: float = 0.0,
     maker_price_refresher: Callable[[], Awaitable[str]] | None = None,
     taker_pre_hook: Callable[[], Awaitable[None]] | None = None,
+    min_hedge_notional_usd: float = 0.0,
 ) -> dict[str, object]:
     state_machine.to_preview_ready()
     state_machine.to_awaiting_confirm()
@@ -492,6 +501,47 @@ async def execute_single_clip_with_sides(
     if executed_quantity <= 0:
         raise RuntimeError("maker execution produced zero filled quantity")
 
+    min_hedge_notional = Decimal(str(min_hedge_notional_usd))
+    while executed_quantity < requested_quantity and min_hedge_notional > 0:
+        current_notional = filled_notional_usd(
+            clip_usd=clip_usd,
+            requested_quantity=requested_quantity,
+            executed_quantity=executed_quantity,
+        )
+        if current_notional >= min_hedge_notional:
+            break
+        print(
+            "[partial-fill] filled notional below hedge minimum; waiting for more maker fill "
+            f"filled_qty={format_decimal(executed_quantity)} "
+            f"notional={format_decimal(current_notional)} "
+            f"min={format_decimal(min_hedge_notional)}",
+            flush=True,
+        )
+        maker_fill_result = await wait_for_maker_fill(
+            maker_adapter,
+            maker_result=maker_result,
+            symbol=symbol,
+            side=maker_side,
+            amount=str(quantity),
+            timeout_seconds=maker_fill_timeout_seconds,
+        )
+        updated_executed_quantity = resolve_executed_quantity(
+            requested_quantity=requested_quantity,
+            maker_result=maker_result,
+            maker_fill_result=maker_fill_result,
+        )
+        if updated_executed_quantity <= executed_quantity:
+            print(
+                "[partial-fill] still below hedge minimum with no additional fill progress; keep waiting "
+                f"filled_qty={format_decimal(executed_quantity)} "
+                f"notional={format_decimal(current_notional)} "
+                f"min={format_decimal(min_hedge_notional)}",
+                flush=True,
+            )
+            await asyncio.sleep(1.0)
+            continue
+        executed_quantity = updated_executed_quantity
+
     partial_fill = executed_quantity < requested_quantity
     if partial_fill:
         maker_cancel_result = await cancel_maker_order(
@@ -501,6 +551,14 @@ async def execute_single_clip_with_sides(
             side=maker_side,
             amount=str(quantity),
         )
+        updated_executed_quantity = resolve_executed_quantity(
+            requested_quantity=requested_quantity,
+            maker_result=maker_result,
+            maker_fill_result=maker_cancel_result,
+        )
+        if updated_executed_quantity > executed_quantity:
+            executed_quantity = updated_executed_quantity
+            partial_fill = executed_quantity < requested_quantity
 
     state_machine.to_hedging_taker_leg()
     last_error: Exception | None = None

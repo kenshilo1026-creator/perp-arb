@@ -5,6 +5,8 @@ from typing import Protocol
 from hydra_basis.risk_management.models import RiskEvent, close_side_for_position
 from hydra_basis.risk_management.registry import PositionRegistry
 
+MANUAL_CLOSE_ONLY_VENUES = {"variational"}
+
 
 class PositionCloser(Protocol):
     async def get_open_position(self, **kwargs) -> dict | None:
@@ -42,9 +44,20 @@ class EmergencyRiskManager:
             )
         closed_leg_ids: list[str] = []
         failed_leg_ids: list[str] = []
+        manual_leg_ids: list[str] = []
         close_results: dict[str, dict] = {}
 
         for leg in legs_to_close:
+            if leg.venue in MANUAL_CLOSE_ONLY_VENUES:
+                self.registry.mark_status(leg.leg_id, "manual_close_required")
+                manual_leg_ids.append(leg.leg_id)
+                close_results[leg.leg_id] = {
+                    "ok": False,
+                    "manual_close_required": True,
+                    "error": f"manual close required for {leg.venue}",
+                }
+                continue
+
             closer = self.closers.get(leg.venue)
             if closer is None:
                 self.registry.mark_status(leg.leg_id, "close_failed")
@@ -63,11 +76,14 @@ class EmergencyRiskManager:
                 failed_leg_ids.append(leg.leg_id)
 
         return {
-            "ok": not failed_leg_ids,
+            "ok": not failed_leg_ids and not manual_leg_ids,
             "event_type": event.event_type,
             "trigger_leg_id": event.leg_id,
+            "trigger_venue": event.venue,
+            "trigger_symbol": event.symbol,
             "closed_leg_ids": closed_leg_ids,
             "failed_leg_ids": failed_leg_ids,
+            "manual_leg_ids": manual_leg_ids,
             "close_results": close_results,
         }
 

@@ -57,6 +57,22 @@ load_environment()
 RECONCILIATION_INTERVAL_SECONDS = 60
 
 
+def format_emergency_risk_message(*, result: dict[str, object], mode: str) -> str:
+    lines = [
+        "風控事件處理完成",
+        f"event={result.get('event_type')}",
+        f"trigger={result.get('trigger_leg_id')} venue={result.get('trigger_venue')} symbol={result.get('trigger_symbol')}",
+        f"closed={result.get('closed_leg_ids')}",
+        f"manual={result.get('manual_leg_ids')}",
+        f"failed={result.get('failed_leg_ids')}",
+        f"mode={mode}",
+    ]
+    manual_ids = result.get("manual_leg_ids") or []
+    if manual_ids:
+        lines.append("注意: Variational 需要手動平倉，系統不會用 browser 在 VPS 自動操作。")
+    return "\n".join(lines)
+
+
 def build_closers() -> dict[str, object]:
     closers: dict[str, object] = {
         "aster": AsterExecutionAdapter(),
@@ -134,14 +150,8 @@ async def run_risk_manager(*, venues: set[str], live: bool) -> None:
                 closers=closers,
                 dry_run=dry_run,
             )
-            if result.get("closed_leg_ids") or result.get("failed_leg_ids"):
-                message = (
-                    f"風控事件處理完成\n"
-                    f"trigger={result.get('trigger_leg_id')}\n"
-                    f"closed={result.get('closed_leg_ids')}\n"
-                    f"failed={result.get('failed_leg_ids')}\n"
-                    f"mode={mode}"
-                )
+            if result.get("event_type"):
+                message = format_emergency_risk_message(result=result, mode=mode)
                 print(message)
                 await send_telegram(message)
             await asyncio.sleep(0)
@@ -174,12 +184,9 @@ async def run_risk_manager(*, venues: set[str], live: bool) -> None:
                         await send_telegram(message)
                     if result.get("risk_event") is not None:
                         emergency_result = await emergency_manager.handle_event(result["risk_event"])
-                        emergency_message = (
-                            f"補保證金失敗，已觸發緊急平倉\n"
-                            f"trigger={emergency_result.get('trigger_leg_id')}\n"
-                            f"closed={emergency_result.get('closed_leg_ids')}\n"
-                            f"failed={emergency_result.get('failed_leg_ids')}\n"
-                            f"mode={mode}"
+                        emergency_message = "補保證金失敗，已觸發緊急平倉\n" + format_emergency_risk_message(
+                            result=emergency_result,
+                            mode=mode,
                         )
                         print(emergency_message)
                         await send_telegram(emergency_message)

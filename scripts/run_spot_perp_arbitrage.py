@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import math
 import time
 from dataclasses import dataclass
 from decimal import Decimal
@@ -51,6 +52,8 @@ VARIATIONAL_BROKER_HOST = "127.0.0.1"
 VARIATIONAL_BROKER_PORT = 8768
 VARIATIONAL_EXTENSION_TIMEOUT_SECONDS = 30.0
 SPOT_PERP_MAX_PRE_TRADE_PRICE_GAP = Decimal("0.01")
+SPOT_PERP_MIN_HEDGE_NOTIONAL_USD = Decimal("5.0")
+PREVIEW_ORDERBOOK_CLIP_USD = 1_000.0
 
 
 @dataclass(frozen=True)
@@ -103,6 +106,67 @@ def decimal_to_plain(value: Decimal | float | str) -> str:
     return plain or "0"
 
 
+def prompt_text(label: str) -> str:
+    value = input(f"{label}: ").strip().lstrip("﻿")
+    if not value:
+        raise RuntimeError(f"{label} cannot be empty")
+    return value
+
+
+def prompt_decimal(label: str) -> Decimal:
+    value = prompt_text(label)
+    try:
+        number = Decimal(value)
+    except Exception as exc:
+        raise RuntimeError(f"{label} must be a number") from exc
+    if number <= 0:
+        raise RuntimeError(f"{label} must be positive")
+    return number
+
+
+def prompt_int(label: str) -> int:
+    value = prompt_text(label)
+    try:
+        number = int(value)
+    except ValueError as exc:
+        raise RuntimeError(f"{label} must be an integer") from exc
+    if number <= 0:
+        raise RuntimeError(f"{label} must be positive")
+    return number
+
+
+def compute_token_batch_count(total_size: Decimal, clip_size: Decimal) -> int:
+    if total_size <= 0 or clip_size <= 0:
+        raise RuntimeError("total_size and clip_size must be positive")
+    return math.ceil(float(total_size / clip_size))
+
+
+def orderbook_mid(book: dict[str, float | int]) -> Decimal:
+    return (Decimal(str(book["bid"])) + Decimal(str(book["ask"]))) / Decimal("2")
+
+
+def estimate_clip_usd_from_books(
+    *,
+    clip_size: Decimal,
+    spot_book: dict[str, float | int],
+    perp_book: dict[str, float | int],
+) -> float:
+    reference_mid = (orderbook_mid(spot_book) + orderbook_mid(perp_book)) / Decimal("2")
+    return float(clip_size * reference_mid)
+
+
+def assert_min_spot_perp_notional(*, clip_size: Decimal, clip_usd: float) -> None:
+    notional = Decimal(str(clip_usd))
+    if notional >= SPOT_PERP_MIN_HEDGE_NOTIONAL_USD:
+        return
+    raise RuntimeError(
+        "spot-perp clip notional below exchange minimum: "
+        f"clip_size={decimal_to_plain(clip_size)} "
+        f"estimated_notional={notional:.6f} "
+        f"min={decimal_to_plain(SPOT_PERP_MIN_HEDGE_NOTIONAL_USD)}"
+    )
+
+
 def maker_limit_price(book: dict[str, float | int], side: str) -> str:
     normalized_side = side.strip().upper()
     if normalized_side == "BUY":
@@ -123,7 +187,7 @@ def compute_base_quantity(
             raise RuntimeError("quantity must be positive")
         return quantity
     if clip_usd is None or clip_usd <= 0:
-        raise RuntimeError("either positive --quantity or --clip-usd is required")
+        raise RuntimeError("either positive quantity or clip_usd is required")
     mid = (Decimal(str(taker_book["bid"])) + Decimal(str(taker_book["ask"]))) / Decimal("2")
     if mid <= 0:
         raise RuntimeError("invalid taker book mid price")
@@ -362,6 +426,7 @@ async def execute_spot_perp_plan(
                 if allow_large_price_gap
                 else float(SPOT_PERP_MAX_PRE_TRADE_PRICE_GAP)
             ),
+            min_hedge_notional_usd=float(SPOT_PERP_MIN_HEDGE_NOTIONAL_USD),
         )
         if plan.mode != "open" or not result.get("ok", False):
             return result
@@ -407,12 +472,12 @@ async def execute_spot_perp_plan(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run one MEXC spot vs perp arbitrage clip.")
-    parser.add_argument("--mode", required=True, choices=sorted(SUPPORTED_MODES))
-    parser.add_argument("--symbol", required=True)
-    parser.add_argument("--short-venue", required=True, choices=sorted(SUPPORTED_SHORT_VENUES))
-    parser.add_argument("--quantity", default=None, help="Base asset quantity. If omitted, use --clip-usd / mid.")
-    parser.add_argument("--clip-usd", type=float, default=None)
-    parser.add_argument("--leverage", type=int, default=1)
+    parser.add_argument("--mode", default=None, choices=sorted(SUPPORTED_MODES))
+    parser.add_argument("--symbol", default=None)
+    parser.add_argument("--short-venue", default=None, choices=sorted(SUPPORTED_SHORT_VENUES))
+    parser.add_argument("--total-size", default=None, help="Total base asset size to execute.")
+    parser.add_argument("--clip-size", default=None, help="Base asset size per batch.")
+    parser.add_argument("--leverage", type=int, default=None)
     parser.add_argument("--variational-broker-host", default=VARIATIONAL_BROKER_HOST)
     parser.add_argument("--variational-broker-port", type=int, default=VARIATIONAL_BROKER_PORT)
     parser.add_argument("--variational-extension-timeout", type=float, default=VARIATIONAL_EXTENSION_TIMEOUT_SECONDS)
@@ -422,24 +487,39 @@ def parse_args() -> argparse.Namespace:
 
 async def run_spot_perp_arbitrage() -> None:
     args = parse_args()
-    symbol = args.symbol.strip().upper()
-    short_venue = normalize_short_venue(args.short_venue)
-    quantity = Decimal(args.quantity) if args.quantity is not None else None
-    preview_clip_usd = args.clip_usd if args.clip_usd is not None else 1_000.0
+    mode = normalize_mode(args.mode or prompt_text("mode [open/close]"))
+    symbol = (args.symbol or prompt_text("ticker")).strip().upper()
+    short_venue = normalize_short_venue(args.short_venue or prompt_text("short_venue"))
+    total_size = Decimal(args.total_size) if args.total_size is not None else prompt_decimal("total_size_token")
+    clip_size = Decimal(args.clip_size) if args.clip_size is not None else prompt_decimal("clip_size_token")
+    if total_size <= 0 or clip_size <= 0:
+        raise RuntimeError("total_size and clip_size must be positive")
+    leverage = args.leverage if args.leverage is not None else prompt_int("leverage_x")
+    first_clip_size = min(total_size, clip_size)
     spot_book, perp_book = await fetch_plan_books(
         symbol=symbol,
         short_venue=short_venue,
-        clip_usd=preview_clip_usd,
+        clip_usd=PREVIEW_ORDERBOOK_CLIP_USD,
     )
     plan = build_spot_perp_plan(
         symbol=symbol,
-        mode=args.mode,
+        mode=mode,
         short_venue=short_venue,
-        quantity=quantity,
-        clip_usd=args.clip_usd,
+        quantity=first_clip_size,
+        clip_usd=None,
         spot_book=spot_book,
         perp_book=perp_book,
     )
+    num_batches = compute_token_batch_count(total_size, clip_size)
+    final_clip_size = total_size % clip_size
+    if final_clip_size == 0:
+        final_clip_size = clip_size if total_size >= clip_size else total_size
+    final_clip_usd = estimate_clip_usd_from_books(
+        clip_size=final_clip_size,
+        spot_book=spot_book,
+        perp_book=perp_book,
+    )
+    assert_min_spot_perp_notional(clip_size=final_clip_size, clip_usd=final_clip_usd)
 
     print("spot-perp arbitrage preview")
     print(f"mode: {plan.mode}")
@@ -451,9 +531,11 @@ async def run_spot_perp_arbitrage() -> None:
     print(f"maker: {plan.maker_venue} {plan.maker_side} limit price={plan.maker_price}")
     print(f"taker: {plan.taker_venue} {plan.taker_side} market")
     print(f"pre_trade_price_gap: {float(plan.maker_taker_price_gap_pct):.2%}")
-    print(f"quantity: {decimal_to_plain(plan.quantity)}")
-    print(f"clip_usd: {plan.clip_usd:.2f}")
-    print(f"leverage_x: {args.leverage}")
+    print(f"total_size_token: {decimal_to_plain(total_size)}")
+    print(f"clip_size_token: {decimal_to_plain(clip_size)}")
+    print(f"token_batches: {num_batches}")
+    print(f"estimated_first_clip_usd: {plan.clip_usd:.2f}")
+    print(f"leverage_x: {leverage}")
 
     allow_large_price_gap = False
     if plan.maker_taker_price_gap_pct > SPOT_PERP_MAX_PRE_TRADE_PRICE_GAP:
@@ -474,13 +556,59 @@ async def run_spot_perp_arbitrage() -> None:
         print("cancelled")
         return
 
-    async def execute_with_optional_broker(*, broker_url: str | None = None) -> dict[str, object]:
-        return await execute_spot_perp_plan(
-            plan=plan,
-            leverage=args.leverage,
-            broker_url=broker_url,
-            allow_large_price_gap=allow_large_price_gap,
-        )
+    async def execute_batches(*, broker_url: str | None = None) -> dict[str, object]:
+        remaining = total_size
+        batch_index = 0
+        last_result: dict[str, object] = {"ok": True}
+        reference_spot_book = spot_book
+        reference_perp_book = perp_book
+        while remaining > 0:
+            batch_index += 1
+            this_clip_size = min(clip_size, remaining)
+            estimated_clip_usd = estimate_clip_usd_from_books(
+                clip_size=this_clip_size,
+                spot_book=reference_spot_book,
+                perp_book=reference_perp_book,
+            )
+            assert_min_spot_perp_notional(clip_size=this_clip_size, clip_usd=estimated_clip_usd)
+            fresh_spot_book, fresh_perp_book = await fetch_plan_books(
+                symbol=symbol,
+                short_venue=short_venue,
+                clip_usd=estimated_clip_usd,
+            )
+            reference_spot_book = fresh_spot_book
+            reference_perp_book = fresh_perp_book
+            batch_plan = build_spot_perp_plan(
+                symbol=symbol,
+                mode=mode,
+                short_venue=short_venue,
+                quantity=this_clip_size,
+                clip_usd=None,
+                spot_book=fresh_spot_book,
+                perp_book=fresh_perp_book,
+            )
+            assert_min_spot_perp_notional(clip_size=this_clip_size, clip_usd=batch_plan.clip_usd)
+            print(f"\nbatch {batch_index}/{num_batches}  clip_size_token={decimal_to_plain(this_clip_size)}")
+            print(f"estimated_clip_usd: {batch_plan.clip_usd:.2f}")
+            print(f"maker: {batch_plan.maker_venue} {batch_plan.maker_side} limit price={batch_plan.maker_price}")
+            print(f"taker: {batch_plan.taker_venue} {batch_plan.taker_side} market")
+            print(f"pre_trade_price_gap: {float(batch_plan.maker_taker_price_gap_pct):.2%}")
+            last_result = await execute_spot_perp_plan(
+                plan=batch_plan,
+                leverage=leverage,
+                broker_url=broker_url,
+                allow_large_price_gap=allow_large_price_gap,
+            )
+            for line in format_spot_perp_execution_summary(plan=batch_plan, result=last_result):
+                print(line)
+            if not last_result.get("ok", False):
+                raise RuntimeError(f"batch {batch_index} failed — stopping")
+            executed_quantity = Decimal(str(last_result.get("executed_quantity") or this_clip_size))
+            if executed_quantity <= 0:
+                raise RuntimeError(f"batch {batch_index} executed zero quantity — stopping")
+            remaining = max(Decimal("0"), remaining - executed_quantity)
+        print(f"\nspot-perp complete: {batch_index} batch(es) executed")
+        return last_result
 
     if "variational" in {plan.maker_venue, plan.taker_venue}:
         print(
@@ -497,12 +625,9 @@ async def run_spot_perp_arbitrage() -> None:
                 f"timeout={args.variational_extension_timeout:.1f}s"
             )
             await server.wait_for_extension(timeout_seconds=args.variational_extension_timeout)
-            result = await execute_with_optional_broker(broker_url=server.ws_url)
+            await execute_batches(broker_url=server.ws_url)
     else:
-        result = await execute_with_optional_broker()
-
-    for line in format_spot_perp_execution_summary(plan=plan, result=result):
-        print(line)
+        await execute_batches()
 
 
 def main() -> None:

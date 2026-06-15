@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 from scripts.run_spot_perp_arbitrage import (
     build_spot_perp_plan,
+    compute_token_batch_count,
     compute_base_quantity,
     execute_spot_perp_plan,
     format_spot_perp_execution_summary,
@@ -84,6 +85,9 @@ class SpotPerpArbitrageScriptTests(unittest.TestCase):
         )
 
         self.assertEqual(quantity, Decimal("10"))
+
+    def test_compute_token_batch_count_rounds_up(self) -> None:
+        self.assertEqual(compute_token_batch_count(Decimal("21"), Decimal("10")), 3)
 
     def test_normalize_mode_rejects_invalid_value(self) -> None:
         with self.assertRaises(RuntimeError):
@@ -187,6 +191,39 @@ class MexcSpotAdapterForSpotPerpTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["raw"]["status"], "FILLED")
         self.assertEqual(result["raw"]["executedQty"], "10")
 
+    async def test_cancel_order_treats_order_filled_error_as_filled_status(self) -> None:
+        get_calls: list[dict] = []
+
+        class Adapter(MexcSpotExecutionAdapter):
+            async def _delete_order(self, params: dict) -> dict:
+                return {
+                    "orderId": params["orderId"],
+                    "status": "FILLED",
+                    "cancelRejectedAsFilled": True,
+                    "rawCancelError": {"code": -2011, "msg": "Order filled."},
+                }
+
+            async def _get_order(self, params: dict) -> dict:
+                get_calls.append(dict(params))
+                return {
+                    "orderId": params["orderId"],
+                    "status": "FILLED",
+                    "executedQty": "10",
+                    "origQty": "10",
+                }
+
+        result = await Adapter(api_key="k", api_secret="s").cancel_order(
+            order_result={"order_id": "spot-1"},
+            symbol="eth",
+            side="BUY",
+            amount="10",
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(get_calls, [{"symbol": "ETHUSDT", "orderId": "spot-1"}])
+        self.assertEqual(result["raw"]["status"], "FILLED")
+        self.assertEqual(result["raw"]["executedQty"], "10")
+
 
 class SpotPerpArbitrageRecordingTests(unittest.IsolatedAsyncioTestCase):
     async def test_live_run_large_gap_stops_when_user_confirms_stop(self) -> None:
@@ -196,8 +233,8 @@ class SpotPerpArbitrageRecordingTests(unittest.IsolatedAsyncioTestCase):
             mode="open",
             symbol="BEAT",
             short_venue="aster",
-            quantity="10",
-            clip_usd=100.0,
+            total_size="10",
+            clip_size="10",
             leverage=1,
             variational_broker_host="127.0.0.1",
             variational_broker_port=8768,
@@ -243,8 +280,8 @@ class SpotPerpArbitrageRecordingTests(unittest.IsolatedAsyncioTestCase):
             mode="open",
             symbol="BEAT",
             short_venue="aster",
-            quantity="10",
-            clip_usd=100.0,
+            total_size="10",
+            clip_size="10",
             leverage=1,
             variational_broker_host="127.0.0.1",
             variational_broker_port=8768,
@@ -274,6 +311,78 @@ class SpotPerpArbitrageRecordingTests(unittest.IsolatedAsyncioTestCase):
         output = "\n".join(printed)
         self.assertIn("Type exactly 'PLACE LIVE SPOT PERP ORDER' to continue:", output)
         self.assertIn("下單成功 mexc現貨成交價", output)
+
+    async def test_live_run_splits_total_size_into_multiple_clips(self) -> None:
+        execute_plans: list[tuple[Decimal, float]] = []
+        args = SimpleNamespace(
+            mode="open",
+            symbol="BEAT",
+            short_venue="aster",
+            total_size="25",
+            clip_size="10",
+            leverage=1,
+            variational_broker_host="127.0.0.1",
+            variational_broker_port=8768,
+            variational_extension_timeout=30.0,
+            live=True,
+        )
+
+        async def fake_execute(*, plan, **kwargs):
+            execute_plans.append((plan.quantity, plan.clip_usd))
+            return {
+                "ok": True,
+                "executed_quantity": str(plan.quantity),
+                "execution_price_summary": {
+                    "maker_avg_price": "10.1",
+                    "taker_avg_price": "10.01",
+                },
+            }
+
+        with patch("scripts.run_spot_perp_arbitrage.parse_args", return_value=args), \
+            patch(
+                "scripts.run_spot_perp_arbitrage.fetch_plan_books",
+                new=AsyncMock(return_value=(
+                    {"bid": 9.99, "ask": 10.01, "ts_ms": 1},
+                    {"bid": 9.9, "ask": 10.1, "ts_ms": 1},
+                )),
+            ), \
+            patch("scripts.run_spot_perp_arbitrage.execute_spot_perp_plan", new=AsyncMock(side_effect=fake_execute)), \
+            patch("builtins.input", return_value="PLACE LIVE SPOT PERP ORDER"), \
+            patch("builtins.print"):
+            await run_spot_perp_arbitrage()
+
+        self.assertEqual([qty for qty, _ in execute_plans], [Decimal("10"), Decimal("10"), Decimal("5")])
+
+    async def test_live_run_rejects_final_batch_below_min_notional_before_ordering(self) -> None:
+        args = SimpleNamespace(
+            mode="open",
+            symbol="BEAT",
+            short_venue="aster",
+            total_size="10.2",
+            clip_size="10",
+            leverage=1,
+            variational_broker_host="127.0.0.1",
+            variational_broker_port=8768,
+            variational_extension_timeout=30.0,
+            live=True,
+        )
+
+        with patch("scripts.run_spot_perp_arbitrage.parse_args", return_value=args), \
+            patch(
+                "scripts.run_spot_perp_arbitrage.fetch_plan_books",
+                new=AsyncMock(return_value=(
+                    {"bid": 9.99, "ask": 10.01, "ts_ms": 1},
+                    {"bid": 9.9, "ask": 10.1, "ts_ms": 1},
+                )),
+            ), \
+            patch(
+                "scripts.run_spot_perp_arbitrage.execute_spot_perp_plan",
+                new=AsyncMock(side_effect=AssertionError("should not execute")),
+            ), \
+            patch("builtins.input", side_effect=AssertionError("should not ask for live confirmation")), \
+            patch("builtins.print"):
+            with self.assertRaisesRegex(RuntimeError, "spot-perp clip notional below exchange minimum"):
+                await run_spot_perp_arbitrage()
 
     async def test_waits_for_maker_fill_before_taker_market_order(self) -> None:
         events: list[str] = []
@@ -589,6 +698,187 @@ class SpotPerpArbitrageRecordingTests(unittest.IsolatedAsyncioTestCase):
             ],
         )
         self.assertEqual(prices, ["10.1"])
+
+    async def test_cancel_after_partial_fill_updates_hedge_quantity_when_order_finished(self) -> None:
+        market_amounts: list[str] = []
+
+        class MakerAdapter:
+            async def place_limit_order(self, **kwargs):
+                return {"ok": True, "order_id": "maker-1"}
+
+            async def wait_for_order_fill(self, **kwargs):
+                return {
+                    "ok": True,
+                    "partial": True,
+                    "filled_quantity": "6",
+                    "raw": {"status": "PARTIALLY_FILLED", "executedQty": "6"},
+                }
+
+            async def cancel_order(self, **kwargs):
+                return {
+                    "ok": True,
+                    "order_id": "maker-1",
+                    "raw": {"status": "FILLED", "executedQty": "10", "origQty": "10"},
+                }
+
+        class TakerAdapter:
+            async def place_market_order(self, **kwargs):
+                market_amounts.append(kwargs["amount"])
+                return {"ok": True, "avgPrice": "10"}
+
+        result = await execute_single_clip(
+            symbol="BEAT",
+            clip_usd=100.0,
+            quantity=Decimal("10"),
+            maker_venue="mexc_spot",
+            taker_venue="aster",
+            short_venue="aster",
+            long_venue="mexc_spot",
+            maker_adapter=MakerAdapter(),
+            taker_adapter=TakerAdapter(),
+            max_hedge_retries=0,
+            state_machine=SimpleNamespace(
+                to_preview_ready=lambda: None,
+                to_awaiting_confirm=lambda: None,
+                to_placing_maker_leg=lambda: None,
+                to_hedging_taker_leg=lambda: None,
+                to_completed=lambda: None,
+                to_retrying_hedge=lambda: None,
+                to_emergency_exit=lambda: None,
+            ),
+            maker_price="10",
+            require_maker_fill_confirmation=True,
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(market_amounts, ["10"])
+        self.assertEqual(result["executed_quantity"], "10")
+        self.assertFalse(result["partial_fill"])
+
+    async def test_partial_fill_below_min_hedge_notional_waits_without_cancel(self) -> None:
+        events: list[str] = []
+        market_amounts: list[str] = []
+
+        class MakerAdapter:
+            async def place_limit_order(self, **kwargs):
+                events.append("place_limit")
+                return {"ok": True, "order_id": "maker-1"}
+
+            async def wait_for_order_fill(self, **kwargs):
+                events.append("wait_fill")
+                if events.count("wait_fill") == 1:
+                    return {
+                        "ok": True,
+                        "partial": True,
+                        "filled_quantity": "0.2",
+                        "raw": {"status": "PARTIALLY_FILLED", "executedQty": "0.2"},
+                    }
+                return {
+                    "ok": True,
+                    "partial": True,
+                    "filled_quantity": "0.6",
+                    "raw": {"status": "PARTIALLY_FILLED", "executedQty": "0.6"},
+                }
+
+            async def cancel_order(self, **kwargs):
+                events.append("cancel")
+                return {"ok": True, "order_id": "maker-1", "raw": {"status": "CANCELED", "executedQty": "0.6"}}
+
+        class TakerAdapter:
+            async def place_market_order(self, **kwargs):
+                events.append("place_market")
+                market_amounts.append(kwargs["amount"])
+                return {"ok": True, "avgPrice": "10"}
+
+        result = await execute_single_clip(
+            symbol="BEAT",
+            clip_usd=10.0,
+            quantity=Decimal("1"),
+            maker_venue="mexc_spot",
+            taker_venue="aster",
+            short_venue="aster",
+            long_venue="mexc_spot",
+            maker_adapter=MakerAdapter(),
+            taker_adapter=TakerAdapter(),
+            max_hedge_retries=0,
+            state_machine=SimpleNamespace(
+                to_preview_ready=lambda: None,
+                to_awaiting_confirm=lambda: None,
+                to_placing_maker_leg=lambda: None,
+                to_hedging_taker_leg=lambda: None,
+                to_completed=lambda: None,
+                to_retrying_hedge=lambda: None,
+                to_emergency_exit=lambda: None,
+            ),
+            maker_price="10",
+            require_maker_fill_confirmation=True,
+            min_hedge_notional_usd=5.0,
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(events, ["place_limit", "wait_fill", "wait_fill", "cancel", "place_market"])
+        self.assertEqual(market_amounts, ["0.6"])
+        self.assertEqual(result["executed_quantity"], "0.6")
+
+    async def test_partial_fill_below_min_hedge_notional_keeps_waiting_without_progress(self) -> None:
+        events: list[str] = []
+        market_amounts: list[str] = []
+
+        class MakerAdapter:
+            async def place_limit_order(self, **kwargs):
+                events.append("place_limit")
+                return {"ok": True, "order_id": "maker-1"}
+
+            async def wait_for_order_fill(self, **kwargs):
+                events.append("wait_fill")
+                filled = "0.17" if events.count("wait_fill") < 3 else "0.6"
+                return {
+                    "ok": True,
+                    "partial": True,
+                    "filled_quantity": filled,
+                    "raw": {"status": "PARTIALLY_FILLED", "executedQty": filled},
+                }
+
+            async def cancel_order(self, **kwargs):
+                events.append("cancel")
+                return {"ok": True, "order_id": "maker-1", "raw": {"status": "CANCELED", "executedQty": "0.6"}}
+
+        class TakerAdapter:
+            async def place_market_order(self, **kwargs):
+                events.append("place_market")
+                market_amounts.append(kwargs["amount"])
+                return {"ok": True, "avgPrice": "10"}
+
+        with patch("asyncio.sleep", new=AsyncMock()):
+            result = await execute_single_clip(
+                symbol="BEAT",
+                clip_usd=19.0,
+                quantity=Decimal("1"),
+                maker_venue="mexc_spot",
+                taker_venue="aster",
+                short_venue="aster",
+                long_venue="mexc_spot",
+                maker_adapter=MakerAdapter(),
+                taker_adapter=TakerAdapter(),
+                max_hedge_retries=0,
+                state_machine=SimpleNamespace(
+                    to_preview_ready=lambda: None,
+                    to_awaiting_confirm=lambda: None,
+                    to_placing_maker_leg=lambda: None,
+                    to_hedging_taker_leg=lambda: None,
+                    to_completed=lambda: None,
+                    to_retrying_hedge=lambda: None,
+                    to_emergency_exit=lambda: None,
+                ),
+                maker_price="19",
+                require_maker_fill_confirmation=True,
+                min_hedge_notional_usd=5.0,
+            )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(events, ["place_limit", "wait_fill", "wait_fill", "wait_fill", "cancel", "place_market"])
+        self.assertEqual(market_amounts, ["0.6"])
+        self.assertEqual(result["executed_quantity"], "0.6")
 
     async def test_execution_fetches_fresh_maker_price_before_first_order(self) -> None:
         prices: list[str | None] = []

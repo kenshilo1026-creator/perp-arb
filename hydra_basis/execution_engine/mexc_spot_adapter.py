@@ -105,6 +105,16 @@ class MexcSpotExecutionAdapter:
             ) as resp:
                 data = await resp.json()
                 if resp.status != 200:
+                    if (
+                        data.get("code") in {-2011, "-2011"}
+                        and "filled" in str(data.get("msg", "")).lower()
+                    ):
+                        return {
+                            "orderId": params.get("orderId"),
+                            "status": "FILLED",
+                            "cancelRejectedAsFilled": True,
+                            "rawCancelError": data,
+                        }
                     raise RuntimeError(f"mexc spot cancel {resp.status}: {data}")
                 return data
 
@@ -219,6 +229,8 @@ class MexcSpotExecutionAdapter:
                 "orderId": order_id,
             }
         )
+        if data.get("cancelRejectedAsFilled"):
+            data = await self._enrich_order_with_status(symbol=symbol, order_data=data)
         return {"ok": True, "order_id": data.get("orderId", order_id), "raw": data}
 
     async def get_open_position(self, *, symbol: str, market_type: str) -> dict | None:

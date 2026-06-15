@@ -30,6 +30,7 @@ from hydra_basis.risk_management.watchers import (
     parse_hyperliquid_risk_signal,
 )
 from hydra_basis.config import POSITION_REGISTRY_PATH
+from scripts.run_risk_manager import format_emergency_risk_message
 
 
 class GlobalRiskManagementTests(unittest.IsolatedAsyncioTestCase):
@@ -122,6 +123,79 @@ class GlobalRiskManagementTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["closed_leg_ids"], ["hyper-long", "mexc-short"])
         self.assertEqual(calls, [("hyperliquid", "SELL"), ("mexc", "BUY")])
         self.assertEqual(registry.get_leg("old-leg").status, "closed")
+
+    async def test_adl_event_requires_manual_close_for_variational_counterparty(self) -> None:
+        calls: list[dict] = []
+
+        class FakeCloser:
+            async def get_open_position(self, *, symbol: str, market_type: str):
+                return {"symbol": symbol, "market_type": market_type, "side": "LONG", "quantity": "100"}
+
+            async def close_position(self, **kwargs):
+                calls.append(kwargs)
+                return {"ok": True}
+
+        registry = PositionRegistry(
+            legs=[
+                PositionLeg("arb-var", "trigger", "aster", "LAB", "perp", "SHORT", "100", "open"),
+                PositionLeg("arb-var", "var-long", "variational", "LAB", "perp", "LONG", "100", "open"),
+            ]
+        )
+        manager = EmergencyRiskManager(
+            registry=registry,
+            closers={"variational": FakeCloser()},
+        )
+
+        result = await manager.handle_event(RiskEvent("arb-var", "trigger", "aster", "LAB", "ADL"))
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(calls, [])
+        self.assertEqual(result["manual_leg_ids"], ["var-long"])
+        self.assertIn("manual close required", result["close_results"]["var-long"]["error"])
+        self.assertEqual(registry.get_leg("var-long").status, "manual_close_required")
+
+    async def test_variational_trigger_still_auto_closes_api_counterparty(self) -> None:
+        calls: list[dict] = []
+
+        class FakeCloser:
+            async def get_open_position(self, *, symbol: str, market_type: str):
+                return {"symbol": symbol, "market_type": market_type, "side": "LONG", "quantity": "100"}
+
+            async def close_position(self, **kwargs):
+                calls.append(kwargs)
+                return {"ok": True}
+
+        registry = PositionRegistry(
+            legs=[
+                PositionLeg("arb-var", "var-trigger", "variational", "LAB", "perp", "SHORT", "100", "open"),
+                PositionLeg("arb-var", "mexc-spot", "mexc", "LAB", "spot", "LONG", "100", "open"),
+            ]
+        )
+        manager = EmergencyRiskManager(registry=registry, closers={"mexc": FakeCloser()})
+
+        result = await manager.handle_event(RiskEvent("arb-var", "var-trigger", "variational", "LAB", "ADL"))
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["closed_leg_ids"], ["mexc-spot"])
+        self.assertEqual(calls[0]["side"], "SELL")
+
+    def test_risk_manager_message_includes_variational_manual_close_notice(self) -> None:
+        message = format_emergency_risk_message(
+            result={
+                "event_type": "ADL",
+                "trigger_leg_id": "aster-short",
+                "trigger_venue": "aster",
+                "trigger_symbol": "LAB",
+                "closed_leg_ids": ["mexc-spot"],
+                "failed_leg_ids": [],
+                "manual_leg_ids": ["var-long"],
+            },
+            mode="LIVE",
+        )
+
+        self.assertIn("event=ADL", message)
+        self.assertIn("manual=['var-long']", message)
+        self.assertIn("Variational 需要手動平倉", message)
 
     async def test_missing_closer_marks_leg_close_failed(self) -> None:
         registry = PositionRegistry(
@@ -1054,6 +1128,7 @@ class EmergencyCloserAdapterTests(unittest.IsolatedAsyncioTestCase):
                 self.account_address = "0x" + "2" * 40
                 self.slippage_bps = 50.0
                 self.default_leverage = 1
+                self.skip_margin_setup = False
                 self._universe = ["ETH"]
                 self._isolated_asset_indices = set()
 

@@ -10,6 +10,7 @@ from hydra_basis.adapters.base import fetch_json
 from hydra_basis.adapters.hyperliquid import fetch_hyperliquid_universe
 from hydra_basis.adapters.lighter import fetch_lighter_market_map
 from hydra_basis.adapters.mexc import mexc_contract_symbol
+from hydra_basis.adapters.tradexyz import fetch_tradexyz_universe
 from hydra_basis.adapters.variational import VARIATIONAL_BASE_URL
 from hydra_basis.symbol_mapping import canonicalize_symbol
 
@@ -32,6 +33,8 @@ async def fetch_orderbook_snapshot(
         return await fetch_lighter_orderbook(session, symbol)
     if normalized == "variational":
         return await fetch_variational_quote(session, canonicalize_symbol(symbol, venue="variational"), clip_usd=clip_usd)
+    if normalized == "trade_xyz":
+        return await fetch_tradexyz_orderbook(session, symbol)
     raise RuntimeError(f"unsupported preview venue={venue}")
 
 
@@ -67,6 +70,24 @@ async def fetch_hyperliquid_orderbook(session: aiohttp.ClientSession, symbol: st
     asks = levels[1] if len(levels) > 1 else []
     if not bids or not asks:
         raise RuntimeError(f"missing hyperliquid orderbook for {symbol}")
+    return {
+        "bid": float(bids[0]["px"]),
+        "ask": float(asks[0]["px"]),
+        "ts_ms": int(data.get("time") or 0),
+    }
+
+
+async def fetch_tradexyz_orderbook(session: aiohttp.ClientSession, symbol: str) -> dict[str, float | int]:
+    universe = await fetch_tradexyz_universe(session)
+    if symbol.upper() not in universe:
+        raise RuntimeError(f"symbol not found on trade_xyz: {symbol}")
+    payload = {"type": "l2Book", "coin": symbol.upper()}
+    data = await fetch_json(session, "POST", "https://api.hyperliquid.xyz/info", json=payload)
+    levels = data.get("levels") or []
+    bids = levels[0] if len(levels) > 0 else []
+    asks = levels[1] if len(levels) > 1 else []
+    if not bids or not asks:
+        raise RuntimeError(f"missing trade_xyz orderbook for {symbol}")
     return {
         "bid": float(bids[0]["px"]),
         "ask": float(asks[0]["px"]),

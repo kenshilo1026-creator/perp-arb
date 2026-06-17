@@ -37,6 +37,9 @@ from hydra_basis.adapters.mexc import mexc_contract_symbol
 from hydra_basis.adapters.mexc import fetch_mexc_funding
 from hydra_basis.adapters.mexc import fetch_mexc_funding_since
 from hydra_basis.adapters.mexc import extract_mexc_history_rows
+from hydra_basis.adapters.tradexyz import build_tradexyz_funding_history_payload
+from hydra_basis.adapters.tradexyz import list_symbols as list_tradexyz_symbols
+from hydra_basis.adapters.tradexyz import fetch_tradexyz_funding_since
 from hydra_basis.adapters.variational import fetch_variational_funding, list_symbols as list_variational_symbols
 from hydra_basis.adapters.variational import (
     parse_stats_listings,
@@ -651,6 +654,53 @@ class HyperliquidAdapterTests(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertEqual(len(points), 1)
+        self.assertEqual(points[0].interval_hours, 1.0)
+
+
+class TradeXyzAdapterTests(unittest.IsolatedAsyncioTestCase):
+    async def test_list_symbols_uses_xyz_dex_metadata(self) -> None:
+        payload = {
+            "universe": [
+                {"name": "xyz:NVDA"},
+                {"name": "xyz:AAPL"},
+                {"name": "xyz:DELISTED", "isDelisted": True},
+            ]
+        }
+        with patch("hydra_basis.adapters.tradexyz._post_hyperliquid_info", new=AsyncMock(return_value=payload)) as mocked:
+            symbols = await list_tradexyz_symbols(session=object())
+
+        self.assertEqual(symbols, {"XYZ:NVDA", "XYZ:AAPL"})
+        self.assertEqual(mocked.await_args.args[1], {"type": "meta", "dex": "xyz"})
+
+    def test_build_funding_history_payload_uses_xyz_symbol(self) -> None:
+        payload = build_tradexyz_funding_history_payload("XYZ:NVDA", start_time_ms=123456789)
+
+        self.assertEqual(payload["type"], "fundingHistory")
+        self.assertEqual(payload["coin"], "XYZ:NVDA")
+        self.assertEqual(payload["startTime"], 123456789)
+
+    async def test_fetch_tradexyz_funding_since_builds_points(self) -> None:
+        payload = [
+            {"time": 1_717_000_000_000, "fundingRate": "0.0001"},
+            {"time": 1_717_003_600_000, "fundingRate": "0.0002"},
+            {"time": 1_717_007_200_000, "fundingRate": "0.0003"},
+        ]
+
+        with patch("hydra_basis.adapters.tradexyz._post_hyperliquid_info", new=AsyncMock(return_value=payload)) as mocked:
+            points = await fetch_tradexyz_funding_since(
+                session=object(),
+                symbol="XYZ:NVDA",
+                start_time_ms=1_717_000_000_000,
+            )
+
+        self.assertEqual(len(points), 3)
+        self.assertTrue(all(point.venue == "trade_xyz" for point in points))
+        self.assertTrue(all(point.symbol == "XYZ:NVDA" for point in points))
+        self.assertEqual(mocked.await_args.args[1], {
+            "type": "fundingHistory",
+            "coin": "XYZ:NVDA",
+            "startTime": 1_717_000_000_000,
+        })
         self.assertEqual(points[0].interval_hours, 1.0)
 
 

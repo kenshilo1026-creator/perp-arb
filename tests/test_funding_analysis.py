@@ -72,6 +72,7 @@ from hydra_basis.backfill import (
     capture_backfill_spread_snapshot_with_error,
 )
 from hydra_basis.runtime import configure_windows_event_loop_policy
+from hydra_basis.execution_engine.market_data import fetch_tradexyz_orderbook
 from hydra_basis.symbol_mapping import canonicalize_symbol, load_symbol_mappings
 from hydra_basis.universe import build_symbol_venue_index, select_shared_symbols
 from hydra_basis.universe import symbols_requiring_complete_history
@@ -703,6 +704,38 @@ class TradeXyzAdapterTests(unittest.IsolatedAsyncioTestCase):
         })
         self.assertEqual(points[0].interval_hours, 1.0)
 
+    async def test_null_l2_book_is_reported_as_missing_orderbook(self) -> None:
+        with patch(
+            "hydra_basis.execution_engine.market_data.fetch_tradexyz_universe",
+            new=AsyncMock(return_value={"XYZ:TSLA"}),
+        ), patch(
+            "hydra_basis.execution_engine.market_data.fetch_json",
+            new=AsyncMock(return_value=None),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "missing trade_xyz orderbook for XYZ:TSLA"):
+                await fetch_tradexyz_orderbook(object(), "XYZ:TSLA")
+
+    async def test_l2_book_uses_lowercase_dex_prefix(self) -> None:
+        fetch = AsyncMock(return_value={
+            "coin": "xyz:TSLA",
+            "time": 123,
+            "levels": [
+                [{"px": "398.38", "sz": "1", "n": 1}],
+                [{"px": "398.39", "sz": "1", "n": 1}],
+            ],
+        })
+        with patch(
+            "hydra_basis.execution_engine.market_data.fetch_tradexyz_universe",
+            new=AsyncMock(return_value={"XYZ:TSLA"}),
+        ), patch(
+            "hydra_basis.execution_engine.market_data.fetch_json",
+            new=fetch,
+        ):
+            orderbook = await fetch_tradexyz_orderbook(object(), "XYZ:TSLA")
+
+        self.assertEqual(orderbook, {"bid": 398.38, "ask": 398.39, "ts_ms": 123})
+        self.assertEqual(fetch.await_args.kwargs["json"]["coin"], "xyz:TSLA")
+
 
 class AsterAdapterTests(unittest.IsolatedAsyncioTestCase):
     async def test_list_symbols_uses_funding_info_and_normalizes_suffixes(self) -> None:
@@ -1120,6 +1153,27 @@ class BackfillSpreadSnapshotTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertFalse(stored)
         self.assertEqual(spreads, {("lighter", "BOT"): {"status": "no_orderbook"}})
+
+    async def test_missing_orderbook_is_not_returned_as_alertable_error(self) -> None:
+        spreads: dict[tuple[str, str], dict[str, float | int]] = {}
+
+        with patch(
+            "hydra_basis.backfill.fetch_orderbook_snapshot",
+            new=AsyncMock(side_effect=RuntimeError("missing trade_xyz orderbook for XYZ:TSLA")),
+        ):
+            result = await capture_backfill_spread_snapshot_with_error(
+                session=object(),
+                spreads=spreads,
+                venue="trade_xyz",
+                symbol="XYZ:TSLA",
+                clip_usd=1000.0,
+                force_refresh=True,
+            )
+
+        self.assertFalse(result["stored"])
+        self.assertIsNone(result["error"])
+        self.assertEqual(result["error_type"], "no_orderbook")
+        self.assertEqual(spreads[("trade_xyz", "XYZ:TSLA")], {"status": "no_orderbook"})
 
     async def test_rate_limited_spread_capture_does_not_raise_or_overwrite_existing_spread(self) -> None:
         spreads: dict[tuple[str, str], dict[str, float | int]] = {

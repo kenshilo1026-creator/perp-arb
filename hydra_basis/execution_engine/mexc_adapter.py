@@ -88,6 +88,20 @@ class MexcExecutionAdapter:
                     raise RuntimeError(f"mexc order {resp.status}: {data}")
                 return data
 
+    async def _post_cancel(self, order_ids: list[int]) -> dict:
+        body_str = json.dumps(order_ids, separators=(",", ":"))
+        headers = self._signed_headers(body_str)
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                f"{self.BASE_URL}/api/v1/private/order/cancel",
+                data=body_str,
+                headers=headers,
+            ) as resp:
+                data = await resp.json()
+                if resp.status != 200 or not data.get("success"):
+                    raise RuntimeError(f"mexc cancel order {resp.status}: {data}")
+                return data
+
     async def _get_order_status(self, order_id: object) -> dict:
         async with aiohttp.ClientSession() as session:
             async with session.get(
@@ -181,6 +195,29 @@ class MexcExecutionAdapter:
             timeout_message="mexc limit order fill timeout",
             return_on_partial_fill=allow_partial_fill,
         )
+
+    async def cancel_order(
+        self,
+        *,
+        order_result: dict,
+        symbol: str,
+        side: str,
+        amount: str,
+    ) -> dict:
+        order_id = order_result.get("order_id") or order_result.get("orderId")
+        if order_id is None:
+            raise RuntimeError("mexc cancel_order requires order_id")
+        normalized_order_id = int(order_id)
+        data = await self._post_cancel([normalized_order_id])
+        results = data.get("data", [])
+        if isinstance(results, list) and results:
+            error_code = int(results[0].get("errorCode", 0) or 0)
+            if error_code != 0:
+                raise RuntimeError(
+                    "mexc cancel_order failed: "
+                    f"code={error_code} message={results[0].get('errorMsg')}"
+                )
+        return {"ok": True, "order_id": normalized_order_id, "raw": data}
 
     async def place_market_order(
         self, *, symbol: str, side: str, amount: str, clip_usd: float

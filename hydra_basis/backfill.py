@@ -130,6 +130,15 @@ async def capture_backfill_spread_snapshot_with_error(
         )
     except Exception as exc:
         message = _safe_error_text(exc)
+        if "missing " in message.lower() and " orderbook for " in message.lower():
+            spreads[(venue, symbol)] = {"status": NO_ORDERBOOK_SENTINEL}
+            return {
+                "stored": False,
+                "venue": venue,
+                "symbol": symbol,
+                "error": None,
+                "error_type": "no_orderbook",
+            }
         if spread_error_is_transient(exc):
             print(f"backfill spread error transient {(venue, symbol)}: {message}")
             return {

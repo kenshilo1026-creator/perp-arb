@@ -81,8 +81,13 @@ async def fetch_tradexyz_orderbook(session: aiohttp.ClientSession, symbol: str) 
     universe = await fetch_tradexyz_universe(session)
     if symbol.upper() not in universe:
         raise RuntimeError(f"symbol not found on trade_xyz: {symbol}")
-    payload = {"type": "l2Book", "coin": symbol.upper()}
+    normalized_symbol = symbol.strip().upper()
+    dex, separator, ticker = normalized_symbol.partition(":")
+    api_symbol = f"{dex.lower()}:{ticker}" if separator else normalized_symbol
+    payload = {"type": "l2Book", "coin": api_symbol}
     data = await fetch_json(session, "POST", "https://api.hyperliquid.xyz/info", json=payload)
+    if not isinstance(data, dict):
+        raise RuntimeError(f"missing trade_xyz orderbook for {symbol}")
     levels = data.get("levels") or []
     bids = levels[0] if len(levels) > 0 else []
     asks = levels[1] if len(levels) > 1 else []

@@ -292,6 +292,30 @@ class HyperliquidExecutionAdapter:
             return_on_partial_fill=allow_partial_fill,
         )
 
+    async def cancel_order(
+        self,
+        *,
+        order_result: dict,
+        symbol: str,
+        side: str,
+        amount: str,
+    ) -> dict:
+        order_id = order_result.get("order_id") or order_result.get("orderId") or order_result.get("oid")
+        if order_id is None:
+            raise RuntimeError("hyperliquid cancel_order requires order_id")
+        asset_index = await self._get_asset_index(symbol)
+        action = {
+            "type": "cancel",
+            "cancels": [{"a": asset_index, "o": int(order_id)}],
+        }
+        data = await self._post_order(action)
+        statuses = data.get("response", {}).get("data", {}).get("statuses", [])
+        if statuses:
+            status = statuses[0]
+            if isinstance(status, dict) and status.get("error"):
+                raise RuntimeError(f"hyperliquid cancel_order failed: {status['error']}")
+        return {"ok": True, "order_id": order_id, "raw": data}
+
     async def place_market_order(
         self, *, symbol: str, side: str, amount: str, clip_usd: float
     ) -> dict:

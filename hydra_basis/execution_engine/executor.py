@@ -265,6 +265,41 @@ async def cancel_maker_order(
     return result
 
 
+async def cancel_maker_order_with_retries(
+    maker_adapter,
+    *,
+    maker_result: dict[str, object],
+    symbol: str,
+    side: str,
+    amount: str,
+    max_attempts: int = 3,
+    retry_delay_seconds: float = 1.0,
+) -> dict[str, object]:
+    last_error: BaseException | None = None
+    for attempt in range(1, max_attempts + 1):
+        try:
+            return await cancel_maker_order(
+                maker_adapter,
+                maker_result=maker_result,
+                symbol=symbol,
+                side=side,
+                amount=amount,
+            )
+        except BaseException as exc:
+            last_error = exc
+            if attempt >= max_attempts:
+                break
+            print(
+                "[maker-cleanup] cancel failed; retrying "
+                f"attempt={attempt}/{max_attempts} symbol={symbol} side={side} error={exc}",
+                flush=True,
+            )
+            await asyncio.sleep(retry_delay_seconds)
+    raise RuntimeError(
+        f"maker cancel failed after {max_attempts} attempts: {last_error}"
+    ) from last_error
+
+
 async def execute_single_clip(
     *,
     symbol: str,
@@ -412,6 +447,51 @@ async def execute_single_clip_with_sides(
     maker_attempts: list[dict[str, object]] = []
     maker_attempt = 0
     reuse_existing_maker_result = False
+    active_maker_orders: list[dict[str, object]] = []
+
+    def register_active_maker(order_result: dict[str, object]) -> None:
+        if not any(item is order_result for item in active_maker_orders):
+            active_maker_orders.append(order_result)
+
+    def mark_maker_closed(order_result: dict[str, object] | None) -> None:
+        if order_result is None:
+            return
+        active_maker_orders[:] = [
+            item for item in active_maker_orders if item is not order_result
+        ]
+
+    async def cleanup_active_makers() -> list[str]:
+        errors: list[str] = []
+        for active_order in reversed(active_maker_orders.copy()):
+            try:
+                await cancel_maker_order_with_retries(
+                    maker_adapter,
+                    maker_result=active_order,
+                    symbol=symbol,
+                    side=maker_side,
+                    amount=str(quantity),
+                )
+                mark_maker_closed(active_order)
+                print(
+                    "[maker-cleanup] cancelled active maker before exit "
+                    f"venue={maker_venue} symbol={symbol} side={maker_side}",
+                    flush=True,
+                )
+            except BaseException as cleanup_exc:
+                errors.append(
+                    f"{maker_venue}:{symbol}:{maker_side}: {cleanup_exc}"
+                )
+        return errors
+
+    async def raise_after_maker_cleanup(exc: BaseException) -> None:
+        cleanup_errors = await cleanup_active_makers()
+        if cleanup_errors and isinstance(exc, Exception):
+            raise RuntimeError(
+                f"{exc}; unresolved maker orders after cleanup: "
+                + " | ".join(cleanup_errors)
+            ) from exc
+        raise exc
+
     while True:
         state_machine.to_placing_maker_leg()
         attempt_record: dict[str, object] = {"attempt": maker_attempt + 1}
@@ -421,11 +501,13 @@ async def execute_single_clip_with_sides(
                 attempt_record["maker_result"] = maker_result
                 attempt_record["reused_existing_order"] = True
             else:
+                maker_result = None
                 maker_result = await maker_adapter.place_limit_order(**maker_kwargs)
                 attempt_record["maker_result"] = maker_result
             attempt_record["maker_result"] = maker_result
             if not maker_result.get("ok", False):
                 raise RuntimeError(f"maker order failed on {maker_venue}")
+            register_active_maker(maker_result)
 
             if not require_maker_fill_confirmation:
                 maker_attempts.append(attempt_record)
@@ -442,12 +524,14 @@ async def execute_single_clip_with_sides(
             attempt_record["maker_fill_result"] = maker_fill_result
             maker_attempts.append(attempt_record)
             break
-        except Exception as exc:
+        except BaseException as exc:
             attempt_record["maker_fill_error"] = str(exc)
             maker_attempts.append(attempt_record)
+            if isinstance(exc, (asyncio.CancelledError, KeyboardInterrupt, SystemExit)):
+                await raise_after_maker_cleanup(exc)
             exhausted = max_maker_reprice_attempts >= 0 and maker_attempt >= max_maker_reprice_attempts
             if exhausted or not maker_fill_error_is_repriceable(exc):
-                raise
+                await raise_after_maker_cleanup(exc)
             placed_result = attempt_record.get("maker_result") or maker_result or {}
             fresh_price: str | None = None
             if maker_price_refresher is not None:
@@ -472,7 +556,7 @@ async def execute_single_clip_with_sides(
                     print(f"[reprice] failed to refresh maker price before cancel: {refresh_exc}", flush=True)
             print(f"[reprice] attempt {maker_attempt + 1} timed out — cancelling {maker_venue} {maker_side} {symbol}", flush=True)
             try:
-                cancel_result = await cancel_maker_order(
+                cancel_result = await cancel_maker_order_with_retries(
                     maker_adapter,
                     maker_result=placed_result,
                     symbol=symbol,
@@ -480,10 +564,16 @@ async def execute_single_clip_with_sides(
                     amount=str(quantity),
                 )
                 attempt_record["cancel_result"] = cancel_result
+                if isinstance(placed_result, dict):
+                    mark_maker_closed(placed_result)
                 print(f"[reprice] cancel ok — placing new order (attempt {maker_attempt + 2})", flush=True)
                 await asyncio.sleep(1.0)
             except Exception as cancel_exc:
-                raise RuntimeError(f"[reprice] cancel failed — stopping to avoid duplicate orders: {cancel_exc}") from cancel_exc
+                await raise_after_maker_cleanup(
+                    RuntimeError(
+                        f"[reprice] cancel failed — stopping to avoid duplicate orders: {cancel_exc}"
+                    )
+                )
             if fresh_price is not None:
                 maker_kwargs["price"] = fresh_price
                 print(f"[reprice] repriced to {fresh_price} (attempt {maker_attempt + 2})", flush=True)
@@ -499,7 +589,9 @@ async def execute_single_clip_with_sides(
         maker_fill_result=maker_fill_result,
     )
     if executed_quantity <= 0:
-        raise RuntimeError("maker execution produced zero filled quantity")
+        await raise_after_maker_cleanup(
+            RuntimeError("maker execution produced zero filled quantity")
+        )
 
     min_hedge_notional = Decimal(str(min_hedge_notional_usd))
     while executed_quantity < requested_quantity and min_hedge_notional > 0:
@@ -517,14 +609,17 @@ async def execute_single_clip_with_sides(
             f"min={format_decimal(min_hedge_notional)}",
             flush=True,
         )
-        maker_fill_result = await wait_for_maker_fill(
-            maker_adapter,
-            maker_result=maker_result,
-            symbol=symbol,
-            side=maker_side,
-            amount=str(quantity),
-            timeout_seconds=maker_fill_timeout_seconds,
-        )
+        try:
+            maker_fill_result = await wait_for_maker_fill(
+                maker_adapter,
+                maker_result=maker_result,
+                symbol=symbol,
+                side=maker_side,
+                amount=str(quantity),
+                timeout_seconds=maker_fill_timeout_seconds,
+            )
+        except BaseException as exc:
+            await raise_after_maker_cleanup(exc)
         updated_executed_quantity = resolve_executed_quantity(
             requested_quantity=requested_quantity,
             maker_result=maker_result,
@@ -544,13 +639,17 @@ async def execute_single_clip_with_sides(
 
     partial_fill = executed_quantity < requested_quantity
     if partial_fill:
-        maker_cancel_result = await cancel_maker_order(
-            maker_adapter,
-            maker_result=maker_result,
-            symbol=symbol,
-            side=maker_side,
-            amount=str(quantity),
-        )
+        try:
+            maker_cancel_result = await cancel_maker_order_with_retries(
+                maker_adapter,
+                maker_result=maker_result,
+                symbol=symbol,
+                side=maker_side,
+                amount=str(quantity),
+            )
+            mark_maker_closed(maker_result)
+        except BaseException as exc:
+            await raise_after_maker_cleanup(exc)
         updated_executed_quantity = resolve_executed_quantity(
             requested_quantity=requested_quantity,
             maker_result=maker_result,
@@ -559,6 +658,8 @@ async def execute_single_clip_with_sides(
         if updated_executed_quantity > executed_quantity:
             executed_quantity = updated_executed_quantity
             partial_fill = executed_quantity < requested_quantity
+    elif require_maker_fill_confirmation or order_result_looks_filled(maker_result):
+        mark_maker_closed(maker_result)
 
     state_machine.to_hedging_taker_leg()
     last_error: Exception | None = None
@@ -605,10 +706,15 @@ async def execute_single_clip_with_sides(
             last_error = exc
             if attempt >= max_hedge_retries:
                 state_machine.to_emergency_exit()
-                raise RuntimeError(f"hedge failed on {taker_venue}: {exc}") from exc
+                await raise_after_maker_cleanup(
+                    RuntimeError(f"hedge failed on {taker_venue}: {exc}")
+                )
             state_machine.to_retrying_hedge()
             await asyncio.sleep(0)
             state_machine.to_hedging_taker_leg()
 
     state_machine.to_emergency_exit()
-    raise RuntimeError(f"hedge failed on {taker_venue}: {last_error}")
+    await raise_after_maker_cleanup(
+        RuntimeError(f"hedge failed on {taker_venue}: {last_error}")
+    )
+    raise RuntimeError("unreachable")

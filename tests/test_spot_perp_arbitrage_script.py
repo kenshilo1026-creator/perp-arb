@@ -1,3 +1,4 @@
+import asyncio
 import unittest
 from decimal import Decimal
 from pathlib import Path
@@ -18,6 +19,8 @@ from scripts.run_spot_perp_arbitrage import (
     spot_perp_sides,
 )
 from hydra_basis.execution_engine.executor import execute_single_clip, extract_average_price
+from hydra_basis.execution_engine.hyperliquid_adapter import HyperliquidExecutionAdapter
+from hydra_basis.execution_engine.mexc_adapter import MexcExecutionAdapter
 from hydra_basis.execution_engine.mexc_spot_adapter import MexcSpotExecutionAdapter
 from hydra_basis.execution_engine.variational_browser import VariationalBrowserExecutionAdapter
 from hydra_basis.risk_management.registry import PositionRegistry
@@ -223,6 +226,61 @@ class MexcSpotAdapterForSpotPerpTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(get_calls, [{"symbol": "ETHUSDT", "orderId": "spot-1"}])
         self.assertEqual(result["raw"]["status"], "FILLED")
         self.assertEqual(result["raw"]["executedQty"], "10")
+
+
+class MissingMakerCancelAdapterTests(unittest.IsolatedAsyncioTestCase):
+    async def test_hyperliquid_cancel_order_posts_cancel_action_for_order_id(self) -> None:
+        actions: list[dict] = []
+
+        class Adapter(HyperliquidExecutionAdapter):
+            def __init__(self) -> None:
+                pass
+
+            async def _get_asset_index(self, symbol: str) -> int:
+                self.assert_symbol = symbol
+                return 7
+
+            async def _post_order(self, action: dict) -> dict:
+                actions.append(action)
+                return {"status": "ok", "response": {"type": "cancel", "data": {"statuses": ["success"]}}}
+
+        result = await Adapter().cancel_order(
+            order_result={"order_id": 12345},
+            symbol="BTC",
+            side="SELL",
+            amount="0.01",
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(
+            actions,
+            [{"type": "cancel", "cancels": [{"a": 7, "o": 12345}]}],
+        )
+
+    async def test_mexc_perp_cancel_order_posts_order_id_list(self) -> None:
+        payloads: list[list[int]] = []
+
+        class Adapter(MexcExecutionAdapter):
+            def __init__(self) -> None:
+                pass
+
+            async def _post_cancel(self, order_ids: list[int]) -> dict:
+                payloads.append(order_ids)
+                return {
+                    "success": True,
+                    "code": 0,
+                    "data": [{"orderId": order_ids[0], "errorCode": 0, "errorMsg": "success"}],
+                }
+
+        result = await Adapter().cancel_order(
+            order_result={"order_id": 98765},
+            symbol="BTC",
+            side="SELL",
+            amount="1",
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(payloads, [[98765]])
 
 
 class SpotPerpArbitrageRecordingTests(unittest.IsolatedAsyncioTestCase):
@@ -630,6 +688,192 @@ class SpotPerpArbitrageRecordingTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(prices, ["10.1", "11.1"])
 
+    async def test_maker_timeout_retries_transient_cancel_before_replacing_order(self) -> None:
+        events: list[str] = []
+
+        class MakerAdapter:
+            def __init__(self) -> None:
+                self.order_id = 0
+                self.cancel_attempts = 0
+
+            async def place_limit_order(self, **kwargs):
+                self.order_id += 1
+                events.append(f"place_{self.order_id}")
+                return {"ok": True, "order_id": f"maker-{self.order_id}"}
+
+            async def wait_for_order_fill(self, **kwargs):
+                events.append(f"wait_{kwargs['order_result']['order_id']}")
+                if kwargs["order_result"]["order_id"] == "maker-1":
+                    raise RuntimeError("maker fill timeout")
+                return {"ok": True, "filled": True, "status": "FILLED"}
+
+            async def cancel_order(self, **kwargs):
+                self.cancel_attempts += 1
+                events.append(f"cancel_{self.cancel_attempts}")
+                if self.cancel_attempts < 3:
+                    raise RuntimeError("Frame with ID 0 was removed.")
+                return {"ok": True, "order_id": kwargs["order_result"]["order_id"]}
+
+        class TakerAdapter:
+            async def place_market_order(self, **kwargs):
+                events.append("place_market")
+                return {"ok": True}
+
+        async def refreshed_price() -> str:
+            return "10.2"
+
+        with patch("asyncio.sleep", new=AsyncMock()):
+            result = await execute_single_clip(
+                symbol="COPPER",
+                clip_usd=100.0,
+                quantity=Decimal("10"),
+                maker_venue="variational",
+                taker_venue="aster",
+                short_venue="variational",
+                long_venue="aster",
+                maker_adapter=MakerAdapter(),
+                taker_adapter=TakerAdapter(),
+                max_hedge_retries=0,
+                state_machine=SimpleNamespace(
+                    to_preview_ready=lambda: None,
+                    to_awaiting_confirm=lambda: None,
+                    to_placing_maker_leg=lambda: None,
+                    to_hedging_taker_leg=lambda: None,
+                    to_completed=lambda: None,
+                    to_retrying_hedge=lambda: None,
+                    to_emergency_exit=lambda: None,
+                ),
+                maker_price="10.1",
+                require_maker_fill_confirmation=True,
+                max_maker_reprice_attempts=1,
+                maker_price_refresher=refreshed_price,
+            )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(
+            events,
+            [
+                "place_1",
+                "wait_maker-1",
+                "cancel_1",
+                "cancel_2",
+                "cancel_3",
+                "place_2",
+                "wait_maker-2",
+                "place_market",
+            ],
+        )
+
+    async def test_variational_place_call_timeout_cancels_before_replacing_order(self) -> None:
+        events: list[str] = []
+
+        class MakerAdapter:
+            def __init__(self) -> None:
+                self.place_attempts = 0
+
+            async def place_limit_order(self, **kwargs):
+                self.place_attempts += 1
+                events.append(f"place_{self.place_attempts}")
+                if self.place_attempts == 1:
+                    raise RuntimeError("variational limit order fill timeout after 60s")
+                return {"ok": True, "filled": True, "status": "FILLED", "order_id": "maker-2"}
+
+            async def cancel_order(self, **kwargs):
+                events.append("cancel")
+                self.assert_empty_order_result = kwargs["order_result"]
+                return {"ok": True}
+
+        class TakerAdapter:
+            async def place_market_order(self, **kwargs):
+                events.append("place_market")
+                return {"ok": True}
+
+        adapter = MakerAdapter()
+        with patch("asyncio.sleep", new=AsyncMock()):
+            result = await execute_single_clip(
+                symbol="COPPER",
+                clip_usd=100.0,
+                quantity=Decimal("10"),
+                maker_venue="variational",
+                taker_venue="aster",
+                short_venue="variational",
+                long_venue="aster",
+                maker_adapter=adapter,
+                taker_adapter=TakerAdapter(),
+                max_hedge_retries=0,
+                state_machine=SimpleNamespace(
+                    to_preview_ready=lambda: None,
+                    to_awaiting_confirm=lambda: None,
+                    to_placing_maker_leg=lambda: None,
+                    to_hedging_taker_leg=lambda: None,
+                    to_completed=lambda: None,
+                    to_retrying_hedge=lambda: None,
+                    to_emergency_exit=lambda: None,
+                ),
+                maker_price="10.1",
+                require_maker_fill_confirmation=True,
+                max_maker_reprice_attempts=1,
+            )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(events, ["place_1", "cancel", "place_2", "place_market"])
+        self.assertEqual(adapter.assert_empty_order_result, {})
+
+    async def test_second_reprice_timeout_does_not_reuse_cancelled_order_id(self) -> None:
+        cancelled_results: list[dict] = []
+
+        class MakerAdapter:
+            def __init__(self) -> None:
+                self.place_attempts = 0
+
+            async def place_limit_order(self, **kwargs):
+                self.place_attempts += 1
+                if self.place_attempts == 1:
+                    return {"ok": True, "order_id": "maker-1"}
+                if self.place_attempts == 2:
+                    raise RuntimeError("variational limit order fill timeout after 60s")
+                return {"ok": True, "filled": True, "status": "FILLED", "order_id": "maker-3"}
+
+            async def wait_for_order_fill(self, **kwargs):
+                raise RuntimeError("maker fill timeout")
+
+            async def cancel_order(self, **kwargs):
+                cancelled_results.append(kwargs["order_result"])
+                return {"ok": True}
+
+        class TakerAdapter:
+            async def place_market_order(self, **kwargs):
+                return {"ok": True}
+
+        with patch("asyncio.sleep", new=AsyncMock()):
+            result = await execute_single_clip(
+                symbol="COPPER",
+                clip_usd=100.0,
+                quantity=Decimal("10"),
+                maker_venue="variational",
+                taker_venue="aster",
+                short_venue="variational",
+                long_venue="aster",
+                maker_adapter=MakerAdapter(),
+                taker_adapter=TakerAdapter(),
+                max_hedge_retries=0,
+                state_machine=SimpleNamespace(
+                    to_preview_ready=lambda: None,
+                    to_awaiting_confirm=lambda: None,
+                    to_placing_maker_leg=lambda: None,
+                    to_hedging_taker_leg=lambda: None,
+                    to_completed=lambda: None,
+                    to_retrying_hedge=lambda: None,
+                    to_emergency_exit=lambda: None,
+                ),
+                maker_price="10.1",
+                require_maker_fill_confirmation=True,
+                max_maker_reprice_attempts=2,
+            )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(cancelled_results, [{"ok": True, "order_id": "maker-1"}, {}])
+
     async def test_maker_timeout_keeps_existing_order_when_refreshed_price_barely_moves(self) -> None:
         events: list[str] = []
         prices: list[str | None] = []
@@ -879,6 +1123,202 @@ class SpotPerpArbitrageRecordingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(events, ["place_limit", "wait_fill", "wait_fill", "wait_fill", "cancel", "place_market"])
         self.assertEqual(market_amounts, ["0.6"])
         self.assertEqual(result["executed_quantity"], "0.6")
+
+    async def test_fill_error_cancels_active_maker_before_exit(self) -> None:
+        calls: list[str] = []
+
+        class MakerAdapter:
+            async def place_limit_order(self, **kwargs):
+                calls.append("maker_submit")
+                return {"ok": True, "order_id": "maker-1", "raw": {"status": "NEW"}}
+
+            async def wait_for_order_fill(self, **kwargs):
+                calls.append("maker_wait")
+                raise RuntimeError("maker fill websocket disconnected")
+
+            async def cancel_order(self, **kwargs):
+                calls.append("maker_cancel")
+                return {"ok": True, "order_id": "maker-1"}
+
+        class TakerAdapter:
+            async def place_market_order(self, **kwargs):
+                calls.append("taker_market")
+                return {"ok": True}
+
+        with self.assertRaisesRegex(RuntimeError, "websocket disconnected"):
+            await execute_single_clip(
+                symbol="BTC",
+                clip_usd=1000.0,
+                quantity=Decimal("10"),
+                maker_venue="aster",
+                taker_venue="lighter",
+                short_venue="aster",
+                long_venue="lighter",
+                maker_adapter=MakerAdapter(),
+                taker_adapter=TakerAdapter(),
+                max_hedge_retries=1,
+                state_machine=SimpleNamespace(
+                    to_preview_ready=lambda: None,
+                    to_awaiting_confirm=lambda: None,
+                    to_placing_maker_leg=lambda: None,
+                    to_hedging_taker_leg=lambda: None,
+                    to_completed=lambda: None,
+                    to_retrying_hedge=lambda: None,
+                    to_emergency_exit=lambda: None,
+                ),
+                require_maker_fill_confirmation=True,
+                maker_fill_timeout_seconds=5.0,
+                max_maker_reprice_attempts=1,
+            )
+
+        self.assertEqual(calls, ["maker_submit", "maker_wait", "maker_cancel"])
+
+    async def test_error_cleanup_retries_cancel_three_times(self) -> None:
+        calls: list[str] = []
+
+        class MakerAdapter:
+            async def place_limit_order(self, **kwargs):
+                calls.append("maker_submit")
+                return {"ok": True, "order_id": "maker-1", "raw": {"status": "NEW"}}
+
+            async def wait_for_order_fill(self, **kwargs):
+                calls.append("maker_wait")
+                raise RuntimeError("maker fill websocket disconnected")
+
+            async def cancel_order(self, **kwargs):
+                calls.append("maker_cancel")
+                if calls.count("maker_cancel") < 3:
+                    raise RuntimeError("temporary cancel failure")
+                return {"ok": True, "order_id": "maker-1"}
+
+        class TakerAdapter:
+            async def place_market_order(self, **kwargs):
+                calls.append("taker_market")
+                return {"ok": True}
+
+        with patch("asyncio.sleep", new=AsyncMock()):
+            with self.assertRaisesRegex(RuntimeError, "websocket disconnected"):
+                await execute_single_clip(
+                    symbol="BTC",
+                    clip_usd=1000.0,
+                    quantity=Decimal("10"),
+                    maker_venue="hyperliquid",
+                    taker_venue="lighter",
+                    short_venue="hyperliquid",
+                    long_venue="lighter",
+                    maker_adapter=MakerAdapter(),
+                    taker_adapter=TakerAdapter(),
+                    max_hedge_retries=1,
+                    state_machine=SimpleNamespace(
+                        to_preview_ready=lambda: None,
+                        to_awaiting_confirm=lambda: None,
+                        to_placing_maker_leg=lambda: None,
+                        to_hedging_taker_leg=lambda: None,
+                        to_completed=lambda: None,
+                        to_retrying_hedge=lambda: None,
+                        to_emergency_exit=lambda: None,
+                    ),
+                    require_maker_fill_confirmation=True,
+                    maker_fill_timeout_seconds=5.0,
+                    max_maker_reprice_attempts=1,
+                )
+
+        self.assertEqual(
+            calls,
+            ["maker_submit", "maker_wait", "maker_cancel", "maker_cancel", "maker_cancel"],
+        )
+
+    async def test_task_cancellation_cleans_up_active_maker(self) -> None:
+        calls: list[str] = []
+
+        class MakerAdapter:
+            async def place_limit_order(self, **kwargs):
+                calls.append("maker_submit")
+                return {"ok": True, "order_id": "maker-1", "raw": {"status": "NEW"}}
+
+            async def wait_for_order_fill(self, **kwargs):
+                calls.append("maker_wait")
+                raise asyncio.CancelledError()
+
+            async def cancel_order(self, **kwargs):
+                calls.append("maker_cancel")
+                return {"ok": True, "order_id": "maker-1"}
+
+        class TakerAdapter:
+            async def place_market_order(self, **kwargs):
+                calls.append("taker_market")
+                return {"ok": True}
+
+        with self.assertRaises(asyncio.CancelledError):
+            await execute_single_clip(
+                symbol="BTC",
+                clip_usd=1000.0,
+                quantity=Decimal("10"),
+                maker_venue="mexc_spot",
+                taker_venue="aster",
+                short_venue="mexc_spot",
+                long_venue="aster",
+                maker_adapter=MakerAdapter(),
+                taker_adapter=TakerAdapter(),
+                max_hedge_retries=1,
+                state_machine=SimpleNamespace(
+                    to_preview_ready=lambda: None,
+                    to_awaiting_confirm=lambda: None,
+                    to_placing_maker_leg=lambda: None,
+                    to_hedging_taker_leg=lambda: None,
+                    to_completed=lambda: None,
+                    to_retrying_hedge=lambda: None,
+                    to_emergency_exit=lambda: None,
+                ),
+                require_maker_fill_confirmation=True,
+                maker_fill_timeout_seconds=5.0,
+                max_maker_reprice_attempts=1,
+            )
+
+        self.assertEqual(calls, ["maker_submit", "maker_wait", "maker_cancel"])
+
+    async def test_hedge_failure_cleans_up_unconfirmed_maker(self) -> None:
+        calls: list[str] = []
+
+        class MakerAdapter:
+            async def place_limit_order(self, **kwargs):
+                calls.append("maker_submit")
+                return {"ok": True, "order_id": "maker-1", "raw": {"status": "NEW"}}
+
+            async def cancel_order(self, **kwargs):
+                calls.append("maker_cancel")
+                return {"ok": True, "order_id": "maker-1"}
+
+        class TakerAdapter:
+            async def place_market_order(self, **kwargs):
+                calls.append("taker_market")
+                raise RuntimeError("taker unavailable")
+
+        with self.assertRaisesRegex(RuntimeError, "hedge failed"):
+            await execute_single_clip(
+                symbol="BTC",
+                clip_usd=1000.0,
+                quantity=Decimal("10"),
+                maker_venue="lighter",
+                taker_venue="aster",
+                short_venue="lighter",
+                long_venue="aster",
+                maker_adapter=MakerAdapter(),
+                taker_adapter=TakerAdapter(),
+                max_hedge_retries=0,
+                state_machine=SimpleNamespace(
+                    to_preview_ready=lambda: None,
+                    to_awaiting_confirm=lambda: None,
+                    to_placing_maker_leg=lambda: None,
+                    to_hedging_taker_leg=lambda: None,
+                    to_completed=lambda: None,
+                    to_retrying_hedge=lambda: None,
+                    to_emergency_exit=lambda: None,
+                ),
+                require_maker_fill_confirmation=False,
+            )
+
+        self.assertEqual(calls, ["maker_submit", "taker_market", "maker_cancel"])
 
     async def test_execution_fetches_fresh_maker_price_before_first_order(self) -> None:
         prices: list[str | None] = []

@@ -351,6 +351,7 @@ class VariationalCommandBroker:
             "orderId": payload.get("orderId"),
             "symbol": payload.get("symbol"),
             "side": payload.get("side"),
+            "amount": payload.get("amount"),
             "timestamp": utc_now(),
         })
         try:
@@ -517,6 +518,19 @@ class VariationalCommandBroker:
         pending["submitted"] = True
         pending["orderId"] = payload.get("orderId")
         pending["submittedResult"] = payload
+        await self._send(
+            pending["requester"],
+            {
+                "type": "ORDER_ACCEPTED",
+                "requestId": request_id,
+                "ok": True,
+                "orderId": pending.get("orderId"),
+                "details": {
+                    "submitted": payload,
+                },
+                "timestamp": utc_now(),
+            },
+        )
         early_fill = pending.get("earlyFill")
         if isinstance(early_fill, dict):
             self._pending_requests.pop(request_id, None)

@@ -687,18 +687,113 @@ function executeVariationalCancelOrder(command) {
     return /\bcancel\b/.test(t) && !/replace/i.test(t) && !/edit/i.test(t);
   }
 
-  function findCancelOrderButton(orderId, requestedSymbol, side) {
+  function normalizeAmountText(value) {
+    return String(value || "")
+      .trim()
+      .replace(/,/g, "");
+  }
+
+  function normalizeSideText(value) {
+    const text = String(value || "").trim().toLowerCase();
+    if (!text) {
+      return "";
+    }
+    if (["sell", "short", "ask"].includes(text)) {
+      return "sell";
+    }
+    if (["buy", "long", "bid"].includes(text)) {
+      return "buy";
+    }
+    return text;
+  }
+
+  function rowIncludesRequestedAmount(rowText, requestedAmount) {
+    if (!requestedAmount) {
+      return true;
+    }
+    const normalizedRequested = normalizeAmountText(requestedAmount);
+    if (!normalizedRequested) {
+      return true;
+    }
+    const normalizedRowText = normalizeAmountText(rowText);
+    return normalizedRowText.includes(normalizedRequested);
+  }
+
+  function collectOrderRows() {
+    const seen = new Set();
+    return Array.from(document.querySelectorAll('[data-testid="orders-table-row"], tr, [role="row"]'))
+      .filter(visible)
+      .filter((el) => {
+        if (seen.has(el)) {
+          return false;
+        }
+        seen.add(el);
+        return true;
+      });
+  }
+
+  function rowActionCandidates(row) {
+    return Array.from(row.querySelectorAll(clickableSelector))
+      .filter(visible)
+      .filter((el) => !el.disabled && el.getAttribute("aria-disabled") !== "true");
+  }
+
+  function rowTextMatches({
+    rowText,
+    normalizedSymbol,
+    normalizedSide,
+    normalizedAmount,
+    requireSide,
+    requireAmount,
+  }) {
+    const symbolMatches = normalizedSymbol && normalizeVariationalSymbol(rowText).includes(normalizedSymbol);
+    if (!symbolMatches) {
+      return false;
+    }
+    const rowTextLower = rowText.toLowerCase();
+    const sideMatches = !requireSide || !normalizedSide || rowTextLower.includes(normalizedSide);
+    const amountMatches = !requireAmount || rowIncludesRequestedAmount(rowText, normalizedAmount);
+    return symbolMatches && sideMatches && amountMatches;
+  }
+
+  function findClickableCancelInRow(row) {
+    const actions = rowActionCandidates(row);
+    const exact = actions.find((el) => {
+      const text = textOf(el);
+      return /cancel/i.test(text) || /cancel order/i.test(text);
+    });
+    if (exact) {
+      return exact;
+    }
+    const titled = actions.find((el) => {
+      const label = `${el.getAttribute("title") || ""} ${el.getAttribute("aria-label") || ""}`.toLowerCase();
+      return label.includes("cancel");
+    });
+    if (titled) {
+      return titled;
+    }
+    return actions.length === 1 ? actions[0] : null;
+  }
+
+  function findCancelOrderButton(orderId, requestedSymbol, side, amount) {
     const normalizedSymbol = normalizeVariationalSymbol(requestedSymbol);
-    const normalizedSide = String(side || "").trim().toLowerCase();
+    const normalizedSide = normalizeSideText(side);
+    const normalizedAmount = normalizeAmountText(amount);
+    const rows = collectOrderRows();
 
     function rowMatches(el) {
       const rowText = textOf(getOrderRow(el));
       if (orderId && rowText.includes(String(orderId))) {
         return true;
       }
-      const symbolMatches = normalizedSymbol && normalizeVariationalSymbol(rowText).includes(normalizedSymbol);
-      const sideMatches = !normalizedSide || rowText.toLowerCase().includes(normalizedSide);
-      return symbolMatches && sideMatches;
+      return rowTextMatches({
+        rowText,
+        normalizedSymbol,
+        normalizedSide,
+        normalizedAmount,
+        requireSide: true,
+        requireAmount: true
+      });
     }
 
     // Prefer exact title="Cancel Order" buttons first
@@ -722,7 +817,33 @@ function executeVariationalCancelOrder(command) {
     if (scoped.length >= 1) {
       return scoped[0];
     }
-    return candidates.length === 1 ? candidates[0] : null;
+
+    const passes = [
+      { requireSide: true, requireAmount: true },
+      { requireSide: true, requireAmount: false },
+      { requireSide: false, requireAmount: false }
+    ];
+    for (const pass of passes) {
+      const matchedRows = rows.filter((row) =>
+        rowTextMatches({
+          rowText: textOf(row),
+          normalizedSymbol,
+          normalizedSide,
+          normalizedAmount,
+          requireSide: pass.requireSide,
+          requireAmount: pass.requireAmount
+        })
+      );
+      if (matchedRows.length !== 1) {
+        continue;
+      }
+      const action = findClickableCancelInRow(matchedRows[0]);
+      if (action) {
+        return action;
+      }
+    }
+
+    return candidates.length === 1 && !normalizedSymbol ? candidates[0] : null;
   }
 
   function findCancelConfirmButton() {
@@ -743,6 +864,12 @@ function executeVariationalCancelOrder(command) {
     return {
       url: window.location.href,
       title: document.title,
+      rows: collectOrderRows()
+        .slice(0, 40)
+        .map((row) => ({
+          text: textOf(row).slice(0, 240),
+          actionCount: rowActionCandidates(row).length
+        })),
       buttons: Array.from(document.querySelectorAll(clickableSelector))
         .filter(visible)
         .slice(0, 120)
@@ -758,11 +885,18 @@ function executeVariationalCancelOrder(command) {
     const orderId = String(command.orderId || "").trim();
     const symbol = normalizeVariationalSymbol(command.symbol || command.market);
     const side = String(command.side || "").trim().toLowerCase();
+    const amount = String(command.amount || "").trim();
 
     ensureOpenOrdersTabVisible();
     await sleep(600);
 
-    const cancelButton = findCancelOrderButton(orderId, symbol, side);
+    let cancelButton = findCancelOrderButton(orderId, symbol, side, amount);
+    if (!cancelButton) {
+      await sleep(3000);
+      ensureOpenOrdersTabVisible();
+      await sleep(600);
+      cancelButton = findCancelOrderButton(orderId, symbol, side, amount);
+    }
     if (!cancelButton) {
       return {
         ok: false,
@@ -772,6 +906,7 @@ function executeVariationalCancelOrder(command) {
           orderId: orderId || null,
           symbol,
           side,
+          amount: amount || null,
           diagnostics: collectCancelDiagnostics()
         }
       };
@@ -793,6 +928,7 @@ function executeVariationalCancelOrder(command) {
         automationVersion,
         symbol,
         side,
+        amount: amount || null,
         clickedCancelText: textOf(cancelButton),
         clickedConfirmText: confirmButton ? textOf(confirmButton) : null
       }

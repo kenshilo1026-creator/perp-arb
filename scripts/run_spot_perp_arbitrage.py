@@ -494,7 +494,7 @@ async def run_spot_perp_arbitrage() -> None:
     clip_size = Decimal(args.clip_size) if args.clip_size is not None else prompt_decimal("clip_size_token")
     if total_size <= 0 or clip_size <= 0:
         raise RuntimeError("total_size and clip_size must be positive")
-    leverage = args.leverage if args.leverage is not None else prompt_int("leverage_x")
+    leverage = args.leverage if args.leverage is not None else (1 if mode == "close" else prompt_int("leverage_x"))
     first_clip_size = min(total_size, clip_size)
     spot_book, perp_book = await fetch_plan_books(
         symbol=symbol,
@@ -535,7 +535,8 @@ async def run_spot_perp_arbitrage() -> None:
     print(f"clip_size_token: {decimal_to_plain(clip_size)}")
     print(f"token_batches: {num_batches}")
     print(f"estimated_first_clip_usd: {plan.clip_usd:.2f}")
-    print(f"leverage_x: {leverage}")
+    if mode != "close" or args.leverage is not None:
+        print(f"leverage_x: {leverage}")
 
     allow_large_price_gap = False
     if plan.maker_taker_price_gap_pct > SPOT_PERP_MAX_PRE_TRADE_PRICE_GAP:

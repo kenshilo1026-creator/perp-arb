@@ -980,6 +980,101 @@ class VariationalBrowserAdapterTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(RuntimeError):
             await adapter.place_limit_order(symbol="BTC", side="BUY", amount="50")
 
+    async def test_place_limit_order_timeout_keeps_submitted_order_id_on_exception(self) -> None:
+        async def delayed_fill_handler(request: web.Request) -> web.WebSocketResponse:
+            ws = web.WebSocketResponse()
+            await ws.prepare(request)
+            async for msg in ws:
+                if msg.type != web.WSMsgType.TEXT:
+                    continue
+                payload = json.loads(msg.data)
+                if payload["type"] == "REGISTER":
+                    await ws.send_json({"type": "REGISTER_ACK", "ok": True, "role": payload["role"]})
+                elif payload["type"] == "PLACE_ORDER":
+                    await ws.send_json({"type": "ORDER_DISPATCHED", "requestId": payload["requestId"], "ok": True})
+                    await ws.send_json(
+                        {
+                            "type": "ORDER_RESULT",
+                            "requestId": payload["requestId"],
+                            "ok": True,
+                            "orderId": "var-timeout",
+                        }
+                    )
+                    await asyncio.sleep(1.0)
+            return ws
+
+        await self._runner.cleanup()
+        self._app = web.Application()
+        self._app.router.add_get("/", delayed_fill_handler)
+        self._runner = web.AppRunner(self._app)
+        await self._runner.setup()
+        self._site = web.TCPSite(self._runner, "127.0.0.1", 0)
+        await self._site.start()
+        self._port = self._site._server.sockets[0].getsockname()[1]
+        self._url = f"http://127.0.0.1:{self._port}/"
+
+        adapter = VariationalBrowserExecutionAdapter(
+            broker_url=self._url,
+            client_role="strategy",
+            fill_timeout_seconds=0.05,
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "variational limit order fill timeout after 0s") as ctx:
+            await adapter.place_limit_order(symbol="BTC", side="BUY", amount="50")
+
+        self.assertEqual(getattr(ctx.exception, "order_result", {})["orderId"], "var-timeout")
+
+    async def test_cancel_order_uses_nested_submitted_order_id(self) -> None:
+        await self._runner.cleanup()
+
+        async def cancel_handler(request: web.Request) -> web.WebSocketResponse:
+            ws = web.WebSocketResponse()
+            await ws.prepare(request)
+            async for msg in ws:
+                if msg.type != web.WSMsgType.TEXT:
+                    continue
+                payload = json.loads(msg.data)
+                self._messages.append(payload)
+                if payload["type"] == "REGISTER":
+                    await ws.send_json({"type": "REGISTER_ACK", "ok": True, "role": payload["role"]})
+                elif payload["type"] == "CANCEL_ORDER":
+                    await ws.send_json(
+                        {
+                            "type": "CANCEL_RESULT",
+                            "requestId": payload["requestId"],
+                            "ok": True,
+                            "orderId": payload["orderId"],
+                        }
+                    )
+            return ws
+
+        self._app = web.Application()
+        self._app.router.add_get("/", cancel_handler)
+        self._runner = web.AppRunner(self._app)
+        await self._runner.setup()
+        self._site = web.TCPSite(self._runner, "127.0.0.1", 0)
+        await self._site.start()
+        self._port = self._site._server.sockets[0].getsockname()[1]
+        self._url = f"http://127.0.0.1:{self._port}/"
+
+        adapter = VariationalBrowserExecutionAdapter(broker_url=self._url, client_role="strategy")
+        result = await adapter.cancel_order(
+            order_result={
+                "ok": False,
+                "details": {
+                    "submitted": {
+                        "orderId": "var-nested",
+                    }
+                },
+            },
+            symbol="BEAT",
+            side="BUY",
+            amount="10",
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(self._messages[1]["orderId"], "var-nested")
+
     async def test_failed_order_writes_debug_payload_when_path_is_configured(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             debug_path = Path(temp_dir) / "variational_order_debug.json"
@@ -1498,6 +1593,59 @@ class SingleClipExecutorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             calls,
             ["maker_submit_1", "wait_maker-1", "cancel_maker-1", "maker_submit_2", "wait_maker-2", "taker_market"],
+        )
+
+    async def test_execute_single_clip_cancels_variational_order_when_submit_phase_timeout_carries_order_id(self) -> None:
+        calls: list[str] = []
+
+        class MakerAdapter:
+            def __init__(self) -> None:
+                self.submit_count = 0
+
+            async def place_limit_order(self, **kwargs):
+                self.submit_count += 1
+                calls.append(f"maker_submit_{self.submit_count}")
+                if self.submit_count == 1:
+                    error = RuntimeError("variational limit order fill timeout after 60s")
+                    setattr(error, "order_result", {"ok": True, "orderId": "maker-timeout-1"})
+                    raise error
+                return {"ok": True, "order_id": "maker-2", "raw": {"status": "NEW"}}
+
+            async def wait_for_order_fill(self, **kwargs):
+                calls.append(f"wait_{kwargs['order_result']['order_id']}")
+                return {"ok": True, "order_id": "maker-2", "raw": {"status": "FILLED"}}
+
+            async def cancel_order(self, **kwargs):
+                order_id = kwargs["order_result"].get("order_id") or kwargs["order_result"].get("orderId")
+                calls.append(f"cancel_{order_id}")
+                return {"ok": True, "order_id": order_id}
+
+        class TakerAdapter:
+            async def place_market_order(self, **kwargs):
+                calls.append("taker_market")
+                return {"ok": True, "order_id": "taker-1"}
+
+        result = await execute_single_clip(
+            symbol="BTC",
+            clip_usd=1000.0,
+            quantity=Decimal("10"),
+            maker_venue="variational",
+            taker_venue="lighter",
+            short_venue="variational",
+            long_venue="lighter",
+            maker_adapter=MakerAdapter(),
+            taker_adapter=TakerAdapter(),
+            max_hedge_retries=1,
+            state_machine=ExecutionStateMachine(),
+            require_maker_fill_confirmation=True,
+            maker_fill_timeout_seconds=5.0,
+            max_maker_reprice_attempts=1,
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(
+            calls,
+            ["maker_submit_1", "cancel_maker-timeout-1", "maker_submit_2", "wait_maker-2", "taker_market"],
         )
 
     async def test_execute_single_clip_does_not_reprice_non_timeout_fill_errors(self) -> None:

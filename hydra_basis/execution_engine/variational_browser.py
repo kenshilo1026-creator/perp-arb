@@ -72,6 +72,32 @@ class VariationalBrowserExecutionAdapter:
         self._sleep = sleep
         self._market_prepared = False
 
+    @staticmethod
+    def _extract_order_id(order_result: dict[str, object]) -> object | None:
+        order_id = order_result.get("orderId") or order_result.get("order_id")
+        if order_id not in (None, ""):
+            return order_id
+        raw = order_result.get("raw")
+        if isinstance(raw, dict):
+            raw_order_id = raw.get("orderId") or raw.get("order_id")
+            if raw_order_id not in (None, ""):
+                return raw_order_id
+        details = order_result.get("details")
+        if isinstance(details, dict):
+            submitted = details.get("submitted")
+            if isinstance(submitted, dict):
+                submitted_order_id = submitted.get("orderId") or submitted.get("order_id")
+                if submitted_order_id not in (None, ""):
+                    return submitted_order_id
+        return None
+
+    @staticmethod
+    def _order_error(message: str, *, order_result: dict[str, object] | None = None) -> RuntimeError:
+        error = RuntimeError(message)
+        if order_result is not None:
+            setattr(error, "order_result", order_result)
+        return error
+
     def _map_symbol(self, symbol: str) -> str:
         return canonicalize_symbol(symbol, venue="variational")
 
@@ -209,8 +235,14 @@ class VariationalBrowserExecutionAdapter:
     ) -> dict[str, object]:
         symbol = self._map_symbol(symbol)
         request_id = str(uuid.uuid4())
-        order_id = order_result.get("orderId") or order_result.get("order_id")
-        print(f"[variational] cancel_order symbol={symbol} side={side} orderId={order_id}", flush=True)
+        order_id = self._extract_order_id(order_result)
+        if order_id in (None, ""):
+            print(
+                f"[variational] cancel_order falling back to symbol+side match symbol={symbol} side={side}",
+                flush=True,
+            )
+        else:
+            print(f"[variational] cancel_order symbol={symbol} side={side} orderId={order_id}", flush=True)
         async with ClientSession() as session:
             async with session.ws_connect(self.broker_url, heartbeat=20) as ws:
                 await ws.send_json({"type": "REGISTER", "role": self.client_role})
@@ -221,13 +253,20 @@ class VariationalBrowserExecutionAdapter:
                     "orderId": order_id,
                     "symbol": symbol,
                     "side": side,
+                    "amount": amount,
                 })
                 msg = await asyncio.wait_for(ws.receive(), timeout=self.timeout_seconds)
         if msg.type != WSMsgType.TEXT:
             raise RuntimeError(f"variational cancel_order unexpected message type: {msg.type}")
         result = msg.json()
         if not result.get("ok"):
-            raise RuntimeError(f"variational cancel_order failed for {symbol}: {result.get('error')}")
+            detail_text = ""
+            details = result.get("details")
+            if details:
+                detail_text = f" details={json.dumps(details, ensure_ascii=False)[:4000]}"
+            raise RuntimeError(
+                f"variational cancel_order failed for {symbol}: {result.get('error')}{detail_text}"
+            )
         return {"ok": True, "raw": result}
 
     async def get_open_position(self, *, symbol: str, market_type: str) -> dict | None:
@@ -295,19 +334,22 @@ class VariationalBrowserExecutionAdapter:
         order_dispatched = False
         import time as _time
         fill_deadline: float | None = None
+        submitted_order_result: dict[str, object] | None = None
         while True:
             if order_dispatched:
                 if fill_deadline is not None:
                     remaining = fill_deadline - _time.monotonic()
                     if remaining <= 0:
-                        raise RuntimeError(
-                            f"variational limit order fill timeout after {fill_timeout_seconds:.0f}s"
+                        raise self._order_error(
+                            f"variational limit order fill timeout after {fill_timeout_seconds:.0f}s",
+                            order_result=submitted_order_result,
                         )
                     try:
                         msg = await asyncio.wait_for(ws.receive(), timeout=remaining)
                     except (TimeoutError, asyncio.TimeoutError):
-                        raise RuntimeError(
-                            f"variational limit order fill timeout after {fill_timeout_seconds:.0f}s"
+                        raise self._order_error(
+                            f"variational limit order fill timeout after {fill_timeout_seconds:.0f}s",
+                            order_result=submitted_order_result,
                         )
                 else:
                     msg = await ws.receive()
@@ -323,8 +365,15 @@ class VariationalBrowserExecutionAdapter:
                 if fill_timeout_seconds is not None:
                     fill_deadline = _time.monotonic() + fill_timeout_seconds
                 continue
+            if payload.get("type") == "ORDER_ACCEPTED":
+                order_dispatched = True
+                submitted_order_result = payload
+                if fill_timeout_seconds is not None and fill_deadline is None:
+                    fill_deadline = _time.monotonic() + fill_timeout_seconds
+                continue
             if payload.get("type") != "ORDER_RESULT":
                 continue
+            submitted_order_result = payload if payload.get("ok", False) else submitted_order_result
             if not payload.get("ok", False):
                 debug_path_text = ""
                 if self.debug_payload_path is not None:
@@ -338,8 +387,9 @@ class VariationalBrowserExecutionAdapter:
                 detail_text = ""
                 if details:
                     detail_text = f" details={json.dumps(details, ensure_ascii=False)[:2000]}"
-                raise RuntimeError(
+                raise self._order_error(
                     f"variational browser order failed for {symbol}: "
-                    f"{payload.get('error', 'unknown error')}{debug_path_text}{detail_text}"
+                    f"{payload.get('error', 'unknown error')}{debug_path_text}{detail_text}",
+                    order_result=payload,
                 )
             return payload

@@ -1,20 +1,14 @@
 {
   "type": "ORDER_RESULT",
-  "requestId": "2cf3ecfe-6050-4cd5-a02e-69db9cdcfd43",
+  "requestId": "f1d590ae-cb25-4c26-a4a8-5597e50448ce",
   "ok": false,
   "orderId": null,
-  "error": "Submit button stayed disabled (submitOnly).",
+  "error": "Ticker mismatch: requested COPPER but current page is BTC.",
   "details": {
     "automationVersion": "variational-order-automation-2026-06-05-2",
-    "amount": "40",
-    "clickedSubmitText": "Enter Size Enter Size",
+    "currentSymbol": "BTC",
     "diagnostics": {
       "buttons": [
-        {
-          "className": "absolute right-2 hover:text-darkblue/80",
-          "disabled": false,
-          "text": ""
-        },
         {
           "className": "disabled:opacity-50 items-center p-4 pt-5 text-blackwhite border-b-4 transition-all border-azure pointer-events-none dis",
           "disabled": false,
@@ -108,12 +102,7 @@
         {
           "className": "token-pill flex items-center gap-1 px-2 py-0.5 text-white outline-none rounded-md text-xl hover:bg-azure/12 cursor-point",
           "disabled": false,
-          "text": "COPPER Beta / COPPER Beta /"
-        },
-        {
-          "className": "inline-block px-1.5 py-0.5 rounded-md text-green-400 -ml-0.5 text-[10px] leading-none bg-[#193930] cursor-help",
-          "disabled": false,
-          "text": "Beta Beta"
+          "text": "BTC / BTC /"
         },
         {
           "className": "text-blackwhite/50 tooltip-link",
@@ -123,17 +112,22 @@
         {
           "className": "text-blackwhite/50 tooltip-link",
           "disabled": false,
+          "text": "FDV FDV"
+        },
+        {
+          "className": "text-blackwhite/50 tooltip-link",
+          "disabled": false,
           "text": "Open Interest Open Interest"
         },
         {
           "className": "text-blackwhite/50 tooltip-link",
           "disabled": false,
-          "text": "4hr Funding / Countdown 4hr Funding / Countdown"
+          "text": "8hr Funding / Countdown 8hr Funding / Countdown"
         },
         {
           "className": "flex cursor-help",
           "disabled": false,
-          "text": "0% / 01:59:35 0% / 01:59:35"
+          "text": "0.0021% / 01:59:04 0.0021% / 01:59:04"
         },
         {
           "className": "absolute bottom-0 left-0 right-0 h-2 md:h-1 cursor-ns-resize bg-transparent hover:bg-azure/50 transition-colors duration",
@@ -233,7 +227,7 @@
         {
           "className": "h-8 grid gap-2 tr items-center border-b border-blackwhite/5 hover:bg-azure/12 grid-cols-positions-rpnl pl-0",
           "disabled": false,
-          "text": "COPPER-PERP 185 $6.25153 $1,156.53 $6.28176 - $0.00 -$5.59 (-2.41%) $0.00 TP/SL Reverse Close COPPER-PERP 185 $6.25153 $"
+          "text": "COPPER-PERP 185 $6.36782 $1,178.05 $6.31316 - -$0.63 $10.11 (+4.33%) $33.49 TP/SL Reverse Close COPPER-PERP 185 $6.36782"
         },
         {
           "className": "flex gap-x-2 items-center link-instrument",
@@ -268,7 +262,7 @@
         {
           "className": "min-h-8 h-8 px-3 py-1 bg-azure/5 hover:bg-azure/12 focus:bg-azure/12 active:bg-azure/20 text-xs rounded-md flex items-ce",
           "disabled": false,
-          "text": "5X 5X"
+          "text": "50X 50X"
         },
         {
           "className": "min-h-8 h-8 px-3 py-1 bg-azure/5 hover:bg-azure/12 focus:bg-azure/12 active:bg-azure/20 text-blackwhite text-xs rounded-",
@@ -293,17 +287,17 @@
         {
           "className": "flex flex-1 items-center justify-center rounded-md flex-col group-disabled:pointer-events-none px-2 py-0.5 bg-transparen",
           "disabled": true,
-          "text": "Buy $6.25314 Buy $6.25314"
+          "text": "Buy $62,675.09 Buy $62,675.09"
         },
         {
           "className": "flex flex-1 items-center justify-center rounded-md flex-col group-disabled:pointer-events-none px-2 py-0.5 text-blackwhi",
           "disabled": false,
-          "text": "Sell $6.24992 Sell $6.24992"
+          "text": "Sell $62,670.55 Sell $62,670.55"
         },
         {
           "className": "flex items-center justify-end text-blackwhite/80 enabled:hover:text-blackwhite hover:text-blackwhite gap-1 disabled:text",
           "disabled": false,
-          "text": "COPPER COPPER"
+          "text": "$ $"
         },
         {
           "className": "group flex gap-2 disabled:opacity-50 enabled:hover:text-blackwhite",
@@ -333,7 +327,12 @@
         {
           "className": "flex items-center gap-1 cursor-pointer text-azure group",
           "disabled": false,
-          "text": "Max: 0.5% Max: 0.5%"
+          "text": "Max: 0.3% Max: 0.3%"
+        },
+        {
+          "className": "",
+          "disabled": false,
+          "text": ""
         },
         {
           "className": "flex relative h-2 w-2 cursor-help",
@@ -405,9 +404,10 @@
           "value": ""
         }
       ],
-      "title": "6.25153 | COPPER-PERP | Variational Omni",
-      "url": "https://omni.variational.io/perpetual/COPPER"
-    }
+      "title": "62,665.79 | BTC-PERP | Variational Omni",
+      "url": "https://omni.variational.io/perpetual/BTC"
+    },
+    "requestedSymbol": "COPPER"
   },
-  "timestamp": "2026-06-11T10:00:30.065Z"
+  "timestamp": "2026-06-19T06:00:56.441Z"
 }

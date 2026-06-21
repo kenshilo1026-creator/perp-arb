@@ -54,7 +54,12 @@ def backfill_incremental_start_ms(points: Sequence) -> int | None:
 def backfill_needs_top_up(points: Sequence, *, now_ms: int) -> bool:
     if not points:
         return False
-    if not funding_history_is_complete(list(points), required_days=7, now_ms=now_ms):
+    if not funding_history_is_complete(
+        list(points),
+        required_days=7,
+        now_ms=now_ms,
+        require_recent=False,
+    ):
         return False
     newest_ts = max(point.ts_ms for point in points)
     max_interval_ms = int(max(point.interval_hours for point in points) * 3_600_000)

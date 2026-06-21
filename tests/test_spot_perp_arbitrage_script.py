@@ -284,6 +284,56 @@ class MissingMakerCancelAdapterTests(unittest.IsolatedAsyncioTestCase):
 
 
 class SpotPerpArbitrageRecordingTests(unittest.IsolatedAsyncioTestCase):
+    async def test_close_mode_does_not_prompt_for_leverage(self) -> None:
+        printed: list[str] = []
+        prompts: list[str] = []
+        executed: list[int] = []
+        args = SimpleNamespace(
+            mode="close",
+            symbol="BEAT",
+            short_venue="aster",
+            total_size="10",
+            clip_size="10",
+            leverage=None,
+            variational_broker_host="127.0.0.1",
+            variational_broker_port=8768,
+            variational_extension_timeout=30.0,
+            live=True,
+        )
+
+        def fake_input(prompt: str = "") -> str:
+            prompts.append(prompt)
+            return "PLACE LIVE SPOT PERP ORDER"
+
+        async def fake_execute(*, plan, leverage, **kwargs):
+            executed.append(leverage)
+            return {
+                "ok": True,
+                "executed_quantity": str(plan.quantity),
+                "execution_price_summary": {
+                    "maker_avg_price": "10.1",
+                    "taker_avg_price": "10.01",
+                },
+            }
+
+        with patch("scripts.run_spot_perp_arbitrage.parse_args", return_value=args), \
+            patch(
+                "scripts.run_spot_perp_arbitrage.fetch_plan_books",
+                new=AsyncMock(return_value=(
+                    {"bid": 9.99, "ask": 10.01, "ts_ms": 1},
+                    {"bid": 9.9, "ask": 10.1, "ts_ms": 1},
+                )),
+            ), \
+            patch("scripts.run_spot_perp_arbitrage.execute_spot_perp_plan", new=AsyncMock(side_effect=fake_execute)), \
+            patch("builtins.input", side_effect=fake_input), \
+            patch("builtins.print", side_effect=lambda *parts, **kwargs: printed.append(" ".join(str(p) for p in parts))):
+            await run_spot_perp_arbitrage()
+
+        self.assertEqual(executed, [1])
+        self.assertEqual(prompts, ["> "])
+        output = "\n".join(printed)
+        self.assertNotIn("leverage_x:", output)
+
     async def test_live_run_large_gap_stops_when_user_confirms_stop(self) -> None:
         printed: list[str] = []
         prompts: list[str] = []

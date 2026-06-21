@@ -525,6 +525,16 @@ async def execute_single_clip_with_sides(
             maker_attempts.append(attempt_record)
             break
         except BaseException as exc:
+            exception_order_result = getattr(exc, "order_result", None)
+            if isinstance(exception_order_result, dict):
+                attempt_record.setdefault("maker_result", exception_order_result)
+                maker_result = exception_order_result
+                order_id = (
+                    exception_order_result.get("order_id")
+                    or exception_order_result.get("orderId")
+                )
+                if order_id not in (None, ""):
+                    register_active_maker(exception_order_result)
             attempt_record["maker_fill_error"] = str(exc)
             maker_attempts.append(attempt_record)
             if isinstance(exc, (asyncio.CancelledError, KeyboardInterrupt, SystemExit)):

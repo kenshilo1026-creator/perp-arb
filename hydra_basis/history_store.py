@@ -60,14 +60,20 @@ def funding_history_is_complete(
     *,
     required_days: int,
     now_ms: int | None = None,
+    require_recent: bool = True,
 ) -> bool:
     if not points:
         return False
     current_ms = now_ms if now_ms is not None else globals()["now_ms"]()
     required_start_ms = current_ms - required_days * 24 * 60 * 60 * 1000
     oldest_ts = min(point.ts_ms for point in points)
+    newest_ts = max(point.ts_ms for point in points)
     max_interval_ms = int(max(p.interval_hours for p in points) * 3_600_000)
-    return oldest_ts <= required_start_ms + max_interval_ms
+    if oldest_ts > required_start_ms + max_interval_ms:
+        return False
+    if not require_recent:
+        return True
+    return newest_ts >= current_ms - max_interval_ms
 
 
 def summarize_history_coverage(

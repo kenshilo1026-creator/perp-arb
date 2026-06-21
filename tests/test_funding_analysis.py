@@ -1500,6 +1500,17 @@ class HistoryStoreTests(unittest.TestCase):
 
         self.assertFalse(complete)
 
+    def test_funding_history_is_incomplete_when_newest_point_is_stale(self) -> None:
+        now_ms = int(dt.datetime.now(dt.timezone.utc).timestamp() * 1000)
+        points = [
+            FundingPoint("variational", "BTC", now_ms - 7 * 24 * 60 * 60 * 1000, 0.0001, 8),
+            FundingPoint("variational", "BTC", now_ms - 3 * 24 * 60 * 60 * 1000, 0.0002, 8),
+        ]
+
+        complete = funding_history_is_complete(points, required_days=7, now_ms=now_ms)
+
+        self.assertFalse(complete)
+
     def test_summarize_history_coverage_reports_missing_ms(self) -> None:
         now_ms = int(dt.datetime.now(dt.timezone.utc).timestamp() * 1000)
         points = [

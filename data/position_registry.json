@@ -7,7 +7,7 @@
       "market_type": "perp",
       "quantity": "100",
       "side": "SHORT",
-      "status": "open",
+      "status": "close_failed",
       "strategy_id": "manual-H-1780892585826",
       "symbol": "H",
       "venue": "aster"
@@ -19,7 +19,7 @@
       "market_type": "perp",
       "quantity": "100",
       "side": "LONG",
-      "status": "open",
+      "status": "manual_close_required",
       "strategy_id": "manual-H-1780892585826",
       "symbol": "H",
       "venue": "variational"
@@ -31,7 +31,7 @@
       "market_type": "perp",
       "quantity": "10",
       "side": "SHORT",
-      "status": "open",
+      "status": "close_failed",
       "strategy_id": "manual-BEAT-1780911274608",
       "symbol": "BEAT",
       "venue": "aster"
@@ -43,7 +43,7 @@
       "market_type": "perp",
       "quantity": "10",
       "side": "LONG",
-      "status": "open",
+      "status": "manual_close_required",
       "strategy_id": "manual-BEAT-1780911274608",
       "symbol": "BEAT",
       "venue": "variational"
@@ -55,7 +55,7 @@
       "market_type": "perp",
       "quantity": "100",
       "side": "SHORT",
-      "status": "open",
+      "status": "close_failed",
       "strategy_id": "manual-BEAT-1780911362679",
       "symbol": "BEAT",
       "venue": "aster"
@@ -67,7 +67,7 @@
       "market_type": "perp",
       "quantity": "100",
       "side": "LONG",
-      "status": "open",
+      "status": "manual_close_required",
       "strategy_id": "manual-BEAT-1780911362679",
       "symbol": "BEAT",
       "venue": "variational"
@@ -79,7 +79,7 @@
       "market_type": "perp",
       "quantity": "100",
       "side": "SHORT",
-      "status": "open",
+      "status": "close_failed",
       "strategy_id": "manual-BEAT-1780991139706",
       "symbol": "BEAT",
       "venue": "aster"
@@ -91,7 +91,7 @@
       "market_type": "perp",
       "quantity": "100",
       "side": "LONG",
-      "status": "open",
+      "status": "manual_close_required",
       "strategy_id": "manual-BEAT-1780991139706",
       "symbol": "BEAT",
       "venue": "variational"
@@ -103,7 +103,7 @@
       "market_type": "perp",
       "quantity": "50",
       "side": "SHORT",
-      "status": "open",
+      "status": "close_failed",
       "strategy_id": "manual-BEAT-1780992971561",
       "symbol": "BEAT",
       "venue": "aster"
@@ -115,7 +115,7 @@
       "market_type": "perp",
       "quantity": "50",
       "side": "LONG",
-      "status": "open",
+      "status": "manual_close_required",
       "strategy_id": "manual-BEAT-1780992971561",
       "symbol": "BEAT",
       "venue": "variational"
@@ -127,7 +127,7 @@
       "market_type": "perp",
       "quantity": "10",
       "side": "SHORT",
-      "status": "open",
+      "status": "close_failed",
       "strategy_id": "manual-BEAT-1780997451553",
       "symbol": "BEAT",
       "venue": "aster"
@@ -139,7 +139,7 @@
       "market_type": "perp",
       "quantity": "10",
       "side": "LONG",
-      "status": "open",
+      "status": "manual_close_required",
       "strategy_id": "manual-BEAT-1780997451553",
       "symbol": "BEAT",
       "venue": "variational"
@@ -151,7 +151,7 @@
       "market_type": "perp",
       "quantity": "10",
       "side": "SHORT",
-      "status": "open",
+      "status": "close_failed",
       "strategy_id": "manual-BEAT-1781001694675",
       "symbol": "BEAT",
       "venue": "aster"
@@ -163,7 +163,7 @@
       "market_type": "perp",
       "quantity": "10",
       "side": "LONG",
-      "status": "open",
+      "status": "manual_close_required",
       "strategy_id": "manual-BEAT-1781001694675",
       "symbol": "BEAT",
       "venue": "variational"
@@ -175,7 +175,7 @@
       "market_type": "perp",
       "quantity": "10",
       "side": "SHORT",
-      "status": "open",
+      "status": "closed",
       "strategy_id": "spot-perp-BEAT-1781253862812",
       "symbol": "BEAT",
       "venue": "aster"
@@ -187,7 +187,7 @@
       "market_type": "spot",
       "quantity": "10",
       "side": "LONG",
-      "status": "open",
+      "status": "closed",
       "strategy_id": "spot-perp-BEAT-1781253862812",
       "symbol": "BEAT",
       "venue": "mexc_spot"
@@ -199,7 +199,7 @@
       "market_type": "perp",
       "quantity": "10",
       "side": "SHORT",
-      "status": "open",
+      "status": "closed",
       "strategy_id": "spot-perp-BEAT-1781253930355",
       "symbol": "BEAT",
       "venue": "aster"
@@ -211,7 +211,7 @@
       "market_type": "spot",
       "quantity": "40",
       "side": "LONG",
-      "status": "open",
+      "status": "closed",
       "strategy_id": "spot-perp-BEAT-1781253930355",
       "symbol": "BEAT",
       "venue": "mexc_spot"
@@ -223,7 +223,7 @@
       "market_type": "perp",
       "quantity": "50",
       "side": "SHORT",
-      "status": "open",
+      "status": "closed",
       "strategy_id": "spot-perp-BEAT-1781254514298",
       "symbol": "BEAT",
       "venue": "aster"
@@ -235,7 +235,7 @@
       "market_type": "spot",
       "quantity": "50",
       "side": "LONG",
-      "status": "open",
+      "status": "closed",
       "strategy_id": "spot-perp-BEAT-1781254514298",
       "symbol": "BEAT",
       "venue": "mexc_spot"
@@ -247,7 +247,7 @@
       "market_type": "perp",
       "quantity": "50",
       "side": "SHORT",
-      "status": "open",
+      "status": "closed",
       "strategy_id": "spot-perp-BEAT-1781259463909",
       "symbol": "BEAT",
       "venue": "aster"
@@ -259,7 +259,7 @@
       "market_type": "spot",
       "quantity": "50",
       "side": "LONG",
-      "status": "open",
+      "status": "closed",
       "strategy_id": "spot-perp-BEAT-1781259463909",
       "symbol": "BEAT",
       "venue": "mexc_spot"
@@ -271,7 +271,7 @@
       "market_type": "perp",
       "quantity": "80",
       "side": "SHORT",
-      "status": "open",
+      "status": "closed",
       "strategy_id": "spot-perp-BEAT-1781260677704",
       "symbol": "BEAT",
       "venue": "aster"
@@ -283,7 +283,7 @@
       "market_type": "spot",
       "quantity": "80",
       "side": "LONG",
-      "status": "open",
+      "status": "closed",
       "strategy_id": "spot-perp-BEAT-1781260677704",
       "symbol": "BEAT",
       "venue": "mexc_spot"
@@ -295,7 +295,7 @@
       "market_type": "perp",
       "quantity": "1",
       "side": "SHORT",
-      "status": "open",
+      "status": "closed",
       "strategy_id": "spot-perp-DEXE-1781509087182",
       "symbol": "DEXE",
       "venue": "aster"
@@ -307,7 +307,7 @@
       "market_type": "spot",
       "quantity": "1",
       "side": "LONG",
-      "status": "open",
+      "status": "closed",
       "strategy_id": "spot-perp-DEXE-1781509087182",
       "symbol": "DEXE",
       "venue": "mexc_spot"
@@ -319,7 +319,7 @@
       "market_type": "perp",
       "quantity": "2",
       "side": "SHORT",
-      "status": "open",
+      "status": "closed",
       "strategy_id": "spot-perp-DEXE-1781509202499",
       "symbol": "DEXE",
       "venue": "aster"
@@ -331,7 +331,7 @@
       "market_type": "spot",
       "quantity": "2",
       "side": "LONG",
-      "status": "open",
+      "status": "closed",
       "strategy_id": "spot-perp-DEXE-1781509202499",
       "symbol": "DEXE",
       "venue": "mexc_spot"
@@ -343,7 +343,7 @@
       "market_type": "perp",
       "quantity": "5",
       "side": "SHORT",
-      "status": "open",
+      "status": "closed",
       "strategy_id": "spot-perp-DEXE-1781510185462",
       "symbol": "DEXE",
       "venue": "aster"
@@ -355,7 +355,7 @@
       "market_type": "spot",
       "quantity": "5",
       "side": "LONG",
-      "status": "open",
+      "status": "closed",
       "strategy_id": "spot-perp-DEXE-1781510185462",
       "symbol": "DEXE",
       "venue": "mexc_spot"
@@ -367,7 +367,7 @@
       "market_type": "perp",
       "quantity": "7",
       "side": "SHORT",
-      "status": "open",
+      "status": "closed",
       "strategy_id": "spot-perp-DEXE-1781510192280",
       "symbol": "DEXE",
       "venue": "aster"
@@ -379,7 +379,7 @@
       "market_type": "spot",
       "quantity": "7",
       "side": "LONG",
-      "status": "open",
+      "status": "closed",
       "strategy_id": "spot-perp-DEXE-1781510192280",
       "symbol": "DEXE",
       "venue": "mexc_spot"
@@ -391,7 +391,7 @@
       "market_type": "perp",
       "quantity": "9",
       "side": "SHORT",
-      "status": "open",
+      "status": "closed",
       "strategy_id": "spot-perp-DEXE-1781510207473",
       "symbol": "DEXE",
       "venue": "aster"
@@ -403,7 +403,7 @@
       "market_type": "spot",
       "quantity": "9",
       "side": "LONG",
-      "status": "open",
+      "status": "closed",
       "strategy_id": "spot-perp-DEXE-1781510207473",
       "symbol": "DEXE",
       "venue": "mexc_spot"
@@ -415,7 +415,7 @@
       "market_type": "perp",
       "quantity": "11",
       "side": "SHORT",
-      "status": "open",
+      "status": "closed",
       "strategy_id": "spot-perp-DEXE-1781510255185",
       "symbol": "DEXE",
       "venue": "aster"
@@ -427,7 +427,7 @@
       "market_type": "spot",
       "quantity": "11",
       "side": "LONG",
-      "status": "open",
+      "status": "closed",
       "strategy_id": "spot-perp-DEXE-1781510255185",
       "symbol": "DEXE",
       "venue": "mexc_spot"
@@ -439,7 +439,7 @@
       "market_type": "perp",
       "quantity": "13",
       "side": "SHORT",
-      "status": "open",
+      "status": "closed",
       "strategy_id": "spot-perp-DEXE-1781510290839",
       "symbol": "DEXE",
       "venue": "aster"
@@ -451,7 +451,7 @@
       "market_type": "spot",
       "quantity": "13",
       "side": "LONG",
-      "status": "open",
+      "status": "closed",
       "strategy_id": "spot-perp-DEXE-1781510290839",
       "symbol": "DEXE",
       "venue": "mexc_spot"
@@ -463,7 +463,7 @@
       "market_type": "perp",
       "quantity": "15",
       "side": "SHORT",
-      "status": "open",
+      "status": "closed",
       "strategy_id": "spot-perp-DEXE-1781511669015",
       "symbol": "DEXE",
       "venue": "aster"
@@ -475,7 +475,7 @@
       "market_type": "spot",
       "quantity": "15",
       "side": "LONG",
-      "status": "open",
+      "status": "closed",
       "strategy_id": "spot-perp-DEXE-1781511669015",
       "symbol": "DEXE",
       "venue": "mexc_spot"
@@ -487,7 +487,7 @@
       "market_type": "perp",
       "quantity": "17",
       "side": "SHORT",
-      "status": "open",
+      "status": "closed",
       "strategy_id": "spot-perp-DEXE-1781511754379",
       "symbol": "DEXE",
       "venue": "aster"
@@ -499,7 +499,7 @@
       "market_type": "spot",
       "quantity": "17",
       "side": "LONG",
-      "status": "open",
+      "status": "closed",
       "strategy_id": "spot-perp-DEXE-1781511754379",
       "symbol": "DEXE",
       "venue": "mexc_spot"
@@ -511,7 +511,7 @@
       "market_type": "perp",
       "quantity": "17.38",
       "side": "SHORT",
-      "status": "open",
+      "status": "closed",
       "strategy_id": "spot-perp-DEXE-1781511818179",
       "symbol": "DEXE",
       "venue": "aster"
@@ -523,7 +523,7 @@
       "market_type": "spot",
       "quantity": "17.38",
       "side": "LONG",
-      "status": "open",
+      "status": "closed",
       "strategy_id": "spot-perp-DEXE-1781511818179",
       "symbol": "DEXE",
       "venue": "mexc_spot"
@@ -535,7 +535,7 @@
       "market_type": "perp",
       "quantity": "19.38",
       "side": "SHORT",
-      "status": "open",
+      "status": "closed",
       "strategy_id": "spot-perp-DEXE-1781511890678",
       "symbol": "DEXE",
       "venue": "aster"
@@ -547,7 +547,7 @@
       "market_type": "spot",
       "quantity": "19.38",
       "side": "LONG",
-      "status": "open",
+      "status": "closed",
       "strategy_id": "spot-perp-DEXE-1781511890678",
       "symbol": "DEXE",
       "venue": "mexc_spot"
@@ -559,7 +559,7 @@
       "market_type": "perp",
       "quantity": "21.38",
       "side": "SHORT",
-      "status": "open",
+      "status": "closed",
       "strategy_id": "spot-perp-DEXE-1781511913777",
       "symbol": "DEXE",
       "venue": "aster"
@@ -571,7 +571,7 @@
       "market_type": "spot",
       "quantity": "21.38",
       "side": "LONG",
-      "status": "open",
+      "status": "closed",
       "strategy_id": "spot-perp-DEXE-1781511913777",
       "symbol": "DEXE",
       "venue": "mexc_spot"
@@ -583,7 +583,7 @@
       "market_type": "perp",
       "quantity": "23",
       "side": "SHORT",
-      "status": "open",
+      "status": "closed",
       "strategy_id": "spot-perp-DEXE-1781511977816",
       "symbol": "DEXE",
       "venue": "aster"
@@ -595,7 +595,7 @@
       "market_type": "spot",
       "quantity": "23",
       "side": "LONG",
-      "status": "open",
+      "status": "closed",
       "strategy_id": "spot-perp-DEXE-1781511977816",
       "symbol": "DEXE",
       "venue": "mexc_spot"
@@ -607,7 +607,7 @@
       "market_type": "perp",
       "quantity": "25",
       "side": "SHORT",
-      "status": "open",
+      "status": "closed",
       "strategy_id": "spot-perp-DEXE-1781512724894",
       "symbol": "DEXE",
       "venue": "aster"
@@ -619,7 +619,7 @@
       "market_type": "spot",
       "quantity": "25",
       "side": "LONG",
-      "status": "open",
+      "status": "closed",
       "strategy_id": "spot-perp-DEXE-1781512724894",
       "symbol": "DEXE",
       "venue": "mexc_spot"
@@ -631,7 +631,7 @@
       "market_type": "perp",
       "quantity": "27",
       "side": "SHORT",
-      "status": "open",
+      "status": "closed",
       "strategy_id": "spot-perp-DEXE-1781512730643",
       "symbol": "DEXE",
       "venue": "aster"
@@ -643,7 +643,7 @@
       "market_type": "spot",
       "quantity": "27",
       "side": "LONG",
-      "status": "open",
+      "status": "closed",
       "strategy_id": "spot-perp-DEXE-1781512730643",
       "symbol": "DEXE",
       "venue": "mexc_spot"
@@ -655,7 +655,7 @@
       "market_type": "perp",
       "quantity": "29",
       "side": "SHORT",
-      "status": "open",
+      "status": "closed",
       "strategy_id": "spot-perp-DEXE-1781512737606",
       "symbol": "DEXE",
       "venue": "aster"
@@ -667,7 +667,7 @@
       "market_type": "spot",
       "quantity": "29",
       "side": "LONG",
-      "status": "open",
+      "status": "closed",
       "strategy_id": "spot-perp-DEXE-1781512737606",
       "symbol": "DEXE",
       "venue": "mexc_spot"
@@ -679,7 +679,7 @@
       "market_type": "perp",
       "quantity": "32.27",
       "side": "SHORT",
-      "status": "open",
+      "status": "closed",
       "strategy_id": "spot-perp-DEXE-1781513600091",
       "symbol": "DEXE",
       "venue": "aster"
@@ -691,7 +691,7 @@
       "market_type": "spot",
       "quantity": "32.24",
       "side": "LONG",
-      "status": "open",
+      "status": "closed",
       "strategy_id": "spot-perp-DEXE-1781513600091",
       "symbol": "DEXE",
       "venue": "mexc_spot"
@@ -703,7 +703,7 @@
       "market_type": "perp",
       "quantity": "38.24",
       "side": "SHORT",
-      "status": "open",
+      "status": "closed",
       "strategy_id": "spot-perp-DEXE-1781513955489",
       "symbol": "DEXE",
       "venue": "aster"
@@ -715,7 +715,7 @@
       "market_type": "spot",
       "quantity": "38.24",
       "side": "LONG",
-      "status": "open",
+      "status": "closed",
       "strategy_id": "spot-perp-DEXE-1781513955489",
       "symbol": "DEXE",
       "venue": "mexc_spot"
@@ -727,7 +727,7 @@
       "market_type": "perp",
       "quantity": "41.24",
       "side": "SHORT",
-      "status": "open",
+      "status": "closed",
       "strategy_id": "spot-perp-DEXE-1781513969019",
       "symbol": "DEXE",
       "venue": "aster"
@@ -739,7 +739,7 @@
       "market_type": "spot",
       "quantity": "41.24",
       "side": "LONG",
-      "status": "open",
+      "status": "closed",
       "strategy_id": "spot-perp-DEXE-1781513969019",
       "symbol": "DEXE",
       "venue": "mexc_spot"
@@ -751,7 +751,7 @@
       "market_type": "perp",
       "quantity": "44.24",
       "side": "SHORT",
-      "status": "open",
+      "status": "closed",
       "strategy_id": "spot-perp-DEXE-1781514115805",
       "symbol": "DEXE",
       "venue": "aster"
@@ -763,7 +763,7 @@
       "market_type": "spot",
       "quantity": "44.24",
       "side": "LONG",
-      "status": "open",
+      "status": "closed",
       "strategy_id": "spot-perp-DEXE-1781514115805",
       "symbol": "DEXE",
       "venue": "mexc_spot"
@@ -775,7 +775,7 @@
       "market_type": "perp",
       "quantity": "47.24",
       "side": "SHORT",
-      "status": "open",
+      "status": "closed",
       "strategy_id": "spot-perp-DEXE-1781514182085",
       "symbol": "DEXE",
       "venue": "aster"
@@ -787,7 +787,7 @@
       "market_type": "spot",
       "quantity": "47.24",
       "side": "LONG",
-      "status": "open",
+      "status": "closed",
       "strategy_id": "spot-perp-DEXE-1781514182085",
       "symbol": "DEXE",
       "venue": "mexc_spot"
@@ -799,7 +799,7 @@
       "market_type": "perp",
       "quantity": "50.24",
       "side": "SHORT",
-      "status": "open",
+      "status": "closed",
       "strategy_id": "spot-perp-DEXE-1781514231382",
       "symbol": "DEXE",
       "venue": "aster"
@@ -811,7 +811,7 @@
       "market_type": "spot",
       "quantity": "50.24",
       "side": "LONG",
-      "status": "open",
+      "status": "closed",
       "strategy_id": "spot-perp-DEXE-1781514231382",
       "symbol": "DEXE",
       "venue": "mexc_spot"
@@ -823,7 +823,7 @@
       "market_type": "perp",
       "quantity": "53.24",
       "side": "SHORT",
-      "status": "open",
+      "status": "closed",
       "strategy_id": "spot-perp-DEXE-1781514572801",
       "symbol": "DEXE",
       "venue": "aster"
@@ -835,7 +835,7 @@
       "market_type": "spot",
       "quantity": "53.24",
       "side": "LONG",
-      "status": "open",
+      "status": "closed",
       "strategy_id": "spot-perp-DEXE-1781514572801",
       "symbol": "DEXE",
       "venue": "mexc_spot"
@@ -847,7 +847,7 @@
       "market_type": "perp",
       "quantity": "56.24",
       "side": "SHORT",
-      "status": "open",
+      "status": "closed",
       "strategy_id": "spot-perp-DEXE-1781514644173",
       "symbol": "DEXE",
       "venue": "aster"
@@ -859,7 +859,7 @@
       "market_type": "spot",
       "quantity": "56.24",
       "side": "LONG",
-      "status": "open",
+      "status": "closed",
       "strategy_id": "spot-perp-DEXE-1781514644173",
       "symbol": "DEXE",
       "venue": "mexc_spot"
@@ -871,7 +871,7 @@
       "market_type": "perp",
       "quantity": "59.24",
       "side": "SHORT",
-      "status": "open",
+      "status": "closed",
       "strategy_id": "spot-perp-DEXE-1781514729963",
       "symbol": "DEXE",
       "venue": "aster"
@@ -883,7 +883,7 @@
       "market_type": "spot",
       "quantity": "59.24",
       "side": "LONG",
-      "status": "open",
+      "status": "closed",
       "strategy_id": "spot-perp-DEXE-1781514729963",
       "symbol": "DEXE",
       "venue": "mexc_spot"
@@ -895,7 +895,7 @@
       "market_type": "perp",
       "quantity": "60.44",
       "side": "SHORT",
-      "status": "open",
+      "status": "closed",
       "strategy_id": "spot-perp-DEXE-1781514735875",
       "symbol": "DEXE",
       "venue": "aster"
@@ -907,7 +907,7 @@
       "market_type": "spot",
       "quantity": "60.44",
       "side": "LONG",
-      "status": "open",
+      "status": "closed",
       "strategy_id": "spot-perp-DEXE-1781514735875",
       "symbol": "DEXE",
       "venue": "mexc_spot"
@@ -919,7 +919,7 @@
       "market_type": "perp",
       "quantity": "62.99",
       "side": "SHORT",
-      "status": "open",
+      "status": "closed",
       "strategy_id": "spot-perp-DEXE-1781514767407",
       "symbol": "DEXE",
       "venue": "aster"
@@ -931,7 +931,7 @@
       "market_type": "spot",
       "quantity": "62.99",
       "side": "LONG",
-      "status": "open",
+      "status": "closed",
       "strategy_id": "spot-perp-DEXE-1781514767407",
       "symbol": "DEXE",
       "venue": "mexc_spot"
@@ -943,7 +943,7 @@
       "market_type": "perp",
       "quantity": "64.43",
       "side": "SHORT",
-      "status": "open",
+      "status": "closed",
       "strategy_id": "spot-perp-DEXE-1781514808131",
       "symbol": "DEXE",
       "venue": "aster"
@@ -955,7 +955,7 @@
       "market_type": "spot",
       "quantity": "65.15",
       "side": "LONG",
-      "status": "open",
+      "status": "closed",
       "strategy_id": "spot-perp-DEXE-1781514808131",
       "symbol": "DEXE",
       "venue": "mexc_spot"
@@ -967,7 +967,7 @@
       "market_type": "perp",
       "quantity": "65.24",
       "side": "SHORT",
-      "status": "open",
+      "status": "closed",
       "strategy_id": "spot-perp-DEXE-1781514905516",
       "symbol": "DEXE",
       "venue": "aster"
@@ -979,7 +979,7 @@
       "market_type": "spot",
       "quantity": "65.96",
       "side": "LONG",
-      "status": "open",
+      "status": "closed",
       "strategy_id": "spot-perp-DEXE-1781514905516",
       "symbol": "DEXE",
       "venue": "mexc_spot"
@@ -991,7 +991,7 @@
       "market_type": "perp",
       "quantity": "68.24",
       "side": "SHORT",
-      "status": "open",
+      "status": "closed",
       "strategy_id": "spot-perp-DEXE-1781515152740",
       "symbol": "DEXE",
       "venue": "aster"
@@ -1003,7 +1003,7 @@
       "market_type": "spot",
       "quantity": "68.96",
       "side": "LONG",
-      "status": "open",
+      "status": "closed",
       "strategy_id": "spot-perp-DEXE-1781515152740",
       "symbol": "DEXE",
       "venue": "mexc_spot"
@@ -1015,7 +1015,7 @@
       "market_type": "perp",
       "quantity": "71.24",
       "side": "SHORT",
-      "status": "open",
+      "status": "closed",
       "strategy_id": "spot-perp-DEXE-1781515403364",
       "symbol": "DEXE",
       "venue": "aster"
@@ -1027,7 +1027,7 @@
       "market_type": "spot",
       "quantity": "71.96",
       "side": "LONG",
-      "status": "open",
+      "status": "closed",
       "strategy_id": "spot-perp-DEXE-1781515403364",
       "symbol": "DEXE",
       "venue": "mexc_spot"
@@ -1039,7 +1039,7 @@
       "market_type": "perp",
       "quantity": "74.24",
       "side": "SHORT",
-      "status": "open",
+      "status": "closed",
       "strategy_id": "spot-perp-DEXE-1781515469306",
       "symbol": "DEXE",
       "venue": "aster"
@@ -1051,7 +1051,7 @@
       "market_type": "spot",
       "quantity": "74.96",
       "side": "LONG",
-      "status": "open",
+      "status": "closed",
       "strategy_id": "spot-perp-DEXE-1781515469306",
       "symbol": "DEXE",
       "venue": "mexc_spot"
@@ -1063,7 +1063,7 @@
       "market_type": "perp",
       "quantity": "77.24",
       "side": "SHORT",
-      "status": "open",
+      "status": "closed",
       "strategy_id": "spot-perp-DEXE-1781515562833",
       "symbol": "DEXE",
       "venue": "aster"
@@ -1075,7 +1075,7 @@
       "market_type": "spot",
       "quantity": "77.96",
       "side": "LONG",
-      "status": "open",
+      "status": "closed",
       "strategy_id": "spot-perp-DEXE-1781515562833",
       "symbol": "DEXE",
       "venue": "mexc_spot"
@@ -1087,7 +1087,7 @@
       "market_type": "perp",
       "quantity": "80.24",
       "side": "SHORT",
-      "status": "open",
+      "status": "closed",
       "strategy_id": "spot-perp-DEXE-1781515573836",
       "symbol": "DEXE",
       "venue": "aster"
@@ -1099,7 +1099,7 @@
       "market_type": "spot",
       "quantity": "80.96",
       "side": "LONG",
-      "status": "open",
+      "status": "closed",
       "strategy_id": "spot-perp-DEXE-1781515573836",
       "symbol": "DEXE",
       "venue": "mexc_spot"
@@ -1111,7 +1111,7 @@
       "market_type": "perp",
       "quantity": "80.8",
       "side": "SHORT",
-      "status": "open",
+      "status": "closed",
       "strategy_id": "spot-perp-DEXE-1781516788434",
       "symbol": "DEXE",
       "venue": "aster"
@@ -1123,7 +1123,7 @@
       "market_type": "spot",
       "quantity": "81.52",
       "side": "LONG",
-      "status": "open",
+      "status": "closed",
       "strategy_id": "spot-perp-DEXE-1781516788434",
       "symbol": "DEXE",
       "venue": "mexc_spot"
@@ -1135,7 +1135,7 @@
       "market_type": "perp",
       "quantity": "81.49",
       "side": "SHORT",
-      "status": "open",
+      "status": "closed",
       "strategy_id": "spot-perp-DEXE-1781516834742",
       "symbol": "DEXE",
       "venue": "aster"
@@ -1147,7 +1147,7 @@
       "market_type": "spot",
       "quantity": "82.21",
       "side": "LONG",
-      "status": "open",
+      "status": "closed",
       "strategy_id": "spot-perp-DEXE-1781516834742",
       "symbol": "DEXE",
       "venue": "mexc_spot"
@@ -1159,7 +1159,7 @@
       "market_type": "perp",
       "quantity": "84.49",
       "side": "SHORT",
-      "status": "open",
+      "status": "closed",
       "strategy_id": "spot-perp-DEXE-1781516852468",
       "symbol": "DEXE",
       "venue": "aster"
@@ -1171,7 +1171,7 @@
       "market_type": "spot",
       "quantity": "85.21",
       "side": "LONG",
-      "status": "open",
+      "status": "closed",
       "strategy_id": "spot-perp-DEXE-1781516852468",
       "symbol": "DEXE",
       "venue": "mexc_spot"
@@ -1183,7 +1183,7 @@
       "market_type": "perp",
       "quantity": "85.21",
       "side": "SHORT",
-      "status": "open",
+      "status": "closed",
       "strategy_id": "spot-perp-DEXE-1781516882838",
       "symbol": "DEXE",
       "venue": "aster"
@@ -1195,7 +1195,7 @@
       "market_type": "spot",
       "quantity": "85.93",
       "side": "LONG",
-      "status": "open",
+      "status": "closed",
       "strategy_id": "spot-perp-DEXE-1781516882838",
       "symbol": "DEXE",
       "venue": "mexc_spot"
@@ -1207,7 +1207,7 @@
       "market_type": "perp",
       "quantity": "86.45",
       "side": "SHORT",
-      "status": "open",
+      "status": "closed",
       "strategy_id": "spot-perp-DEXE-1781517132502",
       "symbol": "DEXE",
       "venue": "aster"
@@ -1219,7 +1219,7 @@
       "market_type": "spot",
       "quantity": "87.17",
       "side": "LONG",
-      "status": "open",
+      "status": "closed",
       "strategy_id": "spot-perp-DEXE-1781517132502",
       "symbol": "DEXE",
       "venue": "mexc_spot"
@@ -1231,7 +1231,7 @@
       "market_type": "perp",
       "quantity": "89.45",
       "side": "SHORT",
-      "status": "open",
+      "status": "closed",
       "strategy_id": "spot-perp-DEXE-1781517190701",
       "symbol": "DEXE",
       "venue": "aster"
@@ -1243,7 +1243,7 @@
       "market_type": "spot",
       "quantity": "90.17",
       "side": "LONG",
-      "status": "open",
+      "status": "closed",
       "strategy_id": "spot-perp-DEXE-1781517190701",
       "symbol": "DEXE",
       "venue": "mexc_spot"
@@ -1255,7 +1255,7 @@
       "market_type": "perp",
       "quantity": "92.45",
       "side": "SHORT",
-      "status": "open",
+      "status": "closed",
       "strategy_id": "spot-perp-DEXE-1781517232704",
       "symbol": "DEXE",
       "venue": "aster"
@@ -1267,7 +1267,7 @@
       "market_type": "spot",
       "quantity": "93.17",
       "side": "LONG",
-      "status": "open",
+      "status": "closed",
       "strategy_id": "spot-perp-DEXE-1781517232704",
       "symbol": "DEXE",
       "venue": "mexc_spot"
@@ -1279,7 +1279,7 @@
       "market_type": "perp",
       "quantity": "94.25",
       "side": "SHORT",
-      "status": "open",
+      "status": "closed",
       "strategy_id": "spot-perp-DEXE-1781517302656",
       "symbol": "DEXE",
       "venue": "aster"
@@ -1291,7 +1291,7 @@
       "market_type": "spot",
       "quantity": "94.97",
       "side": "LONG",
-      "status": "open",
+      "status": "closed",
       "strategy_id": "spot-perp-DEXE-1781517302656",
       "symbol": "DEXE",
       "venue": "mexc_spot"
@@ -1303,7 +1303,7 @@
       "market_type": "perp",
       "quantity": "95.24",
       "side": "SHORT",
-      "status": "open",
+      "status": "closed",
       "strategy_id": "spot-perp-DEXE-1781517366805",
       "symbol": "DEXE",
       "venue": "aster"
@@ -1315,7 +1315,7 @@
       "market_type": "spot",
       "quantity": "95.96",
       "side": "LONG",
-      "status": "open",
+      "status": "closed",
       "strategy_id": "spot-perp-DEXE-1781517366805",
       "symbol": "DEXE",
       "venue": "mexc_spot"
@@ -1327,7 +1327,7 @@
       "market_type": "perp",
       "quantity": "98.24",
       "side": "SHORT",
-      "status": "open",
+      "status": "closed",
       "strategy_id": "spot-perp-DEXE-1781518338852",
       "symbol": "DEXE",
       "venue": "aster"
@@ -1339,7 +1339,7 @@
       "market_type": "spot",
       "quantity": "98.96",
       "side": "LONG",
-      "status": "open",
+      "status": "closed",
       "strategy_id": "spot-perp-DEXE-1781518338852",
       "symbol": "DEXE",
       "venue": "mexc_spot"
@@ -1351,7 +1351,7 @@
       "market_type": "perp",
       "quantity": "101.24",
       "side": "SHORT",
-      "status": "open",
+      "status": "closed",
       "strategy_id": "spot-perp-DEXE-1781518521342",
       "symbol": "DEXE",
       "venue": "aster"
@@ -1363,7 +1363,7 @@
       "market_type": "spot",
       "quantity": "101.96",
       "side": "LONG",
-      "status": "open",
+      "status": "closed",
       "strategy_id": "spot-perp-DEXE-1781518521342",
       "symbol": "DEXE",
       "venue": "mexc_spot"
@@ -1375,7 +1375,7 @@
       "market_type": "perp",
       "quantity": "104.24",
       "side": "SHORT",
-      "status": "open",
+      "status": "closed",
       "strategy_id": "spot-perp-DEXE-1781518674687",
       "symbol": "DEXE",
       "venue": "aster"
@@ -1387,7 +1387,7 @@
       "market_type": "spot",
       "quantity": "104.96",
       "side": "LONG",
-      "status": "open",
+      "status": "closed",
       "strategy_id": "spot-perp-DEXE-1781518674687",
       "symbol": "DEXE",
       "venue": "mexc_spot"
@@ -1399,7 +1399,7 @@
       "market_type": "perp",
       "quantity": "106.48",
       "side": "SHORT",
-      "status": "open",
+      "status": "closed",
       "strategy_id": "spot-perp-DEXE-1781518700750",
       "symbol": "DEXE",
       "venue": "aster"
@@ -1411,7 +1411,7 @@
       "market_type": "spot",
       "quantity": "107.2",
       "side": "LONG",
-      "status": "open",
+      "status": "closed",
       "strategy_id": "spot-perp-DEXE-1781518700750",
       "symbol": "DEXE",
       "venue": "mexc_spot"
@@ -1423,7 +1423,7 @@
       "market_type": "perp",
       "quantity": "109.48",
       "side": "SHORT",
-      "status": "open",
+      "status": "closed",
       "strategy_id": "spot-perp-DEXE-1781518809411",
       "symbol": "DEXE",
       "venue": "aster"
@@ -1435,7 +1435,7 @@
       "market_type": "spot",
       "quantity": "110.2",
       "side": "LONG",
-      "status": "open",
+      "status": "closed",
       "strategy_id": "spot-perp-DEXE-1781518809411",
       "symbol": "DEXE",
       "venue": "mexc_spot"
@@ -1447,7 +1447,7 @@
       "market_type": "perp",
       "quantity": "110.24",
       "side": "SHORT",
-      "status": "open",
+      "status": "closed",
       "strategy_id": "spot-perp-DEXE-1781518865046",
       "symbol": "DEXE",
       "venue": "aster"
@@ -1459,7 +1459,7 @@
       "market_type": "spot",
       "quantity": "110.96",
       "side": "LONG",
-      "status": "open",
+      "status": "closed",
       "strategy_id": "spot-perp-DEXE-1781518865046",
       "symbol": "DEXE",
       "venue": "mexc_spot"

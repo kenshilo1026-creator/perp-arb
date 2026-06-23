@@ -301,6 +301,24 @@ class AsterExecutionAdapter:
             }
         return None
 
+    async def list_open_positions(self) -> list[dict]:
+        positions: list[dict] = []
+        for item in await self._fetch_position_risk():
+            amount = Decimal(str(item.get("positionAmt", "0") or "0"))
+            if amount == 0:
+                continue
+            positions.append(
+                {
+                    "venue": "aster",
+                    "symbol": strip_aster_stable_suffix(str(item.get("symbol", ""))),
+                    "market_type": "perp",
+                    "side": "LONG" if amount > 0 else "SHORT",
+                    "quantity": format(abs(amount).normalize(), "f"),
+                    "raw": item,
+                }
+            )
+        return positions
+
     async def wait_for_order_fill(
         self,
         *,

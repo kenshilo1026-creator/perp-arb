@@ -507,6 +507,45 @@ class TelegramNotificationTests(unittest.TestCase):
 
         mocked_sync_sender.assert_called_once_with("hello")
 
+    def test_async_send_telegram_does_not_raise_when_sync_sender_fails(self) -> None:
+        with mock.patch(
+            "hydra_basis.notifications.telegram.send_telegram_sync",
+            side_effect=RuntimeError("telegram bad request"),
+        ):
+            asyncio.run(send_telegram("hello"))
+
+    def test_send_telegram_sync_escapes_html_message_text(self) -> None:
+        import hydra_basis.notifications.telegram as telegram
+
+        class FakeResponse:
+            status = 200
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self):
+                return b'{"ok": true}'
+
+        captured = {}
+
+        def fake_urlopen(request, timeout):
+            captured["body"] = request.data.decode("utf-8")
+            return FakeResponse()
+
+        with mock.patch.dict(
+            "os.environ",
+            {"TELEGRAM_BOT_TOKEN": "token", "TELEGRAM_CHAT_ID": "chat"},
+            clear=True,
+        ):
+            with mock.patch("hydra_basis.notifications.telegram.urllib.request.urlopen", new=fake_urlopen):
+                telegram.send_telegram_sync("failed=('variational', 'LAB') <bad>")
+
+        self.assertIn("&lt;bad&gt;", captured["body"])
+        self.assertIn("&#x27;variational&#x27;", captured["body"])
+
 
 class SpreadPumpRunnerTests(unittest.TestCase):
     def test_pump_runner_forever_yields_between_iterations(self) -> None:

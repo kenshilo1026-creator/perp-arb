@@ -1,4 +1,5 @@
 data/funding_history.json
+data/variational_current_funding.json
 **/__pycache__/
 *.pyc
 .env

@@ -42,6 +42,7 @@ from hydra_basis.adapters.tradexyz import list_symbols as list_tradexyz_symbols
 from hydra_basis.adapters.tradexyz import fetch_tradexyz_funding_since
 from hydra_basis.adapters.variational import fetch_variational_funding, list_symbols as list_variational_symbols
 from hydra_basis.adapters.variational import (
+    fetch_variational_current_funding,
     parse_stats_listings,
     parse_loris_historical_series,
     fetch_variational_stats,
@@ -796,6 +797,19 @@ class VariationalAdapterTests(unittest.IsolatedAsyncioTestCase):
             symbols = await list_variational_symbols(session=object())
 
         self.assertEqual(symbols, {"BTC", "ETH"})
+
+    async def test_fetch_variational_current_funding_reads_metadata_stats_without_loris(self) -> None:
+        payload = {
+            "listings": [
+                {"ticker": "LAB", "funding_rate": "-0.0019", "funding_interval_s": 3600},
+            ]
+        }
+        with patch("hydra_basis.adapters.variational.fetch_json", new=AsyncMock(return_value=payload)) as mocked:
+            current = await fetch_variational_current_funding(session=object(), symbol="LAB")
+
+        self.assertEqual(current, {"funding_rate": -0.0019, "interval_hours": 1.0})
+        mocked.assert_awaited_once()
+        self.assertIn("/metadata/stats", mocked.await_args.args[2])
 
     async def test_fetch_variational_funding_builds_point_from_stats(self) -> None:
         stats_payload = {

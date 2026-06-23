@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import html
 import json
 import os
 import urllib.request
@@ -17,7 +18,7 @@ def send_telegram_sync(message: str) -> None:
     url = f"https://api.telegram.org/bot{telegram_bot_token}/sendMessage"
     payload = {
         "chat_id": telegram_chat_id,
-        "text": message,
+        "text": html.escape(message),
         "parse_mode": "HTML",
         "disable_web_page_preview": True,
     }
@@ -36,4 +37,7 @@ def send_telegram_sync(message: str) -> None:
 
 
 async def send_telegram(message: str) -> None:
-    await asyncio.to_thread(send_telegram_sync, message)
+    try:
+        await asyncio.to_thread(send_telegram_sync, message)
+    except Exception as exc:
+        print(f"telegram send failed: {exc!r}")

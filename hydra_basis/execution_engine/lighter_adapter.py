@@ -174,6 +174,7 @@ def _normalize_lighter_live_position(*, symbol: str, item: dict) -> dict[str, ob
         sign = 1
     signed_size = size * sign
     return {
+        "venue": "lighter",
         "symbol": normalized_symbol,
         "market_type": "perp",
         "side": "LONG" if signed_size > 0 else "SHORT",
@@ -315,6 +316,47 @@ class LighterExecutionAdapter:
                 if normalized is not None:
                     return normalized
             return None
+
+        raise RuntimeError("lighter account snapshot returned no accounts")
+
+    async def list_open_positions(self) -> list[dict[str, object]]:
+        client = self._get_client()
+        for method_name in (
+            "get_positions",
+            "get_account_positions",
+            "get_positions_by_account",
+            "get_account",
+        ):
+            method = getattr(client, method_name, None)
+            if method is None:
+                continue
+            result = method()
+            if inspect.isawaitable(result):
+                result = await result
+            positions = []
+            for item in _lighter_payload_items(result):
+                item_symbol = _lighter_position_symbol(item)
+                if not item_symbol:
+                    continue
+                normalized = _normalize_lighter_live_position(symbol=item_symbol, item=item)
+                if normalized is not None:
+                    positions.append(normalized)
+            return positions
+
+        snapshot = await self._fetch_account_snapshot()
+        accounts = snapshot.get("accounts") or []
+        positions: list[dict[str, object]] = []
+        if accounts:
+            for item in accounts[0].get("positions") or []:
+                if not isinstance(item, dict):
+                    continue
+                item_symbol = _lighter_position_symbol(item)
+                if not item_symbol:
+                    continue
+                normalized = _normalize_lighter_live_position(symbol=item_symbol, item=item)
+                if normalized is not None:
+                    positions.append(normalized)
+            return positions
 
         raise RuntimeError("lighter account snapshot returned no accounts")
 

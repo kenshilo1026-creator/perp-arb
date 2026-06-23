@@ -1,6 +1,10 @@
 import tempfile
 import unittest
+import json
+import asyncio
+import aiohttp
 from pathlib import Path
+from unittest import mock
 
 from hydra_basis.execution_engine.aster_adapter import AsterExecutionAdapter, format_aster_step_quantity
 from hydra_basis.execution_engine.lighter_adapter import LighterExecutionAdapter
@@ -20,7 +24,7 @@ from hydra_basis.risk_management.funding_risk import (
     funding_cashflow_pct,
     load_funding_risk_config,
 )
-from hydra_basis.risk_management.funding_runtime import process_funding_risk_once
+from hydra_basis.risk_management.funding_runtime import FundingHistoryRiskDataProvider, process_funding_risk_once
 from hydra_basis.risk_management.recording import record_successful_execution, record_successful_live_legs
 from hydra_basis.risk_management.registry import PositionRegistry
 from hydra_basis.risk_management.runtime import process_watcher_once
@@ -29,8 +33,18 @@ from hydra_basis.risk_management.watchers import (
     parse_aster_risk_signal,
     parse_hyperliquid_risk_signal,
 )
+from hydra_basis.risk_management.exchange_watchers import (
+    AsterMarginHealthPoller,
+    HyperliquidMarginHealthPoller,
+    LighterMarginHealthPoller,
+)
 from hydra_basis.config import POSITION_REGISTRY_PATH
-from scripts.run_risk_manager import format_emergency_risk_message
+from scripts.run_risk_manager import (
+    build_startup_position_snapshot_message,
+    format_emergency_risk_message,
+    format_funding_position_summary,
+    seconds_until_next_hourly_minute,
+)
 
 
 class GlobalRiskManagementTests(unittest.IsolatedAsyncioTestCase):
@@ -300,7 +314,52 @@ class GlobalRiskManagementTests(unittest.IsolatedAsyncioTestCase):
 
 
 class RiskReconciliationTests(unittest.IsolatedAsyncioTestCase):
-    async def test_reconcile_alerts_missing_live_position_and_side_mismatch(self) -> None:
+    async def test_startup_position_snapshot_message_uses_live_positions(self) -> None:
+        class FakeCloser:
+            async def get_open_position(self, *, symbol: str, market_type: str):
+                return {"symbol": symbol, "market_type": market_type, "side": "SHORT", "quantity": "2.5"}
+
+            async def list_open_positions(self):
+                return [
+                    {"symbol": "ETH", "market_type": "perp", "side": "SHORT", "quantity": "2.5"},
+                    {"symbol": "BTC", "market_type": "perp", "side": "LONG", "quantity": "0.1"},
+                ]
+
+        registry = PositionRegistry(
+            legs=[PositionLeg("arb-1", "leg-1", "aster", "ETH", "perp", "SHORT", "999", "open")]
+        )
+
+        message = await build_startup_position_snapshot_message(
+            registry=registry,
+            closers={"aster": FakeCloser()},
+            mode="DRY_RUN",
+        )
+
+        self.assertIn("風控啟動倉位快照", message)
+        self.assertIn("aster ETH perp SHORT qty=2.5", message)
+        self.assertIn("leg=leg-1", message)
+        self.assertNotIn("qty=999", message)
+        self.assertIn("未登記 live 倉位", message)
+        self.assertIn("aster BTC perp LONG qty=0.1", message)
+
+    async def test_startup_position_snapshot_lists_live_positions_when_registry_is_empty(self) -> None:
+        class FakeCloser:
+            async def list_open_positions(self):
+                return [
+                    {"symbol": "ETH", "market_type": "perp", "side": "SHORT", "quantity": "0.2"},
+                ]
+
+        message = await build_startup_position_snapshot_message(
+            registry=PositionRegistry(legs=[]),
+            closers={"aster": FakeCloser()},
+            mode="DRY_RUN",
+        )
+
+        self.assertIn("已登記 live 倉位: 無", message)
+        self.assertIn("未登記 live 倉位", message)
+        self.assertIn("aster ETH perp SHORT qty=0.2", message)
+
+    async def test_reconcile_closes_missing_live_position_and_alerts_side_mismatch(self) -> None:
         class FakeCloser:
             async def get_open_position(self, *, symbol: str, market_type: str):
                 if market_type == "spot":
@@ -319,9 +378,11 @@ class RiskReconciliationTests(unittest.IsolatedAsyncioTestCase):
             closers={"aster": FakeCloser(), "mexc": FakeCloser()},
         )
 
-        self.assertEqual(result["mismatch_count"], 2)
+        self.assertEqual(result["mismatch_count"], 1)
+        self.assertEqual(result["updated_leg_ids"], ["spot"])
+        self.assertEqual(registry.get_leg("spot").status, "closed")
         self.assertTrue(any("side mismatch" in item for item in result["messages"]))
-        self.assertTrue(any("missing live position" in item for item in result["messages"]))
+        self.assertTrue(any("closed missing live position" in item for item in result["messages"]))
 
     async def test_reconcile_updates_registry_quantity_to_live_quantity(self) -> None:
         class FakeCloser:
@@ -336,6 +397,23 @@ class RiskReconciliationTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result["updated_leg_ids"], ["long"])
         self.assertEqual(registry.get_leg("long").quantity, "2.5")
+
+    async def test_reconcile_uses_mexc_router_for_mexc_spot_venue(self) -> None:
+        calls = []
+
+        class FakeCloser:
+            async def get_open_position(self, *, symbol: str, market_type: str):
+                calls.append({"symbol": symbol, "market_type": market_type})
+                return {"symbol": symbol, "market_type": market_type, "side": "LONG", "quantity": "10"}
+
+        registry = PositionRegistry(
+            legs=[PositionLeg("arb-4", "spot-long", "mexc_spot", "DEXE", "spot", "LONG", "10", "open")]
+        )
+
+        result = await reconcile_registry_positions(registry=registry, closers={"mexc": FakeCloser()})
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(calls, [{"symbol": "DEXE", "market_type": "spot"}])
 
     async def test_reconcile_reports_unregistered_live_positions_when_supported(self) -> None:
         class FakeCloser:
@@ -464,6 +542,176 @@ class FundingRiskTests(unittest.TestCase):
 
 
 class FundingRiskRuntimeTests(unittest.IsolatedAsyncioTestCase):
+    def test_seconds_until_next_hourly_minute_targets_minute_one(self) -> None:
+        import datetime as dt
+
+        tz = dt.timezone.utc
+
+        self.assertEqual(
+            seconds_until_next_hourly_minute(now=dt.datetime(2026, 6, 23, 10, 0, 30, tzinfo=tz)),
+            30.0,
+        )
+        self.assertEqual(
+            seconds_until_next_hourly_minute(now=dt.datetime(2026, 6, 23, 10, 1, 0, tzinfo=tz)),
+            3600.0,
+        )
+        self.assertEqual(
+            seconds_until_next_hourly_minute(now=dt.datetime(2026, 6, 23, 10, 30, 0, tzinfo=tz)),
+            1860.0,
+        )
+
+    def test_format_funding_position_summary_reports_existing_open_position_rates(self) -> None:
+        registry = PositionRegistry(
+            legs=[
+                PositionLeg("arb-1", "a-short", "aster", "LAB", "perp", "SHORT", "10", "open"),
+                PositionLeg("arb-1", "v-long", "variational", "LAB", "perp", "LONG", "10", "open"),
+                PositionLeg("arb-1", "spot", "mexc", "LAB", "spot", "LONG", "10", "open"),
+            ]
+        )
+
+        message = format_funding_position_summary(
+            registry=registry,
+            projected_rates_by_strategy={
+                "arb-1": [
+                    ProjectedFundingRate("a-short", funding_rate=0.001, interval_hours=1.0),
+                    ProjectedFundingRate("v-long", funding_rate=-0.0005, interval_hours=1.0),
+                ]
+            },
+            mode="DRY_RUN",
+        )
+
+        self.assertIn("現有倉位資費檢查", message)
+        self.assertIn("aster LAB SHORT rate=0.100000%/1h cashflow=0.100000%", message)
+        self.assertIn("variational LAB LONG rate=-0.050000%/1h cashflow=0.050000%", message)
+        self.assertIn("net=0.150000%", message)
+
+    async def test_variational_projection_uses_current_stats_when_history_fetch_fails(self) -> None:
+        registry = PositionRegistry(
+            legs=[
+                PositionLeg("arb-1", "var-short", "variational", "LAB", "perp", "SHORT", "100", "open"),
+            ]
+        )
+
+        class Session:
+            pass
+
+        provider = FundingHistoryRiskDataProvider(session=Session())
+
+        async def failing_history_fetch(session, symbol, start_time_ms):
+            raise RuntimeError("loris browser unavailable")
+
+        async def current_variational_fetch(session, symbol):
+            self.assertEqual(symbol, "LAB")
+            return ProjectedFundingRate("ignored", funding_rate=-0.0019, interval_hours=1.0)
+
+        from hydra_basis.risk_management import funding_runtime
+
+        original_fetchers_since = funding_runtime.FETCHERS_SINCE
+        original_current_fetchers = funding_runtime.CURRENT_FUNDING_FETCHERS
+        funding_runtime.FETCHERS_SINCE = {"variational": failing_history_fetch}
+        funding_runtime.CURRENT_FUNDING_FETCHERS = {"variational": current_variational_fetch}
+        try:
+            settlements = await provider.fetch_settlements(registry, FundingRiskState())
+            rates = await provider.fetch_projected_rates(registry)
+        finally:
+            funding_runtime.FETCHERS_SINCE = original_fetchers_since
+            funding_runtime.CURRENT_FUNDING_FETCHERS = original_current_fetchers
+
+        self.assertEqual(settlements, [])
+        self.assertEqual(rates["arb-1"], [ProjectedFundingRate("var-short", -0.0019, 1.0)])
+
+    async def test_variational_settlement_fetch_does_not_call_loris_history(self) -> None:
+        registry = PositionRegistry(
+            legs=[
+                PositionLeg("arb-1", "var-short", "variational", "LAB", "perp", "SHORT", "100", "open"),
+            ]
+        )
+        provider = FundingHistoryRiskDataProvider(session=object())
+        calls = 0
+
+        async def forbidden_history_fetch(session, symbol, start_time_ms):
+            nonlocal calls
+            calls += 1
+            raise AssertionError("risk manager must not call variational historical funding")
+
+        from hydra_basis.risk_management import funding_runtime
+
+        original_fetchers_since = funding_runtime.FETCHERS_SINCE
+        original_current_only_venues = funding_runtime.CURRENT_FUNDING_ONLY_VENUES
+        funding_runtime.FETCHERS_SINCE = {"variational": forbidden_history_fetch}
+        funding_runtime.CURRENT_FUNDING_ONLY_VENUES = {"variational"}
+        try:
+            settlements = await provider.fetch_settlements(registry, FundingRiskState())
+        finally:
+            funding_runtime.FETCHERS_SINCE = original_fetchers_since
+            funding_runtime.CURRENT_FUNDING_ONLY_VENUES = original_current_only_venues
+
+        self.assertEqual(settlements, [])
+        self.assertEqual(calls, 0)
+
+    async def test_variational_current_funding_is_cached_and_trimmed_to_7_days(self) -> None:
+        now_ms = 1_800_000_000_000
+        seven_days_ms = 7 * 24 * 60 * 60 * 1000
+        with tempfile.TemporaryDirectory() as temp_dir:
+            cache_path = Path(temp_dir) / "variational_current_funding.json"
+            cache_path.write_text(
+                json.dumps(
+                    {
+                        "variational::LAB": [
+                            {
+                                "venue": "variational",
+                                "symbol": "LAB",
+                                "ts_ms": now_ms - seven_days_ms - 1,
+                                "date": "old",
+                                "funding_rate": -0.01,
+                                "interval_hours": 1.0,
+                                "source": "variational_current",
+                            },
+                            {
+                                "venue": "variational",
+                                "symbol": "LAB",
+                                "ts_ms": now_ms - 60_000,
+                                "date": "recent",
+                                "funding_rate": -0.001,
+                                "interval_hours": 1.0,
+                                "source": "variational_current",
+                            },
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            registry = PositionRegistry(
+                legs=[
+                    PositionLeg("arb-1", "var-short", "variational", "LAB", "perp", "SHORT", "100", "open"),
+                ]
+            )
+            provider = FundingHistoryRiskDataProvider(
+                session=object(),
+                current_funding_cache_path=cache_path,
+                now_ms_func=lambda: now_ms,
+            )
+
+            async def current_variational_fetch(session, symbol):
+                return {"funding_rate": -0.0019, "interval_hours": 1.0}
+
+            from hydra_basis.risk_management import funding_runtime
+
+            original_current_fetchers = funding_runtime.CURRENT_FUNDING_FETCHERS
+            funding_runtime.CURRENT_FUNDING_FETCHERS = {"variational": current_variational_fetch}
+            try:
+                await provider.fetch_projected_rates(registry)
+            finally:
+                funding_runtime.CURRENT_FUNDING_FETCHERS = original_current_fetchers
+
+            payload = json.loads(cache_path.read_text(encoding="utf-8"))
+
+        rows = payload["variational::LAB"]
+        self.assertEqual([row["ts_ms"] for row in rows], [now_ms - 60_000, now_ms])
+        self.assertEqual(rows[-1]["funding_rate"], -0.0019)
+        self.assertEqual(rows[-1]["interval_hours"], 1.0)
+        self.assertEqual(rows[-1]["source"], "variational_current")
+
     async def test_process_funding_risk_once_auto_closes_counterparty_on_projection_loss(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             registry_path = Path(temp_dir) / "position_registry.json"
@@ -735,6 +983,100 @@ class RiskWatcherMappingTests(unittest.TestCase):
         self.assertEqual(adl.symbol, "BTC")
         self.assertEqual(adl.event_type, "ADL")
 
+    def test_aster_watcher_uses_user_stream_instead_of_force_orders_rest_polling(self) -> None:
+        from hydra_basis.risk_management.exchange_watchers import AsterForceOrdersPoller
+
+        class FakeMessage:
+            type = aiohttp.WSMsgType.TEXT
+
+            def json(self):
+                return {
+                    "e": "ORDER_TRADE_UPDATE",
+                    "o": {"s": "BTCUSDT", "c": "adl_autoclose-123", "X": "FILLED"},
+                }
+
+        class FakeWebsocket:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return None
+
+            def __aiter__(self):
+                self._items = iter([FakeMessage()])
+                return self
+
+            async def __anext__(self):
+                try:
+                    return next(self._items)
+                except StopIteration:
+                    raise asyncio.CancelledError()
+
+        class FakePoller(AsterForceOrdersPoller):
+            async def _fetch_force_orders(self, auto_close_type: str) -> list[dict]:
+                raise AssertionError("forceOrders REST polling should not be used for Aster ADL monitoring")
+
+            async def _start_user_stream(self) -> str:
+                return "listen-key"
+
+            async def _keepalive_user_stream(self, listen_key: str) -> None:
+                raise asyncio.CancelledError()
+
+            def _connect_user_stream(self, session, listen_key: str):
+                self.connected_listen_key = listen_key
+                return FakeWebsocket()
+
+        poller = FakePoller()
+
+        async def exercise() -> None:
+            async for signal in poller.watch():
+                self.assertEqual(signal.venue, "aster")
+                self.assertEqual(signal.symbol, "BTC")
+                self.assertEqual(signal.event_type, "ADL")
+                break
+
+        asyncio.run(exercise())
+
+        self.assertEqual(poller.connected_listen_key, "listen-key")
+
+    def test_aster_user_stream_notifies_and_backs_off_10s_on_rate_limit(self) -> None:
+        from hydra_basis.risk_management.exchange_watchers import AsterForceOrdersPoller
+
+        calls = 0
+        sleeps = []
+        notifications = []
+
+        class FakePoller(AsterForceOrdersPoller):
+            async def _start_user_stream(self) -> str:
+                nonlocal calls
+                calls += 1
+                if calls == 1:
+                    raise RuntimeError("aster listenKey 429: Too many requests")
+                raise asyncio.CancelledError()
+
+        async def fake_sleep(seconds):
+            sleeps.append(seconds)
+
+        async def notify(exc):
+            notifications.append(str(exc))
+
+        poller = FakePoller(
+            rate_limit_backoff_seconds=10.0,
+            on_rate_limit=notify,
+        )
+
+        async def exercise() -> None:
+            with mock.patch("hydra_basis.risk_management.exchange_watchers.asyncio.sleep", new=fake_sleep):
+                with self.assertRaises(asyncio.CancelledError):
+                    async for _signal in poller.watch():
+                        pass
+
+        asyncio.run(exercise())
+
+        self.assertIn(10.0, sleeps)
+        self.assertEqual(notifications, ["aster listenKey 429: Too many requests"])
+        self.assertEqual(calls, 2)
+
 
 class RiskRuntimeTests(unittest.IsolatedAsyncioTestCase):
     async def test_process_watcher_once_closes_counterparty_and_saves_registry(self) -> None:
@@ -785,6 +1127,124 @@ class MarginTopupTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(liquidation_distance_pct(side="LONG", mark_price=100.0, liquidation_price=95.0), 5.0)
         self.assertEqual(liquidation_distance_pct(side="SHORT", mark_price=100.0, liquidation_price=105.0), 5.0)
+
+    async def test_aster_margin_health_prefers_websocket_mark_price_cache(self) -> None:
+        class FakeAdapter:
+            BASE_URL = "https://example.invalid"
+
+            def build_signed_params(self, params):
+                return params
+
+        async def mark_price_provider(symbol: str):
+            self.assertEqual(symbol, "ETH")
+            return 101.5
+
+        class FakePoller(AsterMarginHealthPoller):
+            async def _fetch_positions(self):
+                return [
+                    {
+                        "symbol": "ETHUSDT",
+                        "positionSide": "BOTH",
+                        "positionAmt": "0.1",
+                        "liquidationPrice": "95",
+                        "markPrice": "99",
+                    }
+                ]
+
+        poller = FakePoller(adapter=FakeAdapter(), mark_price_provider=mark_price_provider)
+
+        signals = await poller.poll_once()
+
+        self.assertEqual(len(signals), 1)
+        self.assertEqual(signals[0].mark_price, 101.5)
+
+    async def test_hyperliquid_margin_health_prefers_websocket_mid_cache(self) -> None:
+        async def mark_price_provider(symbol: str):
+            self.assertEqual(symbol, "ETH")
+            return 202.5
+
+        class FakePoller(HyperliquidMarginHealthPoller):
+            async def _fetch_state(self):
+                return {
+                    "assetPositions": [
+                        {
+                            "position": {
+                                "coin": "ETH",
+                                "szi": "0.2",
+                                "liquidationPx": "180",
+                                "markPx": "199",
+                            }
+                        }
+                    ]
+                }
+
+            async def _fetch_mids(self):
+                raise AssertionError("allMids REST should not be fetched when websocket cache is available")
+
+        poller = FakePoller(user="0xabc", mark_price_provider=mark_price_provider)
+
+        signals = await poller.poll_once()
+
+        self.assertEqual(len(signals), 1)
+        self.assertEqual(signals[0].mark_price, 202.5)
+
+    async def test_lighter_margin_health_poller_yields_signal_for_nonzero_position_with_liq_price(self) -> None:
+        async def fetch_account():
+            return {
+                "accounts": [
+                    {
+                        "positions": [
+                            {
+                                "symbol": "ETH",
+                                "position": "0.5",
+                                "sign": -1,
+                                "liquidation_price": "105",
+                            }
+                        ]
+                    }
+                ]
+            }
+
+        async def fetch_orderbook(symbol):
+            self.assertEqual(symbol, "ETH")
+            return {"bid": 99.0, "ask": 101.0, "ts_ms": 123}
+
+        poller = LighterMarginHealthPoller(
+            account_fetcher=fetch_account,
+            orderbook_fetcher=fetch_orderbook,
+        )
+
+        signals = await poller.poll_once()
+
+        self.assertEqual(len(signals), 1)
+        self.assertEqual(signals[0].venue, "lighter")
+        self.assertEqual(signals[0].symbol, "ETH")
+        self.assertEqual(signals[0].side, "SHORT")
+        self.assertEqual(signals[0].mark_price, 100.0)
+        self.assertEqual(signals[0].liquidation_price, 105.0)
+
+    async def test_lighter_margin_health_poller_skips_zero_position_or_missing_liq_price(self) -> None:
+        async def fetch_account():
+            return {
+                "accounts": [
+                    {
+                        "positions": [
+                            {"symbol": "ETH", "position": "0", "sign": 1, "liquidation_price": "95"},
+                            {"symbol": "BTC", "position": "1", "sign": 1, "liquidation_price": "0"},
+                        ]
+                    }
+                ]
+            }
+
+        async def fetch_orderbook(symbol):
+            raise AssertionError("orderbook should not be fetched for skipped positions")
+
+        poller = LighterMarginHealthPoller(
+            account_fetcher=fetch_account,
+            orderbook_fetcher=fetch_orderbook,
+        )
+
+        self.assertEqual(await poller.poll_once(), [])
 
     def test_loads_default_margin_topup_config(self) -> None:
         from hydra_basis.risk_management.margin_topup import load_margin_topup_config
@@ -880,7 +1340,7 @@ class MarginTopupTests(unittest.IsolatedAsyncioTestCase):
         registry.get_leg("leg-1").margin_topups = 0
         self.assertEqual((await manager.handle_snapshot(snapshot))["action"], "cooldown")
 
-    async def test_margin_topup_manager_returns_emergency_event_when_topup_unsupported(self) -> None:
+    async def test_margin_topup_manager_reports_failure_without_emergency_close_event(self) -> None:
         from hydra_basis.risk_management.margin_topup import (
             MarginHealthSnapshot,
             MarginTopupConfig,
@@ -907,7 +1367,8 @@ class MarginTopupTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertFalse(result["ok"])
         self.assertEqual(result["action"], "topup_failed")
-        self.assertEqual(result["risk_event"].event_type, "MANUAL_EMERGENCY")
+        self.assertEqual(result["error"], "lighter isolated margin top-up is not supported")
+        self.assertNotIn("risk_event", result)
 
 
 class EmergencyCloserAdapterTests(unittest.IsolatedAsyncioTestCase):

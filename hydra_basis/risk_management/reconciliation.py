@@ -12,6 +12,13 @@ def _position_key(*, venue: str, symbol: str, market_type: str, side: str) -> tu
     )
 
 
+def _closer_key_for_venue(venue: str) -> str:
+    normalized = venue.strip().lower()
+    if normalized == "mexc_spot":
+        return "mexc"
+    return normalized
+
+
 async def reconcile_registry_positions(
     *,
     registry: PositionRegistry,
@@ -24,7 +31,7 @@ async def reconcile_registry_positions(
 
     open_legs = [leg for strategy_id in registry.open_strategy_ids() for leg in registry.legs_for_strategy(strategy_id) if leg.status == "open"]
     for leg in open_legs:
-        closer = closers.get(leg.venue)
+        closer = closers.get(_closer_key_for_venue(leg.venue))
         if closer is None:
             mismatch_count += 1
             messages.append(f"registry mismatch: missing closer for {leg.venue}:{leg.symbol} leg={leg.leg_id}")
@@ -42,8 +49,9 @@ async def reconcile_registry_positions(
             messages.append(f"registry mismatch: live query failed for {leg.venue}:{leg.symbol} leg={leg.leg_id}: {exc}")
             continue
         if not live:
-            mismatch_count += 1
-            messages.append(f"registry mismatch: missing live position for {leg.venue}:{leg.symbol} leg={leg.leg_id}")
+            leg.status = "closed"
+            updated_leg_ids.append(leg.leg_id)
+            messages.append(f"registry closed missing live position for {leg.venue}:{leg.symbol} leg={leg.leg_id}")
             continue
 
         live_side = str(live.get("side", "")).strip().upper()

@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Protocol
 
-from hydra_basis.risk_management.models import PositionSide, RiskEvent
+from hydra_basis.risk_management.models import PositionSide
 from hydra_basis.risk_management.registry import PositionRegistry
 
 
@@ -185,19 +185,9 @@ class MarginTopupManager:
         distance_pct: float,
         error: str,
     ) -> dict[str, object]:
-        leg = self.registry.get_leg(snapshot.leg_id)
-        event = RiskEvent(
-            strategy_id=leg.strategy_id,
-            leg_id=leg.leg_id,
-            venue=leg.venue,
-            symbol=leg.symbol,
-            event_type="MANUAL_EMERGENCY",
-            message=f"margin top-up failed: {error}",
-        )
         return {
             "ok": False,
             "action": "topup_failed",
             "distance_pct": distance_pct,
             "error": error,
-            "risk_event": event,
         }

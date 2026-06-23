@@ -113,12 +113,12 @@ class MexcExecutionAdapter:
                     raise RuntimeError(f"mexc order status {resp.status}: {data}")
                 return data.get("data", data)
 
-    async def _get_open_positions(self, symbol: str) -> list[dict]:
-        contract_sym = mexc_contract_symbol(symbol)
+    async def _get_open_positions(self, symbol: str | None = None) -> list[dict]:
+        params = {"symbol": mexc_contract_symbol(symbol)} if symbol else None
         async with aiohttp.ClientSession() as session:
             async with session.get(
                 f"{self.BASE_URL}/api/v1/private/position/open_positions",
-                params={"symbol": contract_sym},
+                params=params,
                 headers=self._signed_headers(""),
             ) as resp:
                 data = await resp.json()
@@ -156,6 +156,32 @@ class MexcExecutionAdapter:
                 "raw": item,
             }
         return None
+
+    async def list_open_positions(self) -> list[dict]:
+        positions: list[dict] = []
+        for item in await self._get_open_positions(None):
+            quantity = Decimal(str(item.get("holdVol", item.get("positionVol", "0")) or "0"))
+            if quantity <= 0:
+                continue
+            position_type = int(item.get("positionType", item.get("position_type", 0)) or 0)
+            if position_type == 1:
+                side = "LONG"
+            elif position_type == 2:
+                side = "SHORT"
+            else:
+                continue
+            symbol = str(item.get("symbol", "")).upper().replace("_USDT", "").replace("USDT", "")
+            positions.append(
+                {
+                    "venue": "mexc",
+                    "symbol": symbol,
+                    "market_type": "perp",
+                    "side": side,
+                    "quantity": format(quantity.normalize(), "f"),
+                    "raw": item,
+                }
+            )
+        return positions
 
     async def place_limit_order(
         self, *, symbol: str, side: str, amount: str, clip_usd: float, price: str

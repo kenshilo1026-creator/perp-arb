@@ -110,6 +110,17 @@ async def list_symbols(session) -> set[str]:
     return set(stats.keys())
 
 
+async def fetch_variational_current_funding(session, symbol: str) -> dict[str, float] | None:
+    stats = await fetch_variational_stats(session)
+    entry = stats.get(symbol.upper())
+    if entry is None:
+        return None
+    return {
+        "funding_rate": float(entry["funding_rate"]),
+        "interval_hours": float(entry["interval_hours"]),
+    }
+
+
 async def fetch_variational_funding(session, symbol: str) -> list[FundingPoint]:
     end_ms = now_ms()
     start_ms = end_ms - 7 * 24 * 60 * 60 * 1000

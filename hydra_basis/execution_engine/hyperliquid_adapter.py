@@ -195,6 +195,29 @@ class HyperliquidExecutionAdapter:
             }
         return None
 
+    async def list_open_positions(self) -> list[dict]:
+        state = await self._fetch_clearinghouse_state()
+        positions: list[dict] = []
+        for item in state.get("assetPositions", []):
+            position = item.get("position", {})
+            symbol = str(position.get("coin", "")).strip().upper()
+            if not symbol:
+                continue
+            size = Decimal(str(position.get("szi", "0") or "0"))
+            if size == 0:
+                continue
+            positions.append(
+                {
+                    "venue": "hyperliquid",
+                    "symbol": symbol,
+                    "market_type": "perp",
+                    "side": "LONG" if size > 0 else "SHORT",
+                    "quantity": format(abs(size).normalize(), "f"),
+                    "raw": item,
+                }
+            )
+        return positions
+
     async def ensure_isolated_margin(self, symbol: str) -> int:
         asset_index = await self._get_asset_index(symbol)
         if self.skip_margin_setup or asset_index in self._isolated_asset_indices:

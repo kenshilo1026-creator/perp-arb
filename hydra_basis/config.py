@@ -35,6 +35,7 @@ FUNDING_RISK_CONFIG_PATH = Path("configs/funding_risk.jsonc")
 ORDERBOOK_SPREADS_PATH = Path("data/orderbook_spreads.json")
 POSITION_REGISTRY_PATH = Path("data/position_registry.json")
 FUNDING_RISK_STATE_PATH = Path("data/funding_risk_state.json")
+VARIATIONAL_CURRENT_FUNDING_CACHE_PATH = Path("data/variational_current_funding.json")
 FUNDING_HISTORY_LOOKBACK_DAYS = 14
 HYPERLIQUID_REQUEST_DELAY_SECONDS = 1.0
 LIGHTER_REQUEST_DELAY_SECONDS = 0.35

@@ -255,6 +255,30 @@ class MexcSpotExecutionAdapter:
             }
         return None
 
+    async def list_open_positions(self) -> list[dict]:
+        account = await self._get_account()
+        positions: list[dict] = []
+        for item in account.get("balances", []):
+            asset = str(item.get("asset", "")).strip().upper()
+            if not asset or asset in {"USDT", "USDC", "USD"}:
+                continue
+            free = Decimal(str(item.get("free", "0") or "0"))
+            locked = Decimal(str(item.get("locked", "0") or "0"))
+            quantity = free + locked
+            if quantity <= 0:
+                continue
+            positions.append(
+                {
+                    "venue": "mexc_spot",
+                    "symbol": asset,
+                    "market_type": "spot",
+                    "side": "LONG",
+                    "quantity": format(quantity.normalize(), "f"),
+                    "raw": item,
+                }
+            )
+        return positions
+
     async def close_position(
         self,
         *,

@@ -45,6 +45,27 @@ async def fetch_lighter_funding(session, symbol: str) -> list[FundingPoint]:
     return await fetch_lighter_funding_since(session, symbol, start_time_ms=ms_days_ago(LOOKBACK_DAYS))
 
 
+async def fetch_lighter_current_funding(session, symbol: str) -> dict[str, float] | None:
+    url = "https://mainnet.zklighter.elliot.ai/api/v1/funding-rates"
+    data = await run_serialized(
+        "lighter",
+        lambda: fetch_json(session, "GET", url),
+        delay_seconds=LIGHTER_REQUEST_DELAY_SECONDS,
+    )
+    rows = data.get("funding_rates") or []
+    target_symbol = symbol.upper()
+    for row in rows:
+        if str(row.get("exchange") or "").lower() != "lighter":
+            continue
+        if str(row.get("symbol") or "").upper() != target_symbol:
+            continue
+        return {
+            "funding_rate": signed_rate_from_history_row(row),
+            "interval_hours": 1.0,
+        }
+    return None
+
+
 async def fetch_lighter_funding_since(session, symbol: str, start_time_ms: int) -> list[FundingPoint]:
     market_map = await fetch_lighter_market_map(session)
     market_id = market_map.get(symbol.upper())

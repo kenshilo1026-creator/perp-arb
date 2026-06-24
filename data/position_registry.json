@@ -1463,6 +1463,30 @@
       "strategy_id": "spot-perp-DEXE-1781518865046",
       "symbol": "DEXE",
       "venue": "mexc_spot"
+    },
+    {
+      "last_margin_topup_ts_ms": null,
+      "leg_id": "live-pair-btw-35000-1782290760458:mexc_spot:spot:long",
+      "margin_topups": 0,
+      "market_type": "spot",
+      "quantity": "35000",
+      "side": "LONG",
+      "status": "open",
+      "strategy_id": "live-pair-btw-35000-1782290760458",
+      "symbol": "BTW",
+      "venue": "mexc_spot"
+    },
+    {
+      "last_margin_topup_ts_ms": null,
+      "leg_id": "live-pair-btw-35000-1782290760458:aster:perp:short",
+      "margin_topups": 0,
+      "market_type": "perp",
+      "quantity": "35000",
+      "side": "SHORT",
+      "status": "open",
+      "strategy_id": "live-pair-btw-35000-1782290760458",
+      "symbol": "BTW",
+      "venue": "aster"
     }
   ]
 }

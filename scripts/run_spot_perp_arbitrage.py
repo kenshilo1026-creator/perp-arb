@@ -38,6 +38,8 @@ from scripts.place_order import (
     MAKER_FILL_TIMEOUT_SECONDS,
     MAKER_REPRICE_ATTEMPTS,
     VARIATIONAL_MAKER_REPRICE_MIN_CHANGE_PCT,
+    _executed_quantity_from_result,
+    _registry_fallback_leg,
     build_adapter_for_venue,
 )
 
@@ -336,12 +338,29 @@ async def fetch_required_live_position(
     symbol: str,
     market_type: str,
     expected_side: str,
+    fallback_quantity: str | None = None,
 ) -> dict:
     getter = getattr(adapter, "get_open_position", None)
     if not callable(getter):
+        if venue.strip().lower() == "variational" and fallback_quantity:
+            return _registry_fallback_leg(
+                venue=venue,
+                symbol=symbol,
+                market_type=market_type,
+                expected_side=expected_side,
+                quantity=fallback_quantity,
+            )
         raise RuntimeError(f"{venue} does not support live position query")
     position = await getter(symbol=symbol, market_type=market_type)
     if not position:
+        if venue.strip().lower() == "variational" and fallback_quantity:
+            return _registry_fallback_leg(
+                venue=venue,
+                symbol=symbol,
+                market_type=market_type,
+                expected_side=expected_side,
+                quantity=fallback_quantity,
+            )
         raise RuntimeError(f"no live {market_type} position found for {venue}:{symbol}")
     side = str(position.get("side", "")).strip().upper()
     quantity = str(position.get("quantity", "")).strip()
@@ -435,6 +454,11 @@ async def execute_spot_perp_plan(
             plan.maker_venue: maker_adapter,
             plan.taker_venue: taker_adapter,
         }
+        fallback_quantity = (
+            _executed_quantity_from_result(result)
+            if plan.short_venue.strip().lower() == "variational"
+            else None
+        )
         spot_leg = await fetch_required_live_position(
             adapters_by_venue[MEXC_SPOT_VENUE],
             venue=MEXC_SPOT_VENUE,
@@ -448,6 +472,7 @@ async def execute_spot_perp_plan(
             symbol=plan.symbol,
             market_type="perp",
             expected_side="SHORT",
+            fallback_quantity=fallback_quantity,
         )
         strategy_id = f"spot-perp-{plan.symbol}-{int(time.time() * 1000)}"
         recorded_strategy_id = record_successful_live_legs(

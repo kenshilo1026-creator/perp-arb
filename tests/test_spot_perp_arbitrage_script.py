@@ -12,6 +12,7 @@ from scripts.run_spot_perp_arbitrage import (
     compute_token_batch_count,
     compute_base_quantity,
     execute_spot_perp_plan,
+    fetch_required_live_position,
     format_spot_perp_execution_summary,
     maker_limit_price,
     normalize_mode,
@@ -38,6 +39,33 @@ class SpotPerpArbitrageScriptTests(unittest.TestCase):
         self.assertEqual(
             spot_perp_sides(mode="close"),
             {"mexc_spot": "SELL", "perp": "BUY"},
+        )
+
+    def test_spot_arb_fetch_required_live_position_allows_variational_registry_fallback(self) -> None:
+        class VariationalAdapter:
+            pass
+
+        async def exercise():
+            return await fetch_required_live_position(
+                VariationalAdapter(),
+                venue="variational",
+                symbol="LAB",
+                market_type="perp",
+                expected_side="SHORT",
+                fallback_quantity="8.5",
+            )
+
+        leg = asyncio.run(exercise())
+
+        self.assertEqual(
+            leg,
+            {
+                "venue": "variational",
+                "symbol": "LAB",
+                "market_type": "perp",
+                "side": "SHORT",
+                "quantity": "8.5",
+            },
         )
 
     def test_spread_lower_side_becomes_taker(self) -> None:
@@ -1554,6 +1582,37 @@ class SpotPerpArbitrageRecordingTests(unittest.IsolatedAsyncioTestCase):
             registry = PositionRegistry.load(registry_path)
             self.assertEqual(registry.get_leg(f"{strategy_id}:aster:perp:short").quantity, "99")
             self.assertEqual(registry.get_leg(f"{strategy_id}:lighter:perp:long").quantity, "100")
+
+    async def test_place_order_records_variational_from_executed_quantity_when_live_query_unavailable(self) -> None:
+        class AsterAdapter:
+            async def get_open_position(self, *, symbol: str, market_type: str):
+                return {"symbol": symbol, "market_type": market_type, "side": "LONG", "quantity": "12"}
+
+        class VariationalAdapter:
+            pass
+
+        with TemporaryDirectory() as temp_dir:
+            registry_path = Path(temp_dir) / "position_registry.json"
+            strategy_id = await record_open_execution_from_live_positions(
+                execution_result={
+                    "ok": True,
+                    "maker_result": {"ok": True},
+                    "hedge_result": {"ok": True},
+                    "executed_quantity": "12",
+                },
+                adapters_by_venue={
+                    "variational": VariationalAdapter(),
+                    "aster": AsterAdapter(),
+                },
+                symbol="LAB",
+                short_venue="variational",
+                long_venue="aster",
+                registry_path=registry_path,
+            )
+
+            registry = PositionRegistry.load(registry_path)
+            self.assertEqual(registry.get_leg(f"{strategy_id}:variational:perp:short").quantity, "12")
+            self.assertEqual(registry.get_leg(f"{strategy_id}:aster:perp:long").quantity, "12")
 
 
 class VariationalBrowserAdapterTests(unittest.IsolatedAsyncioTestCase):

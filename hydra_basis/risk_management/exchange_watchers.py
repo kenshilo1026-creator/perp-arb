@@ -5,6 +5,7 @@ import contextlib
 from decimal import Decimal
 import inspect
 import os
+from pathlib import Path
 from typing import AsyncIterator
 from collections.abc import Callable
 from urllib.parse import urlencode
@@ -17,6 +18,7 @@ from hydra_basis.execution_engine.lighter_adapter import LIGHTER_BASE_URL
 from hydra_basis.execution_engine.lighter_live import fetch_lighter_orderbook_live
 from hydra_basis.streams.aster import parse_mark_price_array_message
 from hydra_basis.risk_management.margin_topup import VenueMarginHealthSignal
+from hydra_basis.risk_management.registry import PositionRegistry
 from hydra_basis.risk_management.watchers import (
     VenueRiskSignal,
     parse_aster_risk_signal,
@@ -460,6 +462,106 @@ class LighterMarginHealthPoller:
                     side=side,  # type: ignore[arg-type]
                     mark_price=mark,
                     liquidation_price=liquidation_price,
+                )
+            )
+        return signals
+
+    async def watch(self):
+        while True:
+            for signal in await self.poll_once():
+                yield signal
+            await asyncio.sleep(self.poll_seconds)
+
+
+class LighterPositionLossPoller:
+    def __init__(
+        self,
+        *,
+        registry_path: Path,
+        position_getter=None,
+        position_lister=None,
+        poll_seconds: float = 30.0,
+    ) -> None:
+        self.registry_path = registry_path
+        self.position_getter = position_getter
+        self.position_lister = position_lister
+        self.poll_seconds = poll_seconds
+        self._emitted_leg_ids: set[str] = set()
+
+    @staticmethod
+    def _position_key(position: dict) -> tuple[str, str]:
+        symbol = str(position.get("symbol", "")).strip().upper()
+        market_type = str(position.get("market_type", "perp")).strip().lower() or "perp"
+        return symbol, market_type
+
+    @staticmethod
+    def _position_has_size(position: dict) -> bool:
+        try:
+            return Decimal(str(position.get("quantity", "0") or "0")) != 0
+        except Exception:
+            return bool(position)
+
+    async def _live_position_keys(self) -> set[tuple[str, str]]:
+        if self.position_lister is None:
+            return set()
+        result = self.position_lister()
+        if inspect.isawaitable(result):
+            result = await result
+        keys: set[tuple[str, str]] = set()
+        for item in result or []:
+            if isinstance(item, dict) and self._position_has_size(item):
+                keys.add(self._position_key(item))
+        return keys
+
+    async def poll_once(self) -> list[VenueRiskSignal]:
+        registry = PositionRegistry.load(self.registry_path)
+        signals: list[VenueRiskSignal] = []
+        open_lighter_legs = [
+            leg
+            for strategy_id in registry.open_strategy_ids()
+            for leg in registry.legs_for_strategy(strategy_id)
+            if leg.status == "open" and leg.venue.strip().lower() == "lighter"
+        ]
+        live_keys: set[tuple[str, str]] | None = None
+        if self.position_lister is not None:
+            try:
+                live_keys = await self._live_position_keys()
+            except Exception as exc:
+                print(
+                    f"lighter position loss batch check skipped: {exc!r}",
+                    flush=True,
+                )
+                return []
+        for leg in open_lighter_legs:
+            if live_keys is not None:
+                live = (leg.symbol.strip().upper(), leg.market_type.strip().lower()) in live_keys
+            else:
+                if self.position_getter is None:
+                    print("lighter position loss check skipped: live position query unavailable", flush=True)
+                    return []
+                try:
+                    live = await self.position_getter(symbol=leg.symbol, market_type=leg.market_type)
+                except Exception as exc:
+                    print(
+                        f"lighter position loss check skipped {leg.symbol} leg={leg.leg_id}: {exc!r}",
+                        flush=True,
+                    )
+                    continue
+            if live:
+                self._emitted_leg_ids.discard(leg.leg_id)
+                continue
+            if leg.leg_id in self._emitted_leg_ids:
+                continue
+            self._emitted_leg_ids.add(leg.leg_id)
+            signals.append(
+                VenueRiskSignal(
+                    venue="lighter",
+                    symbol=leg.symbol,
+                    event_type="LIQUIDATION",
+                    message=(
+                        "lighter live position disappeared; possible ADL/liquidation/manual close "
+                        f"leg={leg.leg_id}"
+                    ),
                 )
             )
         return signals

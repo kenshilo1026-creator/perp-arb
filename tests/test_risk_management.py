@@ -11,6 +11,9 @@ from hydra_basis.execution_engine.lighter_adapter import LighterExecutionAdapter
 from hydra_basis.execution_engine.mexc_adapter import mexc_close_side
 from hydra_basis.execution_engine.mexc_spot_adapter import MexcSpotExecutionAdapter
 from hydra_basis.execution_engine.hyperliquid_adapter import extract_hyperliquid_order_id
+from hydra_basis.adapters.aster import fetch_aster_current_funding
+from hydra_basis.adapters.hyperliquid import fetch_hyperliquid_current_funding
+from hydra_basis.adapters.lighter import fetch_lighter_current_funding
 from hydra_basis.risk_management.closers import MarketTypeRouterCloser
 from hydra_basis.risk_management.manager import EmergencyRiskManager
 from hydra_basis.risk_management.models import PositionLeg, RiskEvent
@@ -40,11 +43,42 @@ from hydra_basis.risk_management.exchange_watchers import (
 )
 from hydra_basis.config import POSITION_REGISTRY_PATH
 from scripts.run_risk_manager import (
+    build_live_funding_summary_registry,
     build_startup_position_snapshot_message,
     format_emergency_risk_message,
     format_funding_position_summary,
+    reconciliation_result_requires_registry_save,
     seconds_until_next_hourly_minute,
 )
+
+
+class FakeJsonResponse:
+    def __init__(self, payload):
+        self.payload = payload
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+    def raise_for_status(self):
+        return None
+
+    async def json(self):
+        return self.payload
+
+
+class FakeJsonSession:
+    def __init__(self, responses):
+        self.responses = list(responses)
+        self.requests = []
+
+    def request(self, method, url, **kwargs):
+        self.requests.append({"method": method, "url": url, "kwargs": kwargs})
+        if not self.responses:
+            raise AssertionError("unexpected request")
+        return FakeJsonResponse(self.responses.pop(0))
 
 
 class GlobalRiskManagementTests(unittest.IsolatedAsyncioTestCase):
@@ -336,17 +370,17 @@ class RiskReconciliationTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertIn("風控啟動倉位快照", message)
-        self.assertIn("aster ETH perp SHORT qty=2.5", message)
-        self.assertIn("leg=leg-1", message)
-        self.assertNotIn("qty=999", message)
-        self.assertIn("未登記 live 倉位", message)
-        self.assertIn("aster BTC perp LONG qty=0.1", message)
+        self.assertIn("ETH - 做空方 aster:perp / 做多方 無 / 數量=2.5", message)
+        self.assertIn("腿=leg-1", message)
+        self.assertNotIn("數量=999", message)
+        self.assertNotIn("aster BTC perp LONG qty=0.1", message)
 
-    async def test_startup_position_snapshot_lists_live_positions_when_registry_is_empty(self) -> None:
+    async def test_startup_position_snapshot_hides_positions_with_quantity_not_greater_than_one(self) -> None:
         class FakeCloser:
             async def list_open_positions(self):
                 return [
                     {"symbol": "ETH", "market_type": "perp", "side": "SHORT", "quantity": "0.2"},
+                    {"symbol": "SOL", "market_type": "perp", "side": "SHORT", "quantity": "-2"},
                 ]
 
         message = await build_startup_position_snapshot_message(
@@ -357,7 +391,8 @@ class RiskReconciliationTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIn("已登記 live 倉位: 無", message)
         self.assertIn("未登記 live 倉位", message)
-        self.assertIn("aster ETH perp SHORT qty=0.2", message)
+        self.assertNotIn("aster ETH perp SHORT qty=0.2", message)
+        self.assertIn("SOL - 做空方 aster:perp / 做多方 無 / 數量=-2", message)
 
     async def test_reconcile_closes_missing_live_position_and_alerts_side_mismatch(self) -> None:
         class FakeCloser:
@@ -383,6 +418,18 @@ class RiskReconciliationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(registry.get_leg("spot").status, "closed")
         self.assertTrue(any("side mismatch" in item for item in result["messages"]))
         self.assertTrue(any("closed missing live position" in item for item in result["messages"]))
+
+    async def test_reconcile_keeps_variational_registry_leg_when_live_query_is_unavailable(self) -> None:
+        registry = PositionRegistry(
+            legs=[PositionLeg("arb-var", "var-short", "variational", "LAB", "perp", "SHORT", "10", "open")]
+        )
+
+        result = await reconcile_registry_positions(registry=registry, closers={})
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["updated_leg_ids"], [])
+        self.assertEqual(registry.get_leg("var-short").status, "open")
+        self.assertTrue(any("variational registry fallback" in item for item in result["messages"]))
 
     async def test_reconcile_updates_registry_quantity_to_live_quantity(self) -> None:
         class FakeCloser:
@@ -434,6 +481,115 @@ class RiskReconciliationTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result["unregistered_count"], 1)
         self.assertTrue(any("unregistered live position" in item for item in result["messages"]))
+
+    async def test_reconcile_auto_registers_matching_unregistered_long_short_pair(self) -> None:
+        class AsterCloser:
+            async def list_open_positions(self):
+                return [
+                    {"symbol": "ETH", "market_type": "perp", "side": "SHORT", "quantity": "2"},
+                ]
+
+        class HyperCloser:
+            async def list_open_positions(self):
+                return [
+                    {"symbol": "ETH", "market_type": "perp", "side": "LONG", "quantity": "2"},
+                ]
+
+        registry = PositionRegistry(legs=[])
+
+        result = await reconcile_registry_positions(
+            registry=registry,
+            closers={"aster": AsterCloser(), "hyperliquid": HyperCloser()},
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["auto_registered_count"], 1)
+        self.assertEqual(len(result["auto_registered_strategy_ids"]), 1)
+        strategy_id = result["auto_registered_strategy_ids"][0]
+        legs = registry.legs_for_strategy(strategy_id)
+
+        self.assertEqual(len(legs), 2)
+        self.assertEqual({leg.venue for leg in legs}, {"aster", "hyperliquid"})
+        self.assertEqual({leg.side for leg in legs}, {"LONG", "SHORT"})
+        self.assertEqual({leg.quantity for leg in legs}, {"2"})
+        self.assertTrue(
+            any(
+                "已登記新倉位: ETH - 做空方 aster:perp / 做多方 hyperliquid:perp / 數量=2" in item
+                for item in result["messages"]
+            )
+        )
+
+    async def test_reconcile_does_not_auto_register_unmatched_quantity_pair(self) -> None:
+        class AsterCloser:
+            async def list_open_positions(self):
+                return [
+                    {"symbol": "ETH", "market_type": "perp", "side": "SHORT", "quantity": "2"},
+                ]
+
+        class HyperCloser:
+            async def list_open_positions(self):
+                return [
+                    {"symbol": "ETH", "market_type": "perp", "side": "LONG", "quantity": "3"},
+                ]
+
+        registry = PositionRegistry(legs=[])
+
+        result = await reconcile_registry_positions(
+            registry=registry,
+            closers={"aster": AsterCloser(), "hyperliquid": HyperCloser()},
+        )
+
+        self.assertEqual(result["auto_registered_count"], 0)
+        self.assertEqual(len(registry.open_strategy_ids()), 0)
+        self.assertEqual(result["unregistered_count"], 2)
+
+    async def test_reconcile_auto_registers_matching_unregistered_spot_long_perp_short_pair(self) -> None:
+        class MexcSpotCloser:
+            async def list_open_positions(self):
+                return [
+                    {"venue": "mexc_spot", "symbol": "ETH", "market_type": "spot", "side": "LONG", "quantity": "2"},
+                ]
+
+        class AsterCloser:
+            async def list_open_positions(self):
+                return [
+                    {"symbol": "ETH", "market_type": "perp", "side": "SHORT", "quantity": "2"},
+                ]
+
+        registry = PositionRegistry(legs=[])
+
+        result = await reconcile_registry_positions(
+            registry=registry,
+            closers={"mexc": MexcSpotCloser(), "aster": AsterCloser()},
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["auto_registered_count"], 1)
+        strategy_id = result["auto_registered_strategy_ids"][0]
+        legs = registry.legs_for_strategy(strategy_id)
+
+        self.assertEqual(len(legs), 2)
+        self.assertEqual({(leg.venue, leg.market_type, leg.side) for leg in legs}, {
+            ("mexc_spot", "spot", "LONG"),
+            ("aster", "perp", "SHORT"),
+        })
+        self.assertEqual({leg.quantity for leg in legs}, {"2"})
+        self.assertTrue(
+            any(
+                "已登記新倉位: ETH - 做空方 aster:perp / 做多方 mexc_spot:spot / 數量=2" in item
+                for item in result["messages"]
+            )
+        )
+
+    def test_reconciliation_result_requires_save_after_auto_register(self) -> None:
+        self.assertTrue(
+            reconciliation_result_requires_registry_save(
+                {
+                    "updated_leg_ids": [],
+                    "auto_registered_strategy_ids": ["live-pair-eth-2-1"],
+                }
+            )
+        )
 
 
 class FundingRiskTests(unittest.TestCase):
@@ -542,6 +698,65 @@ class FundingRiskTests(unittest.TestCase):
 
 
 class FundingRiskRuntimeTests(unittest.IsolatedAsyncioTestCase):
+    async def test_fetch_aster_current_funding_returns_decimal_rate_and_interval(self) -> None:
+        session = FakeJsonSession(
+            [
+                [{"symbol": "LABUSDT", "fundingIntervalHours": 1}],
+                {"symbol": "LABUSDT", "lastFundingRate": "-0.00239"},
+            ]
+        )
+
+        current = await fetch_aster_current_funding(session, "LAB")
+
+        self.assertEqual(current, {"funding_rate": -0.00239, "interval_hours": 1.0})
+        self.assertEqual(session.requests[-1]["url"], "https://fapi.asterdex.com/fapi/v1/premiumIndex")
+        self.assertEqual(session.requests[-1]["kwargs"]["params"], {"symbol": "LABUSDT"})
+
+    async def test_fetch_hyperliquid_current_funding_reads_asset_context(self) -> None:
+        session = FakeJsonSession(
+            [
+                [
+                    {"universe": [{"name": "BTC"}, {"name": "LAB", "isDelisted": False}]},
+                    [{"funding": "0.00001"}, {"funding": "-0.0013"}],
+                ]
+            ]
+        )
+
+        current = await fetch_hyperliquid_current_funding(session, "LAB")
+
+        self.assertEqual(current, {"funding_rate": -0.0013, "interval_hours": 1.0})
+        self.assertEqual(session.requests[0]["kwargs"]["json"], {"type": "metaAndAssetCtxs"})
+
+    async def test_fetch_lighter_current_funding_converts_percent_unit_to_decimal(self) -> None:
+        session = FakeJsonSession(
+            [
+                {
+                    "funding_rates": [
+                        {"exchange": "lighter", "symbol": "BTC", "market_id": 1, "rate": "0.0013"},
+                        {"exchange": "lighter", "symbol": "LAB", "market_id": 2, "rate": "-0.019"},
+                    ]
+                }
+            ]
+        )
+
+        current = await fetch_lighter_current_funding(session, "LAB")
+
+        self.assertIsNotNone(current)
+        self.assertAlmostEqual(current["funding_rate"], -0.00019)
+        self.assertEqual(current["interval_hours"], 1.0)
+
+    def test_current_funding_fetchers_include_live_perp_venues(self) -> None:
+        from hydra_basis.risk_management import funding_runtime
+
+        self.assertIs(funding_runtime.CURRENT_FUNDING_FETCHERS["aster"], fetch_aster_current_funding)
+        self.assertIs(funding_runtime.CURRENT_FUNDING_FETCHERS["hyperliquid"], fetch_hyperliquid_current_funding)
+        self.assertIs(funding_runtime.CURRENT_FUNDING_FETCHERS["lighter"], fetch_lighter_current_funding)
+
+    def test_current_funding_registration_does_not_skip_official_history_venues(self) -> None:
+        from hydra_basis.risk_management import funding_runtime
+
+        self.assertEqual(funding_runtime.CURRENT_FUNDING_ONLY_VENUES, {"variational"})
+
     def test_seconds_until_next_hourly_minute_targets_minute_one(self) -> None:
         import datetime as dt
 
@@ -581,9 +796,84 @@ class FundingRiskRuntimeTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertIn("現有倉位資費檢查", message)
-        self.assertIn("aster LAB SHORT rate=0.100000%/1h cashflow=0.100000%", message)
-        self.assertIn("variational LAB LONG rate=-0.050000%/1h cashflow=0.050000%", message)
+        self.assertIn("LAB - 做空方 aster:perp / 做多方 variational:perp / 數量=10", message)
+        self.assertIn("aster rate=0.100000%/1h cashflow=0.100000%", message)
+        self.assertIn("variational rate=-0.050000%/1h cashflow=0.050000%", message)
         self.assertIn("net=0.150000%", message)
+
+    def test_format_funding_position_summary_hides_positions_with_quantity_not_greater_than_one(self) -> None:
+        registry = PositionRegistry(
+            legs=[
+                PositionLeg("arb-small", "small-short", "aster", "BTC", "perp", "SHORT", "0.5", "open"),
+                PositionLeg("arb-big", "big-short", "aster", "SOL", "perp", "SHORT", "2", "open"),
+            ]
+        )
+
+        message = format_funding_position_summary(
+            registry=registry,
+            projected_rates_by_strategy={
+                "arb-small": [ProjectedFundingRate("small-short", funding_rate=0.001, interval_hours=1.0)],
+                "arb-big": [ProjectedFundingRate("big-short", funding_rate=0.002, interval_hours=1.0)],
+            },
+            mode="DRY_RUN",
+        )
+
+        self.assertNotIn("BTC", message)
+        self.assertIn("SOL", message)
+
+    async def test_live_funding_summary_registry_prefers_live_positions(self) -> None:
+        class FakeCloser:
+            async def list_open_positions(self):
+                return [
+                    {"symbol": "ETH", "market_type": "perp", "side": "SHORT", "quantity": "2"},
+                    {"symbol": "BTC", "market_type": "perp", "side": "LONG", "quantity": "0.5"},
+                    {"symbol": "ETH", "market_type": "spot", "side": "LONG", "quantity": "5"},
+                ]
+
+        summary_registry = await build_live_funding_summary_registry(
+            registry=PositionRegistry(legs=[]),
+            closers={"aster": FakeCloser()},
+        )
+        strategy_ids = summary_registry.open_strategy_ids()
+        legs = [leg for strategy_id in strategy_ids for leg in summary_registry.legs_for_strategy(strategy_id)]
+
+        self.assertEqual(len(legs), 1)
+        self.assertEqual(legs[0].venue, "aster")
+        self.assertEqual(legs[0].symbol, "ETH")
+        self.assertEqual(legs[0].quantity, "2")
+
+        message = format_funding_position_summary(
+            registry=summary_registry,
+            projected_rates_by_strategy={
+                legs[0].strategy_id: [
+                    ProjectedFundingRate(legs[0].leg_id, funding_rate=0.001, interval_hours=1.0)
+                ]
+            },
+            mode="DRY_RUN",
+        )
+
+        self.assertIn("ETH - 做空方 aster:perp / 做多方 無 / 數量=2", message)
+        self.assertIn("aster rate=0.100000%/1h", message)
+        self.assertNotIn("BTC", message)
+        self.assertNotIn("spot", message)
+
+    async def test_live_funding_summary_registry_keeps_variational_registry_fallback(self) -> None:
+        registry = PositionRegistry(
+            legs=[
+                PositionLeg("arb-var", "var-short", "variational", "LAB", "perp", "SHORT", "3", "open"),
+            ]
+        )
+
+        summary_registry = await build_live_funding_summary_registry(registry=registry, closers={})
+        legs = [
+            leg
+            for strategy_id in summary_registry.open_strategy_ids()
+            for leg in summary_registry.legs_for_strategy(strategy_id)
+        ]
+
+        self.assertEqual(len(legs), 1)
+        self.assertEqual(legs[0].venue, "variational")
+        self.assertEqual(legs[0].symbol, "LAB")
 
     async def test_variational_projection_uses_current_stats_when_history_fetch_fails(self) -> None:
         registry = PositionRegistry(
@@ -711,6 +1001,70 @@ class FundingRiskRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(rows[-1]["funding_rate"], -0.0019)
         self.assertEqual(rows[-1]["interval_hours"], 1.0)
         self.assertEqual(rows[-1]["source"], "variational_current")
+
+    async def test_process_funding_risk_uses_maker_taker_closer_for_projected_auto_close(self) -> None:
+        from hydra_basis.risk_management import funding_runtime
+
+        calls: list[dict] = []
+
+        class Provider:
+            async def fetch_settlements(self, registry, state):
+                return []
+
+            async def fetch_projected_rates(self, registry):
+                return {
+                    "arb-1": [
+                        ProjectedFundingRate("a-short", funding_rate=-0.002, interval_hours=1.0),
+                        ProjectedFundingRate("b-long", funding_rate=0.0, interval_hours=1.0),
+                    ]
+                }
+
+        async def maker_taker_closer(*, registry, event, dry_run):
+            calls.append({"event": event, "dry_run": dry_run})
+            return {
+                "ok": True,
+                "event_type": event.event_type,
+                "trigger_leg_id": event.leg_id,
+                "trigger_venue": event.venue,
+                "trigger_symbol": event.symbol,
+                "closed_leg_ids": ["a-short", "b-long"],
+                "failed_leg_ids": [],
+                "manual_leg_ids": [],
+            }
+
+        class EmergencyCloser:
+            async def get_open_position(self, **kwargs):
+                raise AssertionError("funding auto close must not use emergency market closer")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            registry_path = Path(temp_dir) / "position_registry.json"
+            state_path = Path(temp_dir) / "funding_state.json"
+            PositionRegistry(
+                legs=[
+                    PositionLeg("arb-1", "a-short", "aster", "LAB", "perp", "SHORT", "10", "open"),
+                    PositionLeg("arb-1", "b-long", "hyperliquid", "LAB", "perp", "LONG", "10", "open"),
+                ]
+            ).save(registry_path)
+
+            result = await funding_runtime.process_funding_risk_once(
+                registry_path=registry_path,
+                state_path=state_path,
+                provider=Provider(),
+                closers={"aster": EmergencyCloser(), "hyperliquid": EmergencyCloser()},
+                config=FundingRiskConfig(
+                    enabled=True,
+                    check_interval_seconds=3600,
+                    consecutive_negative_windows=2,
+                    auto_close_negative_funding_pct=0.1,
+                ),
+                dry_run=False,
+                funding_auto_closer=maker_taker_closer,
+            )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0]["event"].event_type, "FUNDING_AUTO_CLOSE")
+        self.assertFalse(calls[0]["dry_run"])
 
     async def test_process_funding_risk_once_auto_closes_counterparty_on_projection_loss(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -1079,6 +1433,102 @@ class RiskWatcherMappingTests(unittest.TestCase):
 
 
 class RiskRuntimeTests(unittest.IsolatedAsyncioTestCase):
+    async def test_lighter_position_loss_watcher_closes_spot_counterparty(self) -> None:
+        from hydra_basis.risk_management.exchange_watchers import LighterPositionLossPoller
+
+        calls: list[dict] = []
+
+        class MexcSpotCloser:
+            async def get_open_position(self, *, symbol: str, market_type: str):
+                return {"symbol": symbol, "market_type": market_type, "side": "LONG", "quantity": "100"}
+
+            async def close_position(self, **kwargs):
+                calls.append(kwargs)
+                return {"ok": True, "order_id": "mexc-spot-close"}
+
+        async def missing_lighter_position(*, symbol: str, market_type: str):
+            return None
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "position_registry.json"
+            registry = PositionRegistry(
+                legs=[
+                    PositionLeg("spot-perp-LAB", "lighter-short", "lighter", "LAB", "perp", "SHORT", "100", "open"),
+                    PositionLeg("spot-perp-LAB", "mexc-spot", "mexc_spot", "LAB", "spot", "LONG", "100", "open"),
+                ]
+            )
+            registry.save(path)
+
+            result = await process_watcher_once(
+                registry_path=path,
+                watcher=LighterPositionLossPoller(
+                    registry_path=path,
+                    position_getter=missing_lighter_position,
+                    poll_seconds=0,
+                ),
+                closers={"mexc": MexcSpotCloser()},
+                dry_run=False,
+            )
+
+        self.assertEqual(result["event_type"], "LIQUIDATION")
+        self.assertEqual(result["trigger_venue"], "lighter")
+        self.assertEqual(result["closed_leg_ids"], ["mexc-spot"])
+        self.assertEqual(calls[0]["side"], "SELL")
+        self.assertEqual(calls[0]["market_type"], "spot")
+
+    async def test_lighter_position_loss_watcher_ignores_existing_live_position(self) -> None:
+        from hydra_basis.risk_management.exchange_watchers import LighterPositionLossPoller
+
+        async def existing_lighter_position(*, symbol: str, market_type: str):
+            return {"symbol": symbol, "market_type": market_type, "side": "SHORT", "quantity": "100"}
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "position_registry.json"
+            PositionRegistry(
+                legs=[
+                    PositionLeg("spot-perp-LAB", "lighter-short", "lighter", "LAB", "perp", "SHORT", "100", "open"),
+                ]
+            ).save(path)
+
+            watcher = LighterPositionLossPoller(
+                registry_path=path,
+                position_getter=existing_lighter_position,
+            )
+
+            self.assertEqual(await watcher.poll_once(), [])
+
+    async def test_lighter_position_loss_watcher_batches_live_position_snapshot(self) -> None:
+        from hydra_basis.risk_management.exchange_watchers import LighterPositionLossPoller
+
+        calls = 0
+
+        async def list_lighter_positions():
+            nonlocal calls
+            calls += 1
+            return [
+                {"symbol": "LAB", "market_type": "perp", "side": "SHORT", "quantity": "100"},
+            ]
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "position_registry.json"
+            PositionRegistry(
+                legs=[
+                    PositionLeg("spot-perp-LAB", "lighter-lab", "lighter", "LAB", "perp", "SHORT", "100", "open"),
+                    PositionLeg("spot-perp-BEAT", "lighter-beat", "lighter", "BEAT", "perp", "SHORT", "100", "open"),
+                ]
+            ).save(path)
+
+            watcher = LighterPositionLossPoller(
+                registry_path=path,
+                position_lister=list_lighter_positions,
+            )
+
+            signals = await watcher.poll_once()
+
+        self.assertEqual(watcher.poll_seconds, 30.0)
+        self.assertEqual(calls, 1)
+        self.assertEqual([signal.symbol for signal in signals], ["BEAT"])
+
     async def test_process_watcher_once_closes_counterparty_and_saves_registry(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             path = Path(temp_dir) / "position_registry.json"

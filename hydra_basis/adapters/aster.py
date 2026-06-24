@@ -52,6 +52,23 @@ async def fetch_aster_funding(session, symbol: str) -> list[FundingPoint]:
     return await fetch_aster_funding_since(session, symbol, start_time_ms=ms_days_ago(LOOKBACK_DAYS))
 
 
+async def fetch_aster_current_funding(session, symbol: str) -> dict[str, float] | None:
+    symbol_metadata = await fetch_aster_symbol_metadata(session)
+    metadata = symbol_metadata.get(symbol.upper())
+    if metadata is None:
+        return None
+
+    url = "https://fapi.asterdex.com/fapi/v1/premiumIndex"
+    data = await fetch_json(session, "GET", url, params={"symbol": metadata["raw_symbol"]})
+    funding_rate = data.get("lastFundingRate") or data.get("fundingRate")
+    if funding_rate is None:
+        return None
+    return {
+        "funding_rate": float(funding_rate),
+        "interval_hours": float(metadata["interval_hours"]),
+    }
+
+
 async def fetch_aster_funding_since(session, symbol: str, start_time_ms: int) -> list[FundingPoint]:
     symbol_metadata = await fetch_aster_symbol_metadata(session)
     metadata = symbol_metadata.get(symbol.upper())

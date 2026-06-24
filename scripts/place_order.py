@@ -19,6 +19,7 @@ from hydra_basis.execution_engine.aster_adapter import AsterExecutionAdapter
 import aiohttp
 
 from hydra_basis.execution_engine.executor import execute_single_clip, execute_single_clip_with_sides, passive_limit_price_from_orderbook, execution_sides_for_signal
+from hydra_basis.execution_engine.order_fill import extract_filled_quantity
 from hydra_basis.execution_engine.market_data import fetch_orderbook_snapshot
 from hydra_basis.execution_engine.hyperliquid_adapter import HyperliquidExecutionAdapter
 from hydra_basis.execution_engine.mexc_adapter import MexcExecutionAdapter
@@ -192,12 +193,29 @@ async def fetch_required_perp_live_leg(
     venue: str,
     symbol: str,
     expected_side: str,
+    fallback_quantity: str | None = None,
 ) -> dict:
     getter = getattr(adapter, "get_open_position", None)
     if not callable(getter):
+        if venue.strip().lower() == "variational" and fallback_quantity:
+            return _registry_fallback_leg(
+                venue=venue,
+                symbol=symbol,
+                market_type="perp",
+                expected_side=expected_side,
+                quantity=fallback_quantity,
+            )
         raise RuntimeError(f"{venue} does not support live position query")
     position = await getter(symbol=symbol, market_type="perp")
     if not position:
+        if venue.strip().lower() == "variational" and fallback_quantity:
+            return _registry_fallback_leg(
+                venue=venue,
+                symbol=symbol,
+                market_type="perp",
+                expected_side=expected_side,
+                quantity=fallback_quantity,
+            )
         raise RuntimeError(f"no live perp position found for {venue}:{symbol}")
     side = str(position.get("side", "")).strip().upper()
     quantity = str(position.get("quantity", "")).strip()
@@ -217,6 +235,43 @@ async def fetch_required_perp_live_leg(
     }
 
 
+def _registry_fallback_leg(
+    *,
+    venue: str,
+    symbol: str,
+    market_type: str,
+    expected_side: str,
+    quantity: str,
+) -> dict:
+    try:
+        parsed_quantity = Decimal(str(quantity))
+        if parsed_quantity <= 0:
+            raise ValueError
+    except Exception as exc:
+        raise RuntimeError(f"invalid registry fallback quantity for {venue}:{symbol}: {quantity}") from exc
+    return {
+        "venue": venue,
+        "symbol": symbol,
+        "market_type": market_type,
+        "side": expected_side.strip().upper(),
+        "quantity": format(parsed_quantity.normalize(), "f"),
+    }
+
+
+def _executed_quantity_from_result(execution_result: dict) -> str:
+    direct = execution_result.get("executed_quantity")
+    if direct not in (None, "", "0", 0):
+        return format(Decimal(str(direct)).normalize(), "f")
+    for key in ("maker_fill_result", "maker_result", "hedge_result"):
+        quantity = extract_filled_quantity(
+            execution_result.get(key),
+            allow_terminal_quantity_fallback=True,
+        )
+        if quantity is not None and quantity > 0:
+            return format(quantity.normalize(), "f")
+    raise RuntimeError("execution result missing executed quantity for variational registry fallback")
+
+
 async def record_open_execution_from_live_positions(
     *,
     execution_result: dict,
@@ -226,17 +281,24 @@ async def record_open_execution_from_live_positions(
     long_venue: str,
     registry_path=POSITION_REGISTRY_PATH,
 ) -> str:
+    fallback_quantity = (
+        _executed_quantity_from_result(execution_result)
+        if "variational" in {short_venue.strip().lower(), long_venue.strip().lower()}
+        else None
+    )
     short_leg = await fetch_required_perp_live_leg(
         adapters_by_venue[short_venue],
         venue=short_venue,
         symbol=symbol,
         expected_side="SHORT",
+        fallback_quantity=fallback_quantity,
     )
     long_leg = await fetch_required_perp_live_leg(
         adapters_by_venue[long_venue],
         venue=long_venue,
         symbol=symbol,
         expected_side="LONG",
+        fallback_quantity=fallback_quantity,
     )
     strategy_id = f"manual-{symbol.upper()}-{int(time.time() * 1000)}"
     return record_successful_live_legs(

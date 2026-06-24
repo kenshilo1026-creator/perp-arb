@@ -8,6 +8,13 @@ from hydra_basis.risk_management.registry import PositionRegistry
 MANUAL_CLOSE_ONLY_VENUES = {"variational"}
 
 
+def _closer_key_for_venue(venue: str) -> str:
+    normalized = venue.strip().lower()
+    if normalized == "mexc_spot":
+        return "mexc"
+    return normalized
+
+
 class PositionCloser(Protocol):
     async def get_open_position(self, **kwargs) -> dict | None:
         ...
@@ -58,7 +65,7 @@ class EmergencyRiskManager:
                 }
                 continue
 
-            closer = self.closers.get(leg.venue)
+            closer = self.closers.get(_closer_key_for_venue(leg.venue))
             if closer is None:
                 self.registry.mark_status(leg.leg_id, "close_failed")
                 failed_leg_ids.append(leg.leg_id)

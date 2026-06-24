@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import datetime as dt
 import time
+from decimal import Decimal, InvalidOperation
 
 import aiohttp
 
@@ -15,6 +16,7 @@ except ModuleNotFoundError:  # pragma: no cover
 ensure_project_root_on_path()
 
 from hydra_basis.config import (
+    EXECUTION_VENUES_PATH,
     FUNDING_RISK_CONFIG_PATH,
     FUNDING_RISK_STATE_PATH,
     MARGIN_TOPUP_CONFIG_PATH,
@@ -40,6 +42,7 @@ from hydra_basis.risk_management.exchange_watchers import (
     HyperliquidMarginHealthPoller,
     HyperliquidUserEventsWatcher,
     LighterMarginHealthPoller,
+    LighterPositionLossPoller,
     LiveMarkPriceCache,
     run_aster_mark_price_cache,
     run_hyperliquid_mids_cache,
@@ -60,6 +63,7 @@ from hydra_basis.risk_management.margin_topup import (
     liquidation_distance_pct,
     load_margin_topup_config,
 )
+from hydra_basis.risk_management.models import PositionLeg
 from hydra_basis.risk_management.registry import PositionRegistry
 from hydra_basis.risk_management.reconciliation import reconcile_registry_positions
 from hydra_basis.risk_management.runtime import process_watcher_once
@@ -69,6 +73,46 @@ load_environment()
 
 RECONCILIATION_INTERVAL_SECONDS = 60
 FUNDING_CHECK_MINUTE = 1
+DISPLAY_MIN_POSITION_QUANTITY = Decimal("1")
+
+
+def should_display_position_quantity(quantity: object) -> bool:
+    try:
+        return abs(Decimal(str(quantity).strip())) > DISPLAY_MIN_POSITION_QUANTITY
+    except (InvalidOperation, ValueError):
+        return False
+
+
+def reconciliation_result_requires_registry_save(result: dict[str, object]) -> bool:
+    return bool(result.get("updated_leg_ids") or result.get("auto_registered_strategy_ids"))
+
+
+def _leg_display_ref(leg) -> str:
+    return f"{leg.venue}:{leg.market_type}"
+
+
+def format_position_pair_summary(legs: list[PositionLeg], *, include_strategy: bool = False) -> str:
+    short_leg = next((leg for leg in legs if leg.side == "SHORT"), None)
+    long_leg = next((leg for leg in legs if leg.side == "LONG"), None)
+    primary = short_leg or long_leg or legs[0]
+    quantity = primary.quantity
+    short_ref = _leg_display_ref(short_leg) if short_leg is not None else "無"
+    long_ref = _leg_display_ref(long_leg) if long_leg is not None else "無"
+    text = f"{primary.symbol} - 做空方 {short_ref} / 做多方 {long_ref} / 數量={quantity}"
+    if include_strategy:
+        leg_ids = ",".join(leg.leg_id for leg in legs)
+        text += f" 策略={primary.strategy_id} 腿={leg_ids}"
+    return text
+
+
+def _decimal_quantity(quantity: object) -> Decimal:
+    try:
+        parsed = abs(Decimal(str(quantity).strip()))
+    except (InvalidOperation, ValueError) as exc:
+        raise RuntimeError(f"invalid position quantity: {quantity}") from exc
+    if parsed <= 0:
+        raise RuntimeError(f"position quantity must be positive: {quantity}")
+    return parsed
 
 
 def format_emergency_risk_message(*, result: dict[str, object], mode: str) -> str:
@@ -113,24 +157,26 @@ def format_funding_position_summary(
         legs = [
             leg
             for leg in registry.legs_for_strategy(strategy_id)
-            if leg.status == "open" and leg.market_type != "spot"
+            if leg.status == "open"
+            and leg.market_type != "spot"
+            and should_display_position_quantity(leg.quantity)
         ]
         if not legs:
             continue
         rates = {row.leg_id: row for row in projected_rates_by_strategy.get(strategy_id, [])}
-        strategy_lines: list[str] = []
+        strategy_lines: list[str] = [f"- {format_position_pair_summary(legs)}"]
         net_cashflow = 0.0
         missing = False
         for leg in legs:
             rate = rates.get(leg.leg_id)
             if rate is None:
                 missing = True
-                strategy_lines.append(f"- {leg.venue} {leg.symbol} {leg.side} rate=缺少資料 leg={leg.leg_id}")
+                strategy_lines.append(f"  {leg.venue} rate=缺少資料 leg={leg.leg_id}")
                 continue
             cashflow = funding_cashflow_pct(side=leg.side, funding_rate=rate.funding_rate)
             net_cashflow += cashflow
             strategy_lines.append(
-                f"- {leg.venue} {leg.symbol} {leg.side} "
+                f"  {leg.venue} "
                 f"rate={rate.funding_rate:.6%}/{rate.interval_hours:g}h "
                 f"cashflow={cashflow:.6%} leg={leg.leg_id}"
             )
@@ -166,7 +212,185 @@ def build_closers() -> dict[str, object]:
     return closers
 
 
-def build_watchers(enabled: set[str]) -> list[object]:
+def _funding_close_adapter_for_leg(leg: PositionLeg, *, leverage: int = 1):
+    venue = leg.venue.strip().lower()
+    market_type = leg.market_type.strip().lower()
+    if venue == "mexc_spot" or (venue == "mexc" and market_type == "spot"):
+        return MexcSpotExecutionAdapter()
+    if venue == "mexc":
+        return MexcExecutionAdapter(leverage=leverage)
+    if venue == "aster":
+        return AsterExecutionAdapter(leverage=leverage, skip_margin_setup=True)
+    if venue == "hyperliquid":
+        from hydra_basis.execution_engine.hyperliquid_adapter import HyperliquidExecutionAdapter
+
+        return HyperliquidExecutionAdapter(leverage=leverage, skip_margin_setup=True)
+    if venue == "lighter":
+        return LighterExecutionAdapter(
+            signer_client_factory=build_lighter_client_factory_from_env(),
+            market_config_loader=lambda symbol: fetch_lighter_market_config(symbol),
+            orderbook_loader=lambda symbol: fetch_lighter_orderbook_live(symbol),
+        )
+    raise RuntimeError(f"funding maker/taker close does not support venue: {leg.venue}")
+
+
+async def _close_adapter_if_supported(adapter: object) -> None:
+    close = getattr(adapter, "close", None)
+    if not callable(close):
+        return
+    result = close()
+    if hasattr(result, "__await__"):
+        await result
+
+
+async def execute_funding_auto_close_with_maker_taker(
+    *,
+    registry: PositionRegistry,
+    event,
+    dry_run: bool,
+) -> dict[str, object]:
+    from scripts.place_order import (
+        build_close_position_plan,
+        execute_close_position_plan,
+        fetch_close_orderbooks,
+    )
+    from hydra_basis.execution_engine.priority import load_execution_priorities
+
+    legs = [
+        leg
+        for leg in registry.legs_for_strategy(event.strategy_id)
+        if leg.status == "open"
+    ]
+    if any(leg.venue.strip().lower() == "variational" for leg in legs):
+        return {
+            "ok": False,
+            "event_type": event.event_type,
+            "trigger_leg_id": event.leg_id,
+            "trigger_venue": event.venue,
+            "trigger_symbol": event.symbol,
+            "closed_leg_ids": [],
+            "failed_leg_ids": [],
+            "manual_leg_ids": [leg.leg_id for leg in legs if leg.venue.strip().lower() == "variational"],
+            "close_results": {
+                leg.leg_id: {
+                    "ok": False,
+                    "manual_close_required": True,
+                    "error": "Variational funding auto close requires manual/browser close",
+                }
+                for leg in legs
+                if leg.venue.strip().lower() == "variational"
+            },
+        }
+    if len(legs) != 2:
+        return {
+            "ok": False,
+            "event_type": event.event_type,
+            "trigger_leg_id": event.leg_id,
+            "trigger_venue": event.venue,
+            "trigger_symbol": event.symbol,
+            "closed_leg_ids": [],
+            "failed_leg_ids": [leg.leg_id for leg in legs],
+            "manual_leg_ids": [],
+            "error": f"funding maker/taker close expects exactly 2 open legs, got {len(legs)}",
+        }
+
+    live_legs: list[PositionLeg] = []
+    for leg in legs:
+        adapter = _funding_close_adapter_for_leg(leg)
+        try:
+            getter = getattr(adapter, "get_open_position", None)
+            if not callable(getter):
+                raise RuntimeError(f"live position query unavailable for {leg.venue}")
+            live = await getter(symbol=leg.symbol, market_type=leg.market_type)
+            if not live:
+                raise RuntimeError(f"no live open position for {leg.venue}:{leg.symbol}")
+            live_legs.append(
+                PositionLeg(
+                    strategy_id=leg.strategy_id,
+                    leg_id=leg.leg_id,
+                    venue=leg.venue,
+                    symbol=str(live.get("symbol") or leg.symbol).strip().upper(),
+                    market_type=leg.market_type,
+                    side=str(live.get("side") or leg.side).strip().upper(),  # type: ignore[arg-type]
+                    quantity=str(live.get("quantity") or leg.quantity).strip(),
+                    status="open",
+                )
+            )
+        finally:
+            await _close_adapter_if_supported(adapter)
+
+    clip_size = min(_decimal_quantity(leg.quantity) for leg in live_legs)
+    venues = [leg.venue for leg in live_legs]
+    orderbooks = await fetch_close_orderbooks(symbol=live_legs[0].symbol, venues=venues, clip_usd=1000.0)
+    priorities = load_execution_priorities(EXECUTION_VENUES_PATH)
+    plan = build_close_position_plan(
+        legs=live_legs,
+        clip_size=clip_size,
+        priorities=priorities,
+        orderbooks=orderbooks,
+    )
+    if dry_run:
+        return {
+            "ok": True,
+            "dry_run": True,
+            "event_type": event.event_type,
+            "trigger_leg_id": event.leg_id,
+            "trigger_venue": event.venue,
+            "trigger_symbol": event.symbol,
+            "closed_leg_ids": [leg.leg_id for leg in live_legs],
+            "failed_leg_ids": [],
+            "manual_leg_ids": [],
+            "maker_venue": plan.maker_venue,
+            "taker_venue": plan.taker_venue,
+            "quantity": str(clip_size),
+        }
+
+    adapters = {leg.venue: _funding_close_adapter_for_leg(leg) for leg in live_legs}
+    try:
+        result = await execute_close_position_plan(
+            plan=plan,
+            adapters=adapters,
+            symbol=plan.symbol,
+            venues=venues,
+        )
+    finally:
+        for adapter in adapters.values():
+            await _close_adapter_if_supported(adapter)
+
+    if result.get("ok", False):
+        for leg in live_legs:
+            registry.mark_status(leg.leg_id, "emergency_closed")
+        return {
+            "ok": True,
+            "event_type": event.event_type,
+            "trigger_leg_id": event.leg_id,
+            "trigger_venue": event.venue,
+            "trigger_symbol": event.symbol,
+            "closed_leg_ids": [leg.leg_id for leg in live_legs],
+            "failed_leg_ids": [],
+            "manual_leg_ids": [],
+            "maker_venue": plan.maker_venue,
+            "taker_venue": plan.taker_venue,
+            "execution_result": result,
+        }
+    for leg in live_legs:
+        registry.mark_status(leg.leg_id, "close_failed")
+    return {
+        "ok": False,
+        "event_type": event.event_type,
+        "trigger_leg_id": event.leg_id,
+        "trigger_venue": event.venue,
+        "trigger_symbol": event.symbol,
+        "closed_leg_ids": [],
+        "failed_leg_ids": [leg.leg_id for leg in live_legs],
+        "manual_leg_ids": [],
+        "maker_venue": plan.maker_venue,
+        "taker_venue": plan.taker_venue,
+        "execution_result": result,
+    }
+
+
+def build_watchers(enabled: set[str], *, closers: dict[str, object]) -> list[object]:
     watchers: list[object] = []
     if "aster" in enabled:
         async def notify_aster_rate_limit(exc: Exception) -> None:
@@ -187,7 +411,25 @@ def build_watchers(enabled: set[str]) -> list[object]:
     if "mexc" in enabled:
         print("risk manager mexc watcher pending: private liquidation payload not verified yet")
     if "lighter" in enabled:
-        print("risk manager lighter watcher pending: private liquidation payload not verified yet")
+        lighter = closers.get("lighter")
+        lister = getattr(lighter, "list_open_positions", None)
+        getter = getattr(lighter, "get_open_position", None)
+        if callable(lister):
+            watchers.append(
+                LighterPositionLossPoller(
+                    registry_path=POSITION_REGISTRY_PATH,
+                    position_lister=lister,
+                )
+            )
+        elif callable(getter):
+            watchers.append(
+                LighterPositionLossPoller(
+                    registry_path=POSITION_REGISTRY_PATH,
+                    position_getter=getter,
+                )
+            )
+        else:
+            print("risk manager lighter watcher disabled: live position query unavailable")
     if "variational" in enabled:
         print("risk manager variational watcher pending: browser/private risk payload not verified yet")
     return watchers
@@ -223,6 +465,70 @@ def _position_key(*, venue: str, symbol: str, market_type: str, side: str) -> tu
     )
 
 
+async def build_live_funding_summary_registry(
+    *,
+    registry: PositionRegistry,
+    closers: dict[str, object],
+) -> PositionRegistry:
+    legs: list[PositionLeg] = []
+    seen: set[tuple[str, str, str, str]] = set()
+    for venue, closer in closers.items():
+        if venue.strip().lower() == "variational":
+            continue
+        lister = getattr(closer, "list_open_positions", None)
+        if not callable(lister):
+            continue
+        try:
+            live_positions = await lister()
+        except Exception as exc:
+            print(f"funding summary live positions skipped {venue}: {exc}", flush=True)
+            continue
+        for live in live_positions or []:
+            live_venue = str(live.get("venue") or venue).strip().lower()
+            symbol = str(live.get("symbol", "")).strip().upper()
+            market_type = str(live.get("market_type", "")).strip().lower()
+            side = str(live.get("side", "")).strip().upper()
+            quantity = str(live.get("quantity", "")).strip()
+            if not symbol or market_type != "perp" or side not in {"LONG", "SHORT"}:
+                continue
+            if not should_display_position_quantity(quantity):
+                continue
+            key = _position_key(venue=live_venue, symbol=symbol, market_type=market_type, side=side)
+            if key in seen:
+                continue
+            seen.add(key)
+            strategy_id = f"live-{live_venue}-{symbol}-{market_type}-{side}".lower()
+            leg_id = f"{strategy_id}:summary"
+            legs.append(
+                PositionLeg(
+                    strategy_id=strategy_id,
+                    leg_id=leg_id,
+                    venue=live_venue,
+                    symbol=symbol,
+                    market_type=market_type,
+                    side=side,
+                    quantity=quantity,
+                    status="open",
+                )
+            )
+
+    for strategy_id in registry.open_strategy_ids():
+        for leg in registry.legs_for_strategy(strategy_id):
+            if leg.status != "open" or leg.market_type != "perp":
+                continue
+            if leg.venue.strip().lower() != "variational":
+                continue
+            if not should_display_position_quantity(leg.quantity):
+                continue
+            key = _position_key(venue=leg.venue, symbol=leg.symbol, market_type=leg.market_type, side=leg.side)
+            if key in seen:
+                continue
+            seen.add(key)
+            legs.append(leg)
+
+    return PositionRegistry(legs=legs)
+
+
 async def build_startup_position_snapshot_message(
     *,
     registry: PositionRegistry,
@@ -230,7 +536,7 @@ async def build_startup_position_snapshot_message(
     mode: str,
 ) -> str:
     lines = [f"風控啟動倉位快照 mode={mode}"]
-    position_lines: list[str] = []
+    registered_display_legs: dict[str, list[PositionLeg]] = {}
     issue_lines: list[str] = []
     registered_live_keys: set[tuple[str, str, str, str]] = set()
     open_legs = [
@@ -241,6 +547,19 @@ async def build_startup_position_snapshot_message(
     ]
 
     for leg in open_legs:
+        if leg.venue.strip().lower() == "variational":
+            if not should_display_position_quantity(leg.quantity):
+                continue
+            registered_live_keys.add(
+                _position_key(
+                    venue=leg.venue,
+                    symbol=leg.symbol,
+                    market_type=leg.market_type,
+                    side=leg.side,
+                )
+            )
+            registered_display_legs.setdefault(leg.strategy_id, []).append(leg)
+            continue
         closer = closers.get(_closer_key_for_venue(leg.venue))
         if closer is None:
             issue_lines.append(f"- {leg.venue} {leg.symbol} leg={leg.leg_id}: 沒有 closer")
@@ -261,12 +580,22 @@ async def build_startup_position_snapshot_message(
         market_type = str(live.get("market_type") or leg.market_type).strip().lower()
         side = str(live.get("side", "")).strip().upper()
         quantity = str(live.get("quantity", "")).strip()
+        if not should_display_position_quantity(quantity):
+            continue
         registered_live_keys.add(
             _position_key(venue=leg.venue, symbol=symbol, market_type=market_type, side=side)
         )
-        position_lines.append(
-            f"- {leg.venue} {symbol} {market_type} {side} qty={quantity} "
-            f"strategy={leg.strategy_id} leg={leg.leg_id}"
+        registered_display_legs.setdefault(leg.strategy_id, []).append(
+            PositionLeg(
+                strategy_id=leg.strategy_id,
+                leg_id=leg.leg_id,
+                venue=leg.venue,
+                symbol=symbol,
+                market_type=market_type,  # type: ignore[arg-type]
+                side=side,  # type: ignore[arg-type]
+                quantity=quantity,
+                status="open",
+            )
         )
 
     unregistered_lines: list[str] = []
@@ -287,11 +616,33 @@ async def build_startup_position_snapshot_message(
             quantity = str(live.get("quantity", "")).strip()
             if not symbol or market_type not in {"perp", "spot"} or side not in {"LONG", "SHORT"}:
                 continue
+            if not should_display_position_quantity(quantity):
+                continue
             key = _position_key(venue=live_venue, symbol=symbol, market_type=market_type, side=side)
             if key in registered_live_keys:
                 continue
-            unregistered_lines.append(f"- {live_venue} {symbol} {market_type} {side} qty={quantity}")
+            unregistered_lines.append(
+                "- "
+                + format_position_pair_summary(
+                    [
+                        PositionLeg(
+                            strategy_id="unregistered",
+                            leg_id=f"unregistered:{live_venue}:{symbol}:{market_type}:{side}",
+                            venue=live_venue,
+                            symbol=symbol,
+                            market_type=market_type,  # type: ignore[arg-type]
+                            side=side,  # type: ignore[arg-type]
+                            quantity=quantity,
+                            status="open",
+                        )
+                    ]
+                )
+            )
 
+    position_lines = [
+        "- " + format_position_pair_summary(legs, include_strategy=True)
+        for _strategy_id, legs in sorted(registered_display_legs.items())
+    ]
     if position_lines:
         lines.append("已登記 live 倉位:")
         lines.extend(position_lines)
@@ -308,13 +659,13 @@ async def build_startup_position_snapshot_message(
 
 async def run_risk_manager(*, venues: set[str], live: bool) -> None:
     dry_run = not live
-    watchers = build_watchers(venues)
     mark_price_caches = {
         "aster": LiveMarkPriceCache(),
         "hyperliquid": LiveMarkPriceCache(),
     }
     margin_watchers = build_margin_watchers(venues, mark_price_caches=mark_price_caches)
     closers = build_closers()
+    watchers = build_watchers(venues, closers=closers)
     margin_config = load_margin_topup_config(MARGIN_TOPUP_CONFIG_PATH)
     funding_config = load_funding_risk_config(FUNDING_RISK_CONFIG_PATH)
     mode = "LIVE" if live else "DRY_RUN"
@@ -434,14 +785,21 @@ async def run_risk_manager(*, venues: set[str], live: bool) -> None:
                     closers=closers,
                     config=funding_config,
                     dry_run=dry_run,
+                    funding_auto_closer=execute_funding_auto_close_with_maker_taker,
                 )
                 for message in result.get("messages", []):
                     text = f"資費風控\n{message}\nmode={mode}"
                     print(text)
                     await send_telegram(text)
+                registry = PositionRegistry.load(POSITION_REGISTRY_PATH)
+                summary_registry = await build_live_funding_summary_registry(
+                    registry=registry,
+                    closers=closers,
+                )
+                summary_rates = await provider.fetch_projected_rates(summary_registry)
                 summary = format_funding_position_summary(
-                    registry=PositionRegistry.load(POSITION_REGISTRY_PATH),
-                    projected_rates_by_strategy=result.get("projected_rates_by_strategy", {}),
+                    registry=summary_registry,
+                    projected_rates_by_strategy=summary_rates,
                     mode=mode,
                 )
                 print(summary)
@@ -451,7 +809,7 @@ async def run_risk_manager(*, venues: set[str], live: bool) -> None:
         while True:
             registry = PositionRegistry.load(POSITION_REGISTRY_PATH)
             result = await reconcile_registry_positions(registry=registry, closers=closers)
-            if result.get("updated_leg_ids"):
+            if reconciliation_result_requires_registry_save(result):
                 registry.save(POSITION_REGISTRY_PATH)
             if result.get("messages"):
                 text = (

@@ -4,11 +4,15 @@ import datetime as dt
 import json
 from pathlib import Path
 import time
+from collections.abc import Awaitable, Callable
 from typing import Protocol
 
 import aiohttp
 
 from hydra_basis.adapters.registry import FETCHERS, FETCHERS_SINCE
+from hydra_basis.adapters.aster import fetch_aster_current_funding
+from hydra_basis.adapters.hyperliquid import fetch_hyperliquid_current_funding
+from hydra_basis.adapters.lighter import fetch_lighter_current_funding
 from hydra_basis.adapters.variational import fetch_variational_current_funding
 from hydra_basis.risk_management.funding_risk import (
     FundingRiskConfig,
@@ -23,9 +27,12 @@ from hydra_basis.risk_management.registry import PositionRegistry
 
 
 CURRENT_FUNDING_FETCHERS = {
+    "aster": fetch_aster_current_funding,
+    "hyperliquid": fetch_hyperliquid_current_funding,
+    "lighter": fetch_lighter_current_funding,
     "variational": fetch_variational_current_funding,
 }
-CURRENT_FUNDING_ONLY_VENUES = set(CURRENT_FUNDING_FETCHERS)
+CURRENT_FUNDING_ONLY_VENUES = {"variational"}
 
 
 class CurrentFundingCacheStore:
@@ -254,6 +261,7 @@ async def process_funding_risk_once(
     closers: dict[str, PositionCloser],
     config: FundingRiskConfig,
     dry_run: bool,
+    funding_auto_closer: Callable[..., Awaitable[dict[str, object]]] | None = None,
 ) -> dict[str, object]:
     registry = PositionRegistry.load(registry_path)
     state = FundingRiskState.load(state_path)
@@ -271,7 +279,12 @@ async def process_funding_risk_once(
             f"net={float(settlement_result.get('net_cashflow_pct', 0.0)):.6%}"
         )
     if settlement_result.get("risk_event") is not None:
-        auto_close_results.append(await emergency_manager.handle_event(settlement_result["risk_event"]))
+        if funding_auto_closer is not None and settlement_result["risk_event"].event_type == "FUNDING_AUTO_CLOSE":
+            auto_close_results.append(
+                await funding_auto_closer(registry=registry, event=settlement_result["risk_event"], dry_run=dry_run)
+            )
+        else:
+            auto_close_results.append(await emergency_manager.handle_event(settlement_result["risk_event"]))
 
     projected_rates_by_strategy = await provider.fetch_projected_rates(registry)
     for strategy_id, rates in projected_rates_by_strategy.items():
@@ -281,7 +294,12 @@ async def process_funding_risk_once(
                 "funding risk: projected negative funding auto close "
                 f"strategy={strategy_id} net={float(result.get('net_cashflow_pct', 0.0)):.6%}"
             )
-            auto_close_results.append(await emergency_manager.handle_event(result["risk_event"]))
+            if funding_auto_closer is not None:
+                auto_close_results.append(
+                    await funding_auto_closer(registry=registry, event=result["risk_event"], dry_run=dry_run)
+                )
+            else:
+                auto_close_results.append(await emergency_manager.handle_event(result["risk_event"]))
 
     registry.save(registry_path)
     state.save(state_path)

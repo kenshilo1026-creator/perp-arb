@@ -75,6 +75,31 @@ async def fetch_hyperliquid_funding(session, symbol: str) -> list[FundingPoint]:
     return await fetch_hyperliquid_funding_since(session, symbol, start_time_ms=ms_days_ago(LOOKBACK_DAYS))
 
 
+async def fetch_hyperliquid_current_funding(session, symbol: str) -> dict[str, float] | None:
+    payload = {"type": "metaAndAssetCtxs"}
+    data = await _post_hyperliquid_info(session, payload)
+    if not isinstance(data, list) or len(data) < 2:
+        return None
+
+    universe = (data[0] or {}).get("universe") or []
+    asset_contexts = data[1] or []
+    target_symbol = symbol.upper()
+    for index, row in enumerate(universe):
+        if str(row.get("name") or "").upper() != target_symbol:
+            continue
+        if index >= len(asset_contexts):
+            return None
+        context = asset_contexts[index] or {}
+        funding_rate = context.get("funding") or context.get("fundingRate")
+        if funding_rate is None:
+            return None
+        return {
+            "funding_rate": float(funding_rate),
+            "interval_hours": HYPERLIQUID_FUNDING_INTERVAL_HOURS,
+        }
+    return None
+
+
 async def fetch_hyperliquid_funding_since(session, symbol: str, start_time_ms: int) -> list[FundingPoint]:
     payload = build_funding_history_payload(symbol, start_time_ms=start_time_ms)
     data = await _post_hyperliquid_info(session, payload)

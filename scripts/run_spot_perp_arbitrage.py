@@ -253,10 +253,16 @@ def build_spot_perp_plan(
     )
 
 
-def build_spot_perp_adapter(venue: str, *, leverage: int, broker_url: str | None = None):
+def build_spot_perp_adapter(venue: str, *, leverage: int, mode: str, broker_url: str | None = None):
     if venue == MEXC_SPOT_VENUE:
         return MexcSpotExecutionAdapter()
-    return build_adapter_for_venue(venue, leverage=leverage, broker_url=broker_url)
+    skip_margin_setup = normalize_mode(mode) == "close"
+    return build_adapter_for_venue(
+        venue,
+        leverage=leverage,
+        broker_url=broker_url,
+        skip_margin_setup=skip_margin_setup,
+    )
 
 
 async def refresh_spot_perp_maker_price(plan: SpotPerpPlan) -> str:
@@ -407,8 +413,18 @@ async def execute_spot_perp_plan(
     registry_path: Path = POSITION_REGISTRY_PATH,
     allow_large_price_gap: bool = False,
 ) -> dict[str, object]:
-    maker_adapter = build_spot_perp_adapter(plan.maker_venue, leverage=leverage, broker_url=broker_url)
-    taker_adapter = build_spot_perp_adapter(plan.taker_venue, leverage=leverage, broker_url=broker_url)
+    maker_adapter = build_spot_perp_adapter(
+        plan.maker_venue,
+        leverage=leverage,
+        mode=plan.mode,
+        broker_url=broker_url,
+    )
+    taker_adapter = build_spot_perp_adapter(
+        plan.taker_venue,
+        leverage=leverage,
+        mode=plan.mode,
+        broker_url=broker_url,
+    )
     assert_maker_limit_supported(maker_adapter, plan.maker_venue)
     try:
         fresh_maker_price = await refresh_spot_perp_maker_price(plan)

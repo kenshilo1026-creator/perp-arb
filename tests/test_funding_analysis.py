@@ -71,6 +71,7 @@ from hydra_basis.backfill import (
     backfill_needs_top_up,
     backfill_incremental_start_ms,
     capture_backfill_spread_snapshot_with_error,
+    build_no_new_points_warning,
 )
 from hydra_basis.runtime import configure_windows_event_loop_policy
 from hydra_basis.execution_engine.market_data import fetch_tradexyz_orderbook
@@ -680,6 +681,7 @@ class TradeXyzAdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["type"], "fundingHistory")
         self.assertEqual(payload["coin"], "XYZ:NVDA")
         self.assertEqual(payload["startTime"], 123456789)
+        self.assertEqual(payload["dex"], "xyz")
 
     async def test_fetch_tradexyz_funding_since_builds_points(self) -> None:
         payload = [
@@ -702,6 +704,7 @@ class TradeXyzAdapterTests(unittest.IsolatedAsyncioTestCase):
             "type": "fundingHistory",
             "coin": "XYZ:NVDA",
             "startTime": 1_717_000_000_000,
+            "dex": "xyz",
         })
         self.assertEqual(points[0].interval_hours, 1.0)
 
@@ -1126,6 +1129,26 @@ class BackfillUtilsTests(unittest.TestCase):
 
         self.assertFalse(backfill_needs_top_up(points, now_ms=now_value))
 
+    def test_no_new_points_warning_includes_key_window_and_coverage(self) -> None:
+        warning = build_no_new_points_warning(
+            venue="variational",
+            symbol="ZRO",
+            start_ms=1782072000001,
+            end_ms=1782367200000,
+            coverage={
+                "samples": 11,
+                "oldest_ts_ms": 1781794800000,
+                "newest_ts_ms": 1782072000000,
+                "missing_ms": 27353101,
+            },
+        )
+
+        self.assertIn("backfill no new points ('variational', 'ZRO')", warning)
+        self.assertIn("start=2026-06-21T20:00:00Z", warning)
+        self.assertIn("end=2026-06-25T06:00:00Z", warning)
+        self.assertIn("samples=11", warning)
+        self.assertIn("newest_ts_ms=1782072000000", warning)
+
 
 class BackfillSpreadSnapshotTests(unittest.IsolatedAsyncioTestCase):
     async def test_force_refresh_retries_previous_no_orderbook_sentinel(self) -> None:
@@ -1188,6 +1211,49 @@ class BackfillSpreadSnapshotTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(result["error"])
         self.assertEqual(result["error_type"], "no_orderbook")
         self.assertEqual(spreads[("trade_xyz", "XYZ:TSLA")], {"status": "no_orderbook"})
+
+    async def test_aster_depth_400_marks_invalid_symbol_without_alertable_error(self) -> None:
+        spreads: dict[tuple[str, str], dict[str, float | int]] = {}
+        bad_request = RuntimeError("400, message='Bad Request', url='https://fapi.asterdex.com/fapi/v1/depth?symbol=TONUSDT&limit=5'")
+        bad_request.status = 400
+
+        with patch(
+            "hydra_basis.backfill.fetch_orderbook_snapshot",
+            new=AsyncMock(side_effect=bad_request),
+        ):
+            result = await capture_backfill_spread_snapshot_with_error(
+                session=object(),
+                spreads=spreads,
+                venue="aster",
+                symbol="TON",
+                clip_usd=1000.0,
+                force_refresh=True,
+            )
+
+        self.assertFalse(result["stored"])
+        self.assertIsNone(result["error"])
+        self.assertEqual(result["error_type"], "invalid_symbol")
+        self.assertEqual(spreads[("aster", "TON")], {"status": "invalid_symbol"})
+
+    async def test_cached_invalid_symbol_is_skipped_even_when_force_refreshing(self) -> None:
+        spreads: dict[tuple[str, str], dict[str, float | int]] = {
+            ("aster", "TON"): {"status": "invalid_symbol"}
+        }
+
+        with patch("hydra_basis.backfill.fetch_orderbook_snapshot", new=AsyncMock()) as fetch_orderbook:
+            result = await capture_backfill_spread_snapshot_with_error(
+                session=object(),
+                spreads=spreads,
+                venue="aster",
+                symbol="TON",
+                clip_usd=1000.0,
+                force_refresh=True,
+            )
+
+        self.assertFalse(result["stored"])
+        self.assertIsNone(result["error"])
+        self.assertEqual(result["error_type"], "cached_invalid_symbol")
+        fetch_orderbook.assert_not_awaited()
 
     async def test_rate_limited_spread_capture_does_not_raise_or_overwrite_existing_spread(self) -> None:
         spreads: dict[tuple[str, str], dict[str, float | int]] = {

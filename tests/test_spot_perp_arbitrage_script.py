@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock
 from unittest.mock import patch
 
 from scripts.run_spot_perp_arbitrage import (
+    build_spot_perp_adapter,
     build_spot_perp_plan,
     compute_token_batch_count,
     compute_base_quantity,
@@ -40,6 +41,30 @@ class SpotPerpArbitrageScriptTests(unittest.TestCase):
             spot_perp_sides(mode="close"),
             {"mexc_spot": "SELL", "perp": "BUY"},
         )
+
+    def test_close_mode_perp_adapter_skips_margin_setup(self) -> None:
+        calls: list[dict] = []
+
+        def fake_build_adapter(venue: str, **kwargs):
+            calls.append({"venue": venue, **kwargs})
+            return object()
+
+        with patch("scripts.run_spot_perp_arbitrage.build_adapter_for_venue", new=fake_build_adapter):
+            build_spot_perp_adapter("aster", leverage=1, mode="close")
+
+        self.assertEqual(calls, [{"venue": "aster", "leverage": 1, "broker_url": None, "skip_margin_setup": True}])
+
+    def test_open_mode_perp_adapter_keeps_margin_setup_enabled(self) -> None:
+        calls: list[dict] = []
+
+        def fake_build_adapter(venue: str, **kwargs):
+            calls.append({"venue": venue, **kwargs})
+            return object()
+
+        with patch("scripts.run_spot_perp_arbitrage.build_adapter_for_venue", new=fake_build_adapter):
+            build_spot_perp_adapter("aster", leverage=3, mode="open")
+
+        self.assertEqual(calls, [{"venue": "aster", "leverage": 3, "broker_url": None, "skip_margin_setup": False}])
 
     def test_spot_arb_fetch_required_live_position_allows_variational_registry_fallback(self) -> None:
         class VariationalAdapter:

@@ -22,6 +22,7 @@ def build_tradexyz_funding_history_payload(symbol: str, start_time_ms: int) -> d
         "type": "fundingHistory",
         "coin": symbol,
         "startTime": start_time_ms,
+        "dex": TRADE_XYZ_DEX,
     }
 
 

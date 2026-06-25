@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import datetime as dt
 from typing import Sequence, TypeVar
 
 from hydra_basis.execution_engine.market_data import fetch_orderbook_snapshot
@@ -66,7 +67,33 @@ def backfill_needs_top_up(points: Sequence, *, now_ms: int) -> bool:
     return newest_ts <= now_ms - max_interval_ms
 
 
+def _format_ms_utc(ts_ms: int | None) -> str:
+    if ts_ms is None:
+        return "None"
+    return dt.datetime.fromtimestamp(ts_ms / 1000, tz=dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def build_no_new_points_warning(
+    *,
+    venue: str,
+    symbol: str,
+    start_ms: int | None,
+    end_ms: int | None,
+    coverage: dict[str, int | float | None],
+) -> str:
+    return (
+        f"backfill no new points {(venue, symbol)} "
+        f"start={_format_ms_utc(start_ms)} "
+        f"end={_format_ms_utc(end_ms)} "
+        f"samples={coverage.get('samples')} "
+        f"oldest_ts_ms={coverage.get('oldest_ts_ms')} "
+        f"newest_ts_ms={coverage.get('newest_ts_ms')} "
+        f"missing_ms={coverage.get('missing_ms')}"
+    )
+
+
 NO_ORDERBOOK_SENTINEL = "no_orderbook"
+INVALID_SYMBOL_SENTINEL = "invalid_symbol"
 
 
 def _safe_error_text(error: Exception) -> str:
@@ -85,6 +112,15 @@ def spread_error_is_transient(error: Exception) -> bool:
         or "timeout" in message
         or "timed out" in message
         or "invalid response status" in message
+    )
+
+
+def spread_error_is_invalid_symbol(*, venue: str, error: Exception) -> bool:
+    message = _safe_error_text(error).lower()
+    return (
+        venue.strip().lower() == "aster"
+        and getattr(error, "status", None) == 400
+        and "fapi.asterdex.com/fapi/v1/depth" in message
     )
 
 
@@ -117,6 +153,14 @@ async def capture_backfill_spread_snapshot_with_error(
     clip_usd: float,
     force_refresh: bool = False,
 ) -> dict[str, object]:
+    if spreads.get((venue, symbol), {}).get("status") == INVALID_SYMBOL_SENTINEL:
+        return {
+            "stored": False,
+            "venue": venue,
+            "symbol": symbol,
+            "error": None,
+            "error_type": "cached_invalid_symbol",
+        }
     if not force_refresh and spreads.get((venue, symbol), {}).get("status") == NO_ORDERBOOK_SENTINEL:
         return {
             "stored": False,
@@ -143,6 +187,15 @@ async def capture_backfill_spread_snapshot_with_error(
                 "symbol": symbol,
                 "error": None,
                 "error_type": "no_orderbook",
+            }
+        if spread_error_is_invalid_symbol(venue=venue, error=exc):
+            spreads[(venue, symbol)] = {"status": INVALID_SYMBOL_SENTINEL}
+            return {
+                "stored": False,
+                "venue": venue,
+                "symbol": symbol,
+                "error": None,
+                "error_type": "invalid_symbol",
             }
         if spread_error_is_transient(exc):
             print(f"backfill spread error transient {(venue, symbol)}: {message}")

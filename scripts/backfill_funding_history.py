@@ -12,6 +12,7 @@ ensure_project_root_on_path()
 from hydra_basis.adapters.registry import FETCHERS, FETCHERS_SINCE, SYMBOL_DISCOVERERS
 from hydra_basis.backfill import (
     build_spread_refresh_keys,
+    build_no_new_points_warning,
     chunk_sequence,
     split_loris_batched_keys,
     capture_backfill_spread_snapshot_with_error,
@@ -213,6 +214,23 @@ async def run_backfill() -> None:
                         f"missing_ms={coverage['missing_ms']}"
                     )
                     continue
+                if not result:
+                    coverage = summarize_history_coverage(
+                        trim_points_to_analysis_days(
+                            merge_points_by_interval_bucket(all_points.get(key, [])),
+                            analysis_days=7,
+                        ),
+                        required_days=7,
+                    )
+                    warning = build_no_new_points_warning(
+                        venue=key[0],
+                        symbol=key[1],
+                        start_ms=incremental_starts.get(key),
+                        end_ms=current_now_ms,
+                        coverage=coverage,
+                    )
+                    print(warning)
+                    continue
                 merged = merge_points_by_interval_bucket(all_points.get(key, []) + result)
                 all_points[key] = trim_points_to_lookback_ms(
                     merged,
@@ -266,6 +284,23 @@ async def run_backfill() -> None:
                         f"newest_ts_ms={coverage['newest_ts_ms']} "
                         f"missing_ms={coverage['missing_ms']}"
                     )
+                    continue
+                if not result:
+                    coverage = summarize_history_coverage(
+                        trim_points_to_analysis_days(
+                            merge_points_by_interval_bucket(all_points.get(key, [])),
+                            analysis_days=7,
+                        ),
+                        required_days=7,
+                    )
+                    warning = build_no_new_points_warning(
+                        venue=key[0],
+                        symbol=key[1],
+                        start_ms=incremental_starts.get(key),
+                        end_ms=current_now_ms,
+                        coverage=coverage,
+                    )
+                    print(warning)
                     continue
                 merged = merge_points_by_interval_bucket(all_points.get(key, []) + result)
                 all_points[key] = trim_points_to_lookback_ms(

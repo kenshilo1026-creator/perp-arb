@@ -1608,6 +1608,46 @@ class SpotPerpArbitrageRecordingTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(registry.get_leg(f"{strategy_id}:aster:perp:short").quantity, "99")
             self.assertEqual(registry.get_leg(f"{strategy_id}:lighter:perp:long").quantity, "100")
 
+    async def test_place_order_waits_for_live_position_to_appear_before_recording(self) -> None:
+        class Adapter:
+            def __init__(self, side: str, quantity: str, missing_attempts: int = 0) -> None:
+                self.side = side
+                self.quantity = quantity
+                self.missing_attempts = missing_attempts
+                self.calls = 0
+
+            async def get_open_position(self, *, symbol: str, market_type: str):
+                self.calls += 1
+                if self.calls <= self.missing_attempts:
+                    return None
+                return {"symbol": symbol, "market_type": market_type, "side": self.side, "quantity": self.quantity}
+
+        lighter = Adapter("LONG", "100", missing_attempts=2)
+
+        with TemporaryDirectory() as temp_dir:
+            registry_path = Path(temp_dir) / "position_registry.json"
+            with patch("scripts.place_order.asyncio.sleep", new=AsyncMock()) as sleep_mock:
+                strategy_id = await record_open_execution_from_live_positions(
+                    execution_result={
+                        "ok": True,
+                        "maker_result": {"ok": True},
+                        "hedge_result": {"ok": True},
+                    },
+                    adapters_by_venue={
+                        "aster": Adapter("SHORT", "99"),
+                        "lighter": lighter,
+                    },
+                    symbol="LAB",
+                    short_venue="aster",
+                    long_venue="lighter",
+                    registry_path=registry_path,
+                )
+
+            registry = PositionRegistry.load(registry_path)
+            self.assertEqual(registry.get_leg(f"{strategy_id}:lighter:perp:long").quantity, "100")
+            self.assertEqual(lighter.calls, 3)
+            self.assertEqual(sleep_mock.await_count, 2)
+
     async def test_place_order_records_variational_from_executed_quantity_when_live_query_unavailable(self) -> None:
         class AsterAdapter:
             async def get_open_position(self, *, symbol: str, market_type: str):

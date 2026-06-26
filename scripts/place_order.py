@@ -194,6 +194,8 @@ async def fetch_required_perp_live_leg(
     symbol: str,
     expected_side: str,
     fallback_quantity: str | None = None,
+    attempts: int = 5,
+    retry_delay_seconds: float = 1.0,
 ) -> dict:
     getter = getattr(adapter, "get_open_position", None)
     if not callable(getter):
@@ -206,7 +208,13 @@ async def fetch_required_perp_live_leg(
                 quantity=fallback_quantity,
             )
         raise RuntimeError(f"{venue} does not support live position query")
-    position = await getter(symbol=symbol, market_type="perp")
+    position = None
+    for attempt in range(max(1, attempts)):
+        position = await getter(symbol=symbol, market_type="perp")
+        if position:
+            break
+        if attempt < max(1, attempts) - 1:
+            await asyncio.sleep(retry_delay_seconds)
     if not position:
         if venue.strip().lower() == "variational" and fallback_quantity:
             return _registry_fallback_leg(

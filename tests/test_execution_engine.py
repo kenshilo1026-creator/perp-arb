@@ -1878,6 +1878,18 @@ class SingleClipExecutorTests(unittest.IsolatedAsyncioTestCase):
 
 
 class MexcSpotExecutionAdapterTests(unittest.IsolatedAsyncioTestCase):
+    async def test_signed_spot_request_includes_extended_recv_window(self) -> None:
+        class Adapter(MexcSpotExecutionAdapter):
+            def _timestamp_ms(self) -> int:
+                return 1234567890
+
+        adapter = Adapter(api_key="k", api_secret="s")
+        params = adapter._signed_order_params({"symbol": "ETHUSDT"})
+
+        self.assertEqual(params["timestamp"], 1234567890)
+        self.assertEqual(params["recvWindow"], 60000)
+        self.assertIn("signature", params)
+
     async def test_signed_spot_order_request_uses_query_params_with_json_content_type(self) -> None:
         post_calls: list[dict] = []
 
@@ -2250,6 +2262,57 @@ class LighterLivePositionTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(position["side"], "SHORT")
         self.assertEqual(position["quantity"], "2.5")
+
+    async def test_lighter_get_open_position_matches_snapshot_by_market_id_when_symbol_missing(self) -> None:
+        class Adapter(LighterExecutionAdapter):
+            async def _fetch_account_snapshot(self) -> dict[str, object]:
+                return {
+                    "positions": [
+                        {"market_id": 88, "sign": 1, "position": "0"},
+                        {"market_id": 99, "sign": 1, "position": "123.45"},
+                    ]
+                }
+
+        adapter = Adapter(
+            signer_client_factory=lambda: object(),
+            market_config_loader=lambda symbol: {"market_index": 99},
+            orderbook_loader=lambda symbol: {},
+        )
+
+        position = await adapter.get_open_position(symbol="PROVE", market_type="perp")
+
+        self.assertEqual(position["symbol"], "PROVE")
+        self.assertEqual(position["side"], "LONG")
+        self.assertEqual(position["quantity"], "123.45")
+
+    async def test_lighter_get_open_position_falls_back_to_snapshot_when_client_positions_are_empty(self) -> None:
+        class Client:
+            async def get_positions(self):
+                return {"positions": []}
+
+        class Adapter(LighterExecutionAdapter):
+            async def _fetch_account_snapshot(self) -> dict[str, object]:
+                return {
+                    "accounts": [
+                        {
+                            "positions": [
+                                {"market_index": 99, "sign": 1, "position": "100"},
+                            ],
+                        }
+                    ]
+                }
+
+        adapter = Adapter(
+            signer_client_factory=lambda: Client(),
+            market_config_loader=lambda symbol: {"market_index": 99},
+            orderbook_loader=lambda symbol: {},
+        )
+
+        position = await adapter.get_open_position(symbol="PROVE", market_type="perp")
+
+        self.assertEqual(position["symbol"], "PROVE")
+        self.assertEqual(position["side"], "LONG")
+        self.assertEqual(position["quantity"], "100")
 
 
 class ExecutionPreviewCliTests(unittest.TestCase):

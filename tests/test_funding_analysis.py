@@ -43,6 +43,7 @@ from hydra_basis.adapters.tradexyz import fetch_tradexyz_funding_since
 from hydra_basis.adapters.variational import fetch_variational_funding, list_symbols as list_variational_symbols
 from hydra_basis.adapters.variational import (
     fetch_variational_current_funding,
+    fetch_variational_funding_since,
     parse_stats_listings,
     parse_loris_historical_series,
     fetch_variational_stats,
@@ -679,7 +680,7 @@ class TradeXyzAdapterTests(unittest.IsolatedAsyncioTestCase):
         payload = build_tradexyz_funding_history_payload("XYZ:NVDA", start_time_ms=123456789)
 
         self.assertEqual(payload["type"], "fundingHistory")
-        self.assertEqual(payload["coin"], "XYZ:NVDA")
+        self.assertEqual(payload["coin"], "xyz:NVDA")
         self.assertEqual(payload["startTime"], 123456789)
         self.assertEqual(payload["dex"], "xyz")
 
@@ -702,7 +703,7 @@ class TradeXyzAdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(all(point.symbol == "XYZ:NVDA" for point in points))
         self.assertEqual(mocked.await_args.args[1], {
             "type": "fundingHistory",
-            "coin": "XYZ:NVDA",
+            "coin": "xyz:NVDA",
             "startTime": 1_717_000_000_000,
             "dex": "xyz",
         })
@@ -998,6 +999,48 @@ class VariationalAdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertAlmostEqual(points[0].raw_rate, 0.0001)
         self.assertEqual(mocked.await_count, 1)
         browser_fetch.assert_awaited_once()
+
+    async def test_fetch_variational_funding_retries_empty_nodriver_series_once(self) -> None:
+        stats_payload = {
+            "listings": [
+                {"ticker": "USELESS", "funding_rate": "0.0001", "funding_interval_s": 28800},
+            ]
+        }
+        empty_payload = {
+            "symbol": "USELESS",
+            "series": {},
+            "notices": ["temporary empty browser response"],
+        }
+        historical_payload = {
+            "symbol": "USELESS",
+            "series": {"variational": [{"t": "2026-06-25T07:01:00Z", "y": 5.08769}]},
+            "notices": [],
+        }
+
+        with patch.dict(os.environ, {"LORIS_USE_NODRIVER": "true"}, clear=False):
+            with patch(
+                "hydra_basis.adapters.variational.fetch_json",
+                new=AsyncMock(return_value=stats_payload),
+            ):
+                with patch(
+                    "hydra_basis.adapters.variational.fetch_loris_historical_with_nodriver",
+                    new=AsyncMock(side_effect=[empty_payload, historical_payload]),
+                ) as browser_fetch:
+                    with patch(
+                        "hydra_basis.adapters.variational._stop_shared_browser",
+                        new=AsyncMock(),
+                        create=True,
+                    ) as stop_browser:
+                        points = await fetch_variational_funding_since(
+                            session=object(),
+                            symbol="USELESS",
+                            start_time_ms=1_782_370_800_000,
+                            end_time_ms=1_782_446_259_000,
+                        )
+
+        self.assertEqual(len(points), 1)
+        self.assertEqual(browser_fetch.await_count, 2)
+        stop_browser.assert_not_awaited()
 
     async def test_fetch_variational_funding_still_raises_after_loris_gateway_retries(self) -> None:
         stats_payload = {

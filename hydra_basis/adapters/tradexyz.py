@@ -13,6 +13,14 @@ TRADE_XYZ_VENUE = "trade_xyz"
 TRADE_XYZ_DEX = "xyz"
 
 
+def tradexyz_api_coin(symbol: str) -> str:
+    normalized = symbol.strip().upper()
+    dex, separator, ticker = normalized.partition(":")
+    if separator:
+        return f"{dex.lower()}:{ticker}"
+    return f"{TRADE_XYZ_DEX}:{normalized}"
+
+
 def build_tradexyz_meta_payload() -> dict[str, str]:
     return {"type": "meta", "dex": TRADE_XYZ_DEX}
 
@@ -20,7 +28,7 @@ def build_tradexyz_meta_payload() -> dict[str, str]:
 def build_tradexyz_funding_history_payload(symbol: str, start_time_ms: int) -> dict[str, str | int]:
     return {
         "type": "fundingHistory",
-        "coin": symbol,
+        "coin": tradexyz_api_coin(symbol),
         "startTime": start_time_ms,
         "dex": TRADE_XYZ_DEX,
     }

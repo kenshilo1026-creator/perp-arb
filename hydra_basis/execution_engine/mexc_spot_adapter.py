@@ -14,12 +14,14 @@ from hydra_basis.execution_engine.order_fill import poll_until_filled
 
 class MexcSpotExecutionAdapter:
     BASE_URL = "https://api.mexc.com"
+    DEFAULT_RECV_WINDOW_MS = 60000
 
     def __init__(
         self,
         *,
         api_key: str | None = None,
         api_secret: str | None = None,
+        recv_window_ms: int = DEFAULT_RECV_WINDOW_MS,
     ) -> None:
         self.api_key = (
             api_key
@@ -31,6 +33,7 @@ class MexcSpotExecutionAdapter:
             if api_secret is not None
             else os.getenv("MEXC_SPOT_API_SECRET", "") or os.getenv("MEXC_API_SECRET", "")
         )
+        self.recv_window_ms = recv_window_ms
 
     def _timestamp_ms(self) -> int:
         return int(time.time() * 1000)
@@ -53,6 +56,7 @@ class MexcSpotExecutionAdapter:
     def _signed_order_params(self, params: dict) -> dict:
         self._ensure_credentials()
         signed_params = dict(params)
+        signed_params.setdefault("recvWindow", self.recv_window_ms)
         signed_params["timestamp"] = self._timestamp_ms()
         query = urlencode(signed_params)
         signature = self._sign(query)

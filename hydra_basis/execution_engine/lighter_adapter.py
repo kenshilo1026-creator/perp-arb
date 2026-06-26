@@ -151,19 +151,60 @@ def _lighter_position_symbol(item: dict) -> str:
     return ""
 
 
+def _normalize_lighter_symbol_label(symbol: str) -> str:
+    normalized = symbol.strip().upper()
+    for suffix in ("-PERP", "_PERP", "/USDC", "/USDT", "-USDC", "-USDT"):
+        if normalized.endswith(suffix):
+            return normalized[: -len(suffix)]
+    return normalized
+
+
+def _lighter_position_market_id(item: dict) -> int | None:
+    for key in ("market_id", "market_index", "marketIndex", "marketId"):
+        value = item.get(key)
+        if value in (None, ""):
+            continue
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
 def _lighter_position_size(item: dict) -> Decimal:
-    for key in ("position", "szi", "size", "base_amount", "baseAmount", "quantity"):
+    for key in (
+        "position",
+        "szi",
+        "size",
+        "position_size",
+        "positionSize",
+        "base_amount",
+        "baseAmount",
+        "base_asset_amount",
+        "baseAssetAmount",
+        "quantity",
+    ):
         value = item.get(key)
         if value not in (None, ""):
             return Decimal(str(value))
     return Decimal("0")
 
 
-def _normalize_lighter_live_position(*, symbol: str, item: dict) -> dict[str, object] | None:
+def _normalize_lighter_live_position(
+    *,
+    symbol: str,
+    item: dict,
+    market_index: int | None = None,
+) -> dict[str, object] | None:
     normalized_symbol = symbol.strip().upper()
     item_symbol = _lighter_position_symbol(item)
-    if item_symbol and item_symbol != normalized_symbol:
-        return None
+    if item_symbol:
+        if _normalize_lighter_symbol_label(item_symbol) != _normalize_lighter_symbol_label(normalized_symbol):
+            return None
+    elif market_index is not None:
+        item_market_id = _lighter_position_market_id(item)
+        if item_market_id != market_index:
+            return None
     size = _lighter_position_size(item)
     if size == 0:
         return None
@@ -181,6 +222,29 @@ def _normalize_lighter_live_position(*, symbol: str, item: dict) -> dict[str, ob
         "quantity": format(abs(size).normalize(), "f"),
         "raw": item,
     }
+
+
+def _lighter_snapshot_position_items(snapshot: dict[str, object]) -> list[dict]:
+    positions: list[dict] = []
+    direct_positions = snapshot.get("positions")
+    if isinstance(direct_positions, list):
+        positions.extend(item for item in direct_positions if isinstance(item, dict))
+
+    data = snapshot.get("data")
+    if isinstance(data, dict):
+        positions.extend(_lighter_snapshot_position_items(data))
+    elif isinstance(data, list):
+        positions.extend(item for item in data if isinstance(item, dict))
+
+    accounts = snapshot.get("accounts")
+    if isinstance(accounts, list):
+        for account in accounts:
+            if not isinstance(account, dict):
+                continue
+            account_positions = account.get("positions")
+            if isinstance(account_positions, list):
+                positions.extend(item for item in account_positions if isinstance(item, dict))
+    return positions
 
 
 class LighterExecutionAdapter:
@@ -286,6 +350,12 @@ class LighterExecutionAdapter:
     async def get_open_position(self, *, symbol: str, market_type: str) -> dict[str, object] | None:
         if market_type != "perp":
             raise RuntimeError("lighter live position query only supports perp")
+        market_index = None
+        try:
+            market_config = self._normalize_market_config(await self._load_market_config(symbol))
+            market_index = int(market_config["market_index"])
+        except Exception:
+            market_index = None
         client = self._get_client()
         for method_name in (
             "get_positions",
@@ -300,21 +370,25 @@ class LighterExecutionAdapter:
             if inspect.isawaitable(result):
                 result = await result
             for item in _lighter_payload_items(result):
-                normalized = _normalize_lighter_live_position(symbol=symbol, item=item)
+                normalized = _normalize_lighter_live_position(
+                    symbol=symbol,
+                    item=item,
+                    market_index=market_index,
+                )
                 if normalized is not None:
                     return normalized
-            return None
 
         snapshot = await self._fetch_account_snapshot()
-        accounts = snapshot.get("accounts") or []
-        if accounts:
-            positions = accounts[0].get("positions") or []
-            for item in positions:
-                if not isinstance(item, dict):
-                    continue
-                normalized = _normalize_lighter_live_position(symbol=symbol, item=item)
-                if normalized is not None:
-                    return normalized
+        snapshot_positions = _lighter_snapshot_position_items(snapshot)
+        for item in snapshot_positions:
+            normalized = _normalize_lighter_live_position(
+                symbol=symbol,
+                item=item,
+                market_index=market_index,
+            )
+            if normalized is not None:
+                return normalized
+        if snapshot_positions or snapshot.get("accounts"):
             return None
 
         raise RuntimeError("lighter account snapshot returned no accounts")
@@ -341,21 +415,20 @@ class LighterExecutionAdapter:
                 normalized = _normalize_lighter_live_position(symbol=item_symbol, item=item)
                 if normalized is not None:
                     positions.append(normalized)
-            return positions
+            if positions:
+                return positions
 
         snapshot = await self._fetch_account_snapshot()
-        accounts = snapshot.get("accounts") or []
         positions: list[dict[str, object]] = []
-        if accounts:
-            for item in accounts[0].get("positions") or []:
-                if not isinstance(item, dict):
-                    continue
-                item_symbol = _lighter_position_symbol(item)
-                if not item_symbol:
-                    continue
-                normalized = _normalize_lighter_live_position(symbol=item_symbol, item=item)
-                if normalized is not None:
-                    positions.append(normalized)
+        snapshot_positions = _lighter_snapshot_position_items(snapshot)
+        for item in snapshot_positions:
+            item_symbol = _lighter_position_symbol(item)
+            if not item_symbol:
+                continue
+            normalized = _normalize_lighter_live_position(symbol=item_symbol, item=item)
+            if normalized is not None:
+                positions.append(normalized)
+        if snapshot_positions or snapshot.get("accounts"):
             return positions
 
         raise RuntimeError("lighter account snapshot returned no accounts")

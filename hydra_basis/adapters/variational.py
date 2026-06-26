@@ -18,6 +18,7 @@ VARIATIONAL_BASE_URL = "https://omni-client-api.prod.ap-northeast-1.variational.
 LORIS_HISTORICAL_URL = "https://api.loris.tools/funding/historical"
 _VARIATIONAL_STATS_CACHE: dict[int, dict[str, dict[str, float]]] = {}
 LORIS_GATEWAY_RETRIES = 2
+LORIS_EMPTY_SERIES_RETRIES = 1
 LORIS_COMPARISON_INTERVAL_HOURS = 8.0
 LORIS_BROWSER_HEADERS = {
     "Accept": "*/*",
@@ -95,6 +96,22 @@ def parse_loris_historical_series(
     return points
 
 
+def _loris_series_count(data: dict, *, venue: str) -> int:
+    series = data.get("series") if isinstance(data, dict) else None
+    rows = series.get(venue, []) if isinstance(series, dict) else []
+    return len(rows) if isinstance(rows, list) else 0
+
+
+def _log_empty_loris_series(*, symbol: str, data: dict) -> None:
+    series = data.get("series") if isinstance(data, dict) else None
+    series_keys = sorted(series.keys()) if isinstance(series, dict) else []
+    notices = data.get("notices") if isinstance(data, dict) else None
+    print(
+        "loris historical empty variational series "
+        f"symbol={symbol.upper()} series_keys={series_keys} notices={notices}"
+    )
+
+
 async def fetch_variational_stats(session) -> dict[str, dict[str, float]]:
     cached = _VARIATIONAL_STATS_CACHE.get(id(session))
     if cached is not None:
@@ -136,15 +153,23 @@ async def fetch_variational_funding_since(session, symbol: str, start_time_ms: i
     start_iso = isoformat_z(start_time_ms)
     end_iso = isoformat_z(end_ms)
     if loris_nodriver_enabled():
-        data = await run_serialized(
-            "variational",
-            lambda: fetch_loris_historical_with_nodriver(
-                symbol=symbol.upper(),
-                start=start_iso,
-                end=end_iso,
-            ),
-            delay_seconds=VARIATIONAL_REQUEST_DELAY_SECONDS,
-        )
+        data = None
+        for attempt in range(LORIS_EMPTY_SERIES_RETRIES + 1):
+            data = await run_serialized(
+                "variational",
+                lambda: fetch_loris_historical_with_nodriver(
+                    symbol=symbol.upper(),
+                    start=start_iso,
+                    end=end_iso,
+                ),
+                delay_seconds=VARIATIONAL_REQUEST_DELAY_SECONDS,
+            )
+            if _loris_series_count(data or {}, venue="variational") > 0:
+                break
+            if attempt < LORIS_EMPTY_SERIES_RETRIES:
+                _log_empty_loris_series(symbol=symbol, data=data or {})
+                continue
+            _log_empty_loris_series(symbol=symbol, data=data or {})
         return parse_loris_historical_series(
             data or {},
             symbol=symbol,

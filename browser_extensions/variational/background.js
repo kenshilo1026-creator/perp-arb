@@ -888,13 +888,13 @@ function executeVariationalCancelOrder(command) {
     const amount = String(command.amount || "").trim();
 
     ensureOpenOrdersTabVisible();
-    await sleep(600);
+    await sleep(1500);
 
     let cancelButton = findCancelOrderButton(orderId, symbol, side, amount);
     if (!cancelButton) {
       await sleep(3000);
       ensureOpenOrdersTabVisible();
-      await sleep(600);
+      await sleep(1500);
       cancelButton = findCancelOrderButton(orderId, symbol, side, amount);
     }
     if (!cancelButton) {
@@ -1294,10 +1294,21 @@ function executeVariationalOrder(command) {
       await sleep(80);
     }
     click(midButton);
-    const populatedInput = await waitForPriceInput(3000);
-    const priceVal = populatedInput ? String(populatedInput.value || "").replace(/,/g, "").trim() : "";
+    let populatedInput = await waitForPriceInput(3000);
+    let priceVal = populatedInput ? String(populatedInput.value || "").replace(/,/g, "").trim() : "";
     if (!priceVal || Number(priceVal) <= 0) {
-      return { ok: false, usedMid: true, priceInput: populatedInput, error: "Mid button clicked but price input did not populate within 3s." };
+      // Retry: clear and click Mid again, wait longer
+      const retryInput = populatedInput || findLimitPriceInput();
+      if (retryInput && retryInput.value) {
+        setInputValue(retryInput, "");
+        await sleep(80);
+      }
+      click(midButton);
+      populatedInput = await waitForPriceInput(6000);
+      priceVal = populatedInput ? String(populatedInput.value || "").replace(/,/g, "").trim() : "";
+    }
+    if (!priceVal || Number(priceVal) <= 0) {
+      return { ok: false, usedMid: true, priceInput: populatedInput, error: "Mid button clicked but price input did not populate within 9s." };
     }
     return { ok: true, usedMid: true, priceInput: populatedInput };
   }
@@ -1309,7 +1320,16 @@ function executeVariationalOrder(command) {
     }
     if (!button.disabled && button.getAttribute("aria-disabled") !== "true") {
       click(button);
-      await sleep(150);
+      if (orderType === "LIMIT") {
+        // Wait for the limit-price-input to appear in the DOM (up to 2s)
+        const deadline = Date.now() + 2000;
+        while (Date.now() < deadline) {
+          if (findLimitPriceInput()) break;
+          await sleep(80);
+        }
+      } else {
+        await sleep(150);
+      }
     }
     return true;
   }

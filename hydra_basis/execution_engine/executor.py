@@ -579,6 +579,19 @@ async def execute_single_clip_with_sides(
                 print(f"[reprice] cancel ok — placing new order (attempt {maker_attempt + 2})", flush=True)
                 await asyncio.sleep(1.0)
             except Exception as cancel_exc:
+                cancel_msg = str(cancel_exc).lower()
+                if "could not identify cancel button" in cancel_msg:
+                    # Order is no longer in Open Orders — it filled while we were waiting.
+                    # Treat the fill timeout as a successful fill and proceed to the taker leg.
+                    print(
+                        f"[reprice] cancel found no open order for {maker_venue} {maker_side} {symbol} "
+                        f"— assuming filled, proceeding to taker leg",
+                        flush=True,
+                    )
+                    if isinstance(placed_result, dict):
+                        mark_maker_closed(placed_result)
+                    maker_attempts.append(attempt_record)
+                    break
                 await raise_after_maker_cleanup(
                     RuntimeError(
                         f"[reprice] cancel failed — stopping to avoid duplicate orders: {cancel_exc}"

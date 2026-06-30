@@ -58,6 +58,7 @@ class VariationalBrowserExecutionAdapter:
         timeout_seconds: float = 10.0,
         fill_timeout_seconds: float | None = None,
         debug_payload_path: Path | None = Path("data/variational_order_debug.json"),
+        cancel_debug_payload_path: Path | None = Path("data/variational_cancel_debug.json"),
         min_seconds_between_orders: float = 10.0,
         clock: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
@@ -67,6 +68,7 @@ class VariationalBrowserExecutionAdapter:
         self.timeout_seconds = timeout_seconds
         self.fill_timeout_seconds = fill_timeout_seconds
         self.debug_payload_path = debug_payload_path
+        self.cancel_debug_payload_path = cancel_debug_payload_path
         self.min_seconds_between_orders = min_seconds_between_orders
         self._clock = clock
         self._sleep = sleep
@@ -260,6 +262,11 @@ class VariationalBrowserExecutionAdapter:
             raise RuntimeError(f"variational cancel_order unexpected message type: {msg.type}")
         result = msg.json()
         if not result.get("ok"):
+            if self.cancel_debug_payload_path is not None:
+                self.cancel_debug_payload_path.parent.mkdir(parents=True, exist_ok=True)
+                self.cancel_debug_payload_path.write_text(
+                    json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8"
+                )
             detail_text = ""
             details = result.get("details")
             if details:
@@ -384,6 +391,9 @@ class VariationalBrowserExecutionAdapter:
                     )
                     debug_path_text = f" debug_payload={self.debug_payload_path}"
                 details = payload.get("details")
+                fill_diagnostics = details.get("fill_diagnostics") if isinstance(details, dict) else None
+                if fill_diagnostics:
+                    print(f"[variational] fill_diagnostics: {json.dumps(fill_diagnostics, ensure_ascii=False)}", flush=True)
                 detail_text = ""
                 if details:
                     detail_text = f" details={json.dumps(details, ensure_ascii=False)[:2000]}"

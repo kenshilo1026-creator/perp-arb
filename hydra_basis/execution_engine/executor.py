@@ -504,6 +504,12 @@ async def execute_single_clip_with_sides(
                 maker_result = None
                 maker_result = await maker_adapter.place_limit_order(**maker_kwargs)
                 attempt_record["maker_result"] = maker_result
+                # If the order was placed without an explicit price (e.g. variational Mid click),
+                # capture the actual price used so reprice comparisons have a baseline.
+                if maker_kwargs.get("price") is None:
+                    used_price = (maker_result.get("details") or {}).get("usedLimitPrice")
+                    if used_price:
+                        maker_kwargs["price"] = str(used_price)
             attempt_record["maker_result"] = maker_result
             if not maker_result.get("ok", False):
                 raise RuntimeError(f"maker order failed on {maker_venue}")
@@ -560,6 +566,7 @@ async def execute_single_clip_with_sides(
                                 f"change={format_decimal(change)} — keep existing order",
                                 flush=True,
                             )
+                            maker_kwargs["price"] = fresh_price
                             reuse_existing_maker_result = True
                             continue
                 except Exception as refresh_exc:

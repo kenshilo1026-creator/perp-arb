@@ -276,6 +276,29 @@ class VariationalBrowserExecutionAdapter:
             )
         return {"ok": True, "raw": result}
 
+    async def get_limit_price_preview(self, *, symbol: str) -> str:
+        mapped = self._map_symbol(symbol)
+        request_id = str(uuid.uuid4())
+        async with ClientSession() as session:
+            async with session.ws_connect(self.broker_url, heartbeat=20) as ws:
+                await ws.send_json({"type": "REGISTER", "role": self.client_role})
+                await self._await_register_ack(ws)
+                await ws.send_json({
+                    "type": "PREVIEW_LIMIT_ORDER_PRICE",
+                    "requestId": request_id,
+                    "symbol": mapped,
+                })
+                msg = await asyncio.wait_for(ws.receive(), timeout=20.0)
+        if msg.type != WSMsgType.TEXT:
+            raise RuntimeError(f"variational get_limit_price_preview unexpected message type: {msg.type}")
+        result = msg.json()
+        if not result.get("ok"):
+            raise RuntimeError(f"variational get_limit_price_preview failed for {mapped}: {result.get('error')}")
+        price = result.get("price")
+        if not price or float(price) <= 0:
+            raise RuntimeError(f"variational get_limit_price_preview returned invalid price for {mapped}: {price!r}")
+        return str(price)
+
     async def get_open_position(self, *, symbol: str, market_type: str) -> dict | None:
         symbol = self._map_symbol(symbol)
         request_id = str(uuid.uuid4())

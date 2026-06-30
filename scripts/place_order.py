@@ -396,7 +396,13 @@ async def execute_close_position_plan(
         fresh_books = await fetch_close_orderbooks(symbol=symbol, venues=venues, clip_usd=plan.clip_usd)
         return passive_limit_price_from_orderbook(fresh_books[plan.maker_venue], maker_side)
 
-    close_price_refresher = None if plan.maker_venue == "variational" else _refresh_close_maker_price
+    async def _refresh_variational_maker_price() -> str:
+        return await adapters["variational"].get_limit_price_preview(symbol=symbol)
+
+    if plan.maker_venue == "variational":
+        close_price_refresher = _refresh_variational_maker_price
+    else:
+        close_price_refresher = _refresh_close_maker_price
 
     taker_side = plan.side_by_venue[plan.taker_venue]
     taker_adapter = adapters[plan.taker_venue]
@@ -596,7 +602,13 @@ async def run_open_execution_once(
                     fresh_book = await fetch_orderbook_snapshot(_s, venue=preview.maker_venue, symbol=signal.symbol, clip_usd=batch_clip_usd)
                 return passive_limit_price_from_orderbook(fresh_book, maker_side)
 
-            open_price_refresher = None if preview.maker_venue == "variational" else _refresh_open_maker_price
+            async def _refresh_variational_open_maker_price() -> str:
+                return await maker_adapter.get_limit_price_preview(symbol=signal.symbol)
+
+            if preview.maker_venue == "variational":
+                open_price_refresher = _refresh_variational_open_maker_price
+            else:
+                open_price_refresher = _refresh_open_maker_price
 
             taker_pre_hook = None
             prepare_fn = getattr(taker_adapter, "prepare_market_order", None)

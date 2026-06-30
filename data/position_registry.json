@@ -1775,6 +1775,30 @@
       "strategy_id": "manual-2Z-1782812134504",
       "symbol": "2Z",
       "venue": "aster"
+    },
+    {
+      "last_margin_topup_ts_ms": null,
+      "leg_id": "manual-2Z-1782814361866:lighter:perp:short",
+      "margin_topups": 0,
+      "market_type": "perp",
+      "quantity": "7366.5",
+      "side": "SHORT",
+      "status": "open",
+      "strategy_id": "manual-2Z-1782814361866",
+      "symbol": "2Z",
+      "venue": "lighter"
+    },
+    {
+      "last_margin_topup_ts_ms": null,
+      "leg_id": "manual-2Z-1782814361866:aster:perp:long",
+      "margin_topups": 0,
+      "market_type": "perp",
+      "quantity": "20000",
+      "side": "LONG",
+      "status": "open",
+      "strategy_id": "manual-2Z-1782814361866",
+      "symbol": "2Z",
+      "venue": "aster"
     }
   ]
 }

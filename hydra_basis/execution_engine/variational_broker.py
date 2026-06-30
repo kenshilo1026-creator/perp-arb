@@ -152,6 +152,7 @@ class VariationalCommandBroker:
         self._last_fill_reject_reason: str | None = None
         self._positions: dict[str, dict[str, Any]] = {}
         self._portfolio_received = asyncio.Event()
+        self._pending_price_previews: dict[str, dict[str, Any]] = {}
         self._pending_cancels: dict[str, dict[str, Any]] = {}
         self._pending_prepares: dict[str, dict[str, Any]] = {}
 
@@ -224,6 +225,12 @@ class VariationalCommandBroker:
             return
         if msg_type == "PREPARE_RESULT":
             await self._handle_prepare_result(payload)
+            return
+        if msg_type == "PREVIEW_LIMIT_ORDER_PRICE":
+            await self._handle_price_preview(websocket, payload)
+            return
+        if msg_type == "PRICE_PREVIEW_RESULT":
+            await self._handle_price_preview_result(payload)
             return
         await self._send_error(websocket, f"Unsupported message type: {msg_type or 'UNKNOWN'}")
 
@@ -420,6 +427,42 @@ class VariationalCommandBroker:
                 "ok": True,
                 "position": position,
             })
+
+    async def _handle_price_preview(self, websocket, payload: dict[str, Any]) -> None:
+        request_id = str(payload.get("requestId") or uuid.uuid4())
+        if self._extension is None:
+            await self._send(websocket, {
+                "type": "PRICE_PREVIEW_RESULT", "requestId": request_id,
+                "ok": False, "price": None, "error": "No extension connected.",
+            })
+            return
+        future: asyncio.Future = asyncio.get_event_loop().create_future()
+        self._pending_price_previews[request_id] = {"requester": websocket, "future": future}
+        await self._send(self._extension, {
+            "type": "PREVIEW_LIMIT_ORDER_PRICE",
+            "requestId": request_id,
+            "symbol": payload.get("symbol"),
+            "market": payload.get("market"),
+            "timestamp": utc_now(),
+        })
+        try:
+            result = await asyncio.wait_for(asyncio.shield(future), timeout=15.0)
+            await self._send(websocket, result)
+        except (asyncio.TimeoutError, asyncio.CancelledError):
+            self._pending_price_previews.pop(request_id, None)
+            await self._send(websocket, {
+                "type": "PRICE_PREVIEW_RESULT", "requestId": request_id,
+                "ok": False, "price": None, "error": "Price preview timeout.",
+            })
+
+    async def _handle_price_preview_result(self, payload: dict[str, Any]) -> None:
+        request_id = str(payload.get("requestId", "")).strip()
+        pending = self._pending_price_previews.pop(request_id, None)
+        if pending is None:
+            return
+        future = pending.get("future")
+        if future and not future.done():
+            future.set_result(payload)
 
     async def _handle_register(self, websocket, payload: dict[str, Any]) -> None:
         role = str(payload.get("role", "")).strip().lower() or "unknown"

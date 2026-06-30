@@ -1662,14 +1662,19 @@ function executeVariationalOrder(command) {
     click(submitButton);
     await sleep(Number(command.timeoutMs || 1500));
 
-      return {
-        ok: true,
-        details: {
-          automationVersion,
-          side,
-          orderType,
-          amount,
-          explicitLimitPrice: explicitLimitPrice || null,
+    const usedLimitPrice = orderType === "LIMIT"
+      ? (readLimitPriceValue(excludedAmountInput || findLimitPriceInput()) || null)
+      : null;
+
+    return {
+      ok: true,
+      details: {
+        automationVersion,
+        side,
+        orderType,
+        amount,
+        explicitLimitPrice: explicitLimitPrice || null,
+        usedLimitPrice,
         market: command.market || null,
         clickedSubmitText: textOf(submitButton)
       }

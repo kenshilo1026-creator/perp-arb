@@ -52,6 +52,32 @@ class VariationalExtensionCommandClientTests(unittest.TestCase):
         self.assertIn("submitEnableTimeoutMs", background)
         self.assertIn("Submit button stayed disabled", background)
 
+    def test_background_supports_reduce_only_order_commands(self) -> None:
+        background = (EXT_DIR / "background.js").read_text(encoding="utf-8")
+
+        self.assertIn("ensureReduceOnly", background)
+        self.assertIn("command.reduceOnly", background)
+        self.assertIn("Reduce Only", background)
+
+    def test_background_reclicks_mid_when_limit_submit_stays_disabled(self) -> None:
+        background = (EXT_DIR / "background.js").read_text(encoding="utf-8")
+
+        self.assertIn("retryLimitMidAfterDisabledSubmit(side)", background)
+        self.assertNotIn("retryLimitMidAfterDisabledSubmit(side, explicitLimitPrice)", background)
+        self.assertIn("retryMidAfterDisabledSubmit", background)
+        self.assertIn("clickedMidAfterDisabledSubmit", background)
+
+    def test_background_reloads_and_retries_when_submit_stays_disabled_after_amount_input(self) -> None:
+        background = (EXT_DIR / "background.js").read_text(encoding="utf-8")
+
+        self.assertIn("isSubmitDisabledAfterAmountError", background)
+        self.assertIn("MAX_ORDER_RELOAD_RETRIES", background)
+        self.assertIn("reloadTabAndWaitForComplete", background)
+        self.assertIn("chrome.tabs.onUpdated.addListener", background)
+        self.assertIn("changeInfo.status === \"complete\"", background)
+        self.assertIn("[after reload]", background)
+        self.assertIn("submit disabled after amount input", background.lower())
+
     def test_background_retries_injection_when_page_frame_is_removed(self) -> None:
         background = (EXT_DIR / "background.js").read_text(encoding="utf-8")
 

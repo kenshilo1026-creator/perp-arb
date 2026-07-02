@@ -189,7 +189,11 @@ def order_result_looks_filled(order_result: dict[str, object]) -> bool:
 
 def maker_fill_error_is_repriceable(error: Exception) -> bool:
     message = str(error).strip().lower()
-    return "timeout" in message or "timed out" in message
+    return (
+        "timeout" in message
+        or "timed out" in message
+        or "fill confirmation unavailable" in message
+    )
 
 
 def resolve_executed_quantity(
@@ -323,8 +327,11 @@ async def execute_single_clip(
     max_execution_price_gap_pct: float = 0.01,
     maker_reprice_min_change_pct: float = 0.0,
     maker_price_refresher: Callable[[], Awaitable[str]] | None = None,
+    maker_keep_existing_check_delay_seconds: float = 10.0,
     taker_pre_hook: Callable[[], Awaitable[None]] | None = None,
     min_hedge_notional_usd: float = 0.0,
+    maker_reduce_only: bool = False,
+    taker_reduce_only: bool = False,
 ) -> dict[str, object]:
     maker_side, taker_side = execution_sides_for_signal(
         maker_venue=maker_venue,
@@ -353,8 +360,11 @@ async def execute_single_clip(
         max_execution_price_gap_pct=max_execution_price_gap_pct,
         maker_reprice_min_change_pct=maker_reprice_min_change_pct,
         maker_price_refresher=maker_price_refresher,
+        maker_keep_existing_check_delay_seconds=maker_keep_existing_check_delay_seconds,
         taker_pre_hook=taker_pre_hook,
         min_hedge_notional_usd=min_hedge_notional_usd,
+        maker_reduce_only=maker_reduce_only,
+        taker_reduce_only=taker_reduce_only,
     )
 
 
@@ -381,8 +391,11 @@ async def execute_single_clip_with_sides(
     max_execution_price_gap_pct: float = 0.01,
     maker_reprice_min_change_pct: float = 0.0,
     maker_price_refresher: Callable[[], Awaitable[str]] | None = None,
+    maker_keep_existing_check_delay_seconds: float = 10.0,
     taker_pre_hook: Callable[[], Awaitable[None]] | None = None,
     min_hedge_notional_usd: float = 0.0,
+    maker_reduce_only: bool = False,
+    taker_reduce_only: bool = False,
 ) -> dict[str, object]:
     state_machine.to_preview_ready()
     state_machine.to_awaiting_confirm()
@@ -392,6 +405,8 @@ async def execute_single_clip_with_sides(
         "amount": str(quantity),
         "clip_usd": clip_usd,
     }
+    if maker_reduce_only:
+        maker_kwargs["reduce_only"] = True
     resolved_maker_price = maker_price
     if resolved_maker_price is None:
         if maker_orderbook is None:
@@ -464,13 +479,15 @@ async def execute_single_clip_with_sides(
         errors: list[str] = []
         for active_order in reversed(active_maker_orders.copy()):
             try:
-                await cancel_maker_order_with_retries(
+                # Shield the cancel so a Ctrl+C / task-cancellation cannot
+                # interrupt the cleanup itself mid-flight.
+                await asyncio.shield(cancel_maker_order_with_retries(
                     maker_adapter,
                     maker_result=active_order,
                     symbol=symbol,
                     side=maker_side,
                     amount=str(quantity),
-                )
+                ))
                 mark_maker_closed(active_order)
                 print(
                     "[maker-cleanup] cancelled active maker before exit "
@@ -568,6 +585,8 @@ async def execute_single_clip_with_sides(
                             )
                             maker_kwargs["price"] = fresh_price
                             reuse_existing_maker_result = True
+                            if maker_keep_existing_check_delay_seconds > 0:
+                                await asyncio.sleep(maker_keep_existing_check_delay_seconds)
                             continue
                 except Exception as refresh_exc:
                     print(f"[reprice] failed to refresh maker price before cancel: {refresh_exc}", flush=True)
@@ -696,12 +715,15 @@ async def execute_single_clip_with_sides(
     for attempt in range(max_hedge_retries + 1):
         try:
             hedge_clip_usd = clip_usd * float(executed_quantity / requested_quantity)
-            hedge_result = await taker_adapter.place_market_order(
-                symbol=symbol,
-                side=taker_side,
-                amount=str(executed_quantity),
-                clip_usd=hedge_clip_usd,
-            )
+            taker_kwargs = {
+                "symbol": symbol,
+                "side": taker_side,
+                "amount": str(executed_quantity),
+                "clip_usd": hedge_clip_usd,
+            }
+            if taker_reduce_only:
+                taker_kwargs["reduce_only"] = True
+            hedge_result = await taker_adapter.place_market_order(**taker_kwargs)
             maker_avg_price = (
                 extract_average_price(maker_fill_result)
                 or extract_average_price(maker_result)

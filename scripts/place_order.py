@@ -410,7 +410,13 @@ async def execute_close_position_plan(
     prepare_fn = getattr(taker_adapter, "prepare_market_order", None)
     if plan.taker_venue == "variational" and callable(prepare_fn):
         async def _prepare_close_taker():
-            await prepare_fn(symbol=plan.symbol, side=taker_side, amount=str(plan.quantity), clip_usd=plan.clip_usd)
+            await prepare_fn(
+                symbol=plan.symbol,
+                side=taker_side,
+                amount=str(plan.quantity),
+                clip_usd=plan.clip_usd,
+                reduce_only=True,
+            )
         taker_pre_hook = _prepare_close_taker
 
     return await execute_single_clip_with_sides(
@@ -436,6 +442,8 @@ async def execute_close_position_plan(
         ),
         maker_price_refresher=close_price_refresher,
         taker_pre_hook=taker_pre_hook,
+        maker_reduce_only=plan.maker_venue == "variational",
+        taker_reduce_only=plan.taker_venue == "variational",
     )
 
 
@@ -862,7 +870,12 @@ async def run_place_order(args: argparse.Namespace) -> None:
 
 def main() -> None:
     args = parse_args()
-    asyncio.run(run_place_order(args))
+    try:
+        asyncio.run(run_place_order(args))
+    except KeyboardInterrupt:
+        # asyncio.run() already cancelled the running task and gave it a chance
+        # to run cleanup_active_makers (shielded). Print a clean exit message.
+        print("\n[place_order] interrupted — open orders were cancelled if possible", flush=True)
 
 
 if __name__ == "__main__":

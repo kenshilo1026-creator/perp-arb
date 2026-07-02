@@ -1500,6 +1500,30 @@ class AlertsTests(unittest.TestCase):
         self.assertEqual(len(selected), 1)
         self.assertEqual(selected[0]["symbol"], "ETH")
 
+    def test_ignores_spread_cache_entries_without_spread_pct(self) -> None:
+        opportunities = [
+            {
+                "symbol": "BTC",
+                "short_venue": "aster",
+                "long_venue": "hyperliquid",
+                "stats": {"signal": True, "annualized_avg": 0.50},
+            },
+        ]
+
+        spreads = {
+            ("aster", "BTC"): {"status": "invalid_symbol"},
+            ("hyperliquid", "BTC"): {"bid": 99.9, "ask": 100.0, "spread_pct": 0.0010, "ts_ms": 1},
+        }
+
+        selected = select_best_alerts_by_symbol(
+            opportunities,
+            min_annualized_avg=0.25,
+            spreads_by_venue_symbol=spreads,
+        )
+
+        self.assertEqual(len(selected), 1)
+        self.assertEqual(selected[0]["symbol"], "BTC")
+
     def test_selects_only_highest_spot_perp_signal_per_symbol_above_threshold(self) -> None:
         opportunities = [
             {"symbol": "BTC", "venue": "a", "stats": {"signal": True, "annualized_avg": 0.30}},

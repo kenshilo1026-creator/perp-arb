@@ -12,12 +12,21 @@ def _perp_perp_roc(annualized_avg: float, leverage: int = ASSUMED_LEVERAGE) -> f
     return annualized_avg * leverage / 2
 
 
+def _safe_spread_pct(spread: dict[str, float | int] | None) -> float | None:
+    if spread is None or "spread_pct" not in spread:
+        return None
+    try:
+        return float(spread["spread_pct"])
+    except (TypeError, ValueError):
+        return None
+
+
 def select_best_alerts_by_symbol(
     opportunities: list[dict],
     *,
     min_annualized_avg: float,
-    spreads_by_venue_symbol: dict[tuple[str, str], dict[str, float | int]] | None = None,
-    max_spread_pct: float = 0.002,
+    spreads_by_venue_symbol: dict[tuple[str, str], dict] | None = None,
+    max_spread_pct: float = 0.001,
 ) -> list[dict]:
     best_by_symbol: dict[str, dict] = {}
 
@@ -29,11 +38,13 @@ def select_best_alerts_by_symbol(
         if spreads_by_venue_symbol is not None:
             short_spread = spreads_by_venue_symbol.get((opportunity["short_venue"], opportunity["symbol"]))
             long_spread = spreads_by_venue_symbol.get((opportunity["long_venue"], opportunity["symbol"]))
+            short_spread_pct = _safe_spread_pct(short_spread)
+            long_spread_pct = _safe_spread_pct(long_spread)
             if (
-                short_spread is not None
-                and long_spread is not None
-                and float(short_spread["spread_pct"]) > max_spread_pct
-                and float(long_spread["spread_pct"]) > max_spread_pct
+                short_spread_pct is not None
+                and long_spread_pct is not None
+                and short_spread_pct > max_spread_pct
+                and long_spread_pct > max_spread_pct
             ):
                 continue
 

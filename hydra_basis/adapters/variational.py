@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import datetime as dt
 
 from hydra_basis.adapters.base import fetch_json
@@ -19,6 +20,8 @@ LORIS_HISTORICAL_URL = "https://api.loris.tools/funding/historical"
 _VARIATIONAL_STATS_CACHE: dict[int, dict[str, dict[str, float]]] = {}
 LORIS_GATEWAY_RETRIES = 2
 LORIS_EMPTY_SERIES_RETRIES = 1
+LORIS_RATE_LIMIT_RETRIES = 3
+LORIS_RATE_LIMIT_BACKOFF_SECONDS = 30.0
 LORIS_COMPARISON_INTERVAL_HOURS = 8.0
 LORIS_BROWSER_HEADERS = {
     "Accept": "*/*",
@@ -102,6 +105,16 @@ def _loris_series_count(data: dict, *, venue: str) -> int:
     return len(rows) if isinstance(rows, list) else 0
 
 
+def _loris_response_is_rate_limited(data: object) -> bool:
+    if not isinstance(data, dict):
+        return False
+    error = str(data.get("error") or data.get("message") or data.get("msg") or "").lower()
+    code = data.get("code") or data.get("status") or data.get("statusCode")
+    if code in (429, "429"):
+        return True
+    return any(kw in error for kw in ("rate limit", "too many request", "429", "ratelimit"))
+
+
 def _log_empty_loris_series(*, symbol: str, data: dict) -> None:
     series = data.get("series") if isinstance(data, dict) else None
     series_keys = sorted(series.keys()) if isinstance(series, dict) else []
@@ -154,7 +167,9 @@ async def fetch_variational_funding_since(session, symbol: str, start_time_ms: i
     end_iso = isoformat_z(end_ms)
     if loris_nodriver_enabled():
         data = None
-        for attempt in range(LORIS_EMPTY_SERIES_RETRIES + 1):
+        rate_limit_attempts = 0
+        empty_series_attempts = 0
+        while True:
             data = await run_serialized(
                 "variational",
                 lambda: fetch_loris_historical_with_nodriver(
@@ -166,10 +181,30 @@ async def fetch_variational_funding_since(session, symbol: str, start_time_ms: i
             )
             if _loris_series_count(data or {}, venue="variational") > 0:
                 break
-            if attempt < LORIS_EMPTY_SERIES_RETRIES:
-                _log_empty_loris_series(symbol=symbol, data=data or {})
+            # Distinguish rate-limit responses from genuinely empty series
+            if _loris_response_is_rate_limited(data or {}):
+                rate_limit_attempts += 1
+                if rate_limit_attempts > LORIS_RATE_LIMIT_RETRIES:
+                    print(
+                        f"loris rate limit exceeded after {rate_limit_attempts} retries "
+                        f"symbol={symbol.upper()} — giving up",
+                        flush=True,
+                    )
+                    break
+                backoff = LORIS_RATE_LIMIT_BACKOFF_SECONDS * rate_limit_attempts
+                print(
+                    f"loris rate limited symbol={symbol.upper()} "
+                    f"attempt={rate_limit_attempts}/{LORIS_RATE_LIMIT_RETRIES} "
+                    f"backing off {backoff:.0f}s",
+                    flush=True,
+                )
+                await asyncio.sleep(backoff)
                 continue
+            # Genuinely empty series
+            empty_series_attempts += 1
             _log_empty_loris_series(symbol=symbol, data=data or {})
+            if empty_series_attempts > LORIS_EMPTY_SERIES_RETRIES:
+                break
         return parse_loris_historical_series(
             data or {},
             symbol=symbol,

@@ -25,8 +25,9 @@ def build_place_order_payload(
     account: str | None = None,
     timeout_ms: int | None = None,
     submit_only: bool = False,
-) -> dict[str, str | int]:
-    payload: dict[str, str | int] = {
+    reduce_only: bool = False,
+) -> dict[str, object]:
+    payload: dict[str, object] = {
         "type": "PLACE_ORDER",
         "requestId": request_id,
         "symbol": symbol,
@@ -44,6 +45,8 @@ def build_place_order_payload(
         payload["timeoutMs"] = timeout_ms
     if submit_only:
         payload["submitOnly"] = True
+    if reduce_only:
+        payload["reduceOnly"] = True
     return payload
 
 
@@ -129,6 +132,7 @@ class VariationalBrowserExecutionAdapter:
         timeout_ms: int | None = None,
         fill_timeout_seconds: float | None = None,
         submit_only: bool = False,
+        reduce_only: bool = False,
     ) -> dict[str, object]:
         symbol = self._map_symbol(symbol)
         request_id = str(uuid.uuid4())
@@ -149,6 +153,7 @@ class VariationalBrowserExecutionAdapter:
                         account=account,
                         timeout_ms=timeout_ms,
                         submit_only=submit_only,
+                        reduce_only=reduce_only,
                     )
                 )
                 return await self._await_order_result(
@@ -169,12 +174,14 @@ class VariationalBrowserExecutionAdapter:
         account: str | None = None,
         price: str | None = None,
         timeout_ms: int | None = None,
+        reduce_only: bool = False,
     ) -> dict[str, object]:
         return await self._place_order(
             symbol=symbol, side=side, amount=amount, clip_usd=clip_usd,
             market=market, account=account, order_type="limit", price=price,
             timeout_ms=timeout_ms,
             fill_timeout_seconds=self.fill_timeout_seconds,
+            reduce_only=reduce_only,
         )
 
     async def prepare_market_order(
@@ -184,6 +191,7 @@ class VariationalBrowserExecutionAdapter:
         side: str,
         amount: str,
         clip_usd: float | None = None,
+        reduce_only: bool = False,
     ) -> dict[str, object]:
         symbol = self._map_symbol(symbol)
         request_id = str(uuid.uuid4())
@@ -197,6 +205,7 @@ class VariationalBrowserExecutionAdapter:
                     "symbol": symbol,
                     "side": side,
                     "amount": amount,
+                    "reduceOnly": bool(reduce_only),
                 })
                 msg = await asyncio.wait_for(ws.receive(), timeout=self.timeout_seconds)
         if msg.type != WSMsgType.TEXT:
@@ -217,6 +226,7 @@ class VariationalBrowserExecutionAdapter:
         market: str | None = None,
         account: str | None = None,
         timeout_ms: int | None = None,
+        reduce_only: bool = False,
     ) -> dict[str, object]:
         submit_only = self._market_prepared
         self._market_prepared = False
@@ -225,6 +235,7 @@ class VariationalBrowserExecutionAdapter:
             market=market, account=account, order_type="market",
             timeout_ms=timeout_ms,
             submit_only=submit_only,
+            reduce_only=reduce_only,
         )
 
     async def cancel_order(

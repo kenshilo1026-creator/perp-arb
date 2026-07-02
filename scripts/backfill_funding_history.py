@@ -50,11 +50,22 @@ load_environment()
 BACKFILL_BATCH_SIZE = 30
 BACKFILL_BATCH_SLEEP_SECONDS = 0
 PERSIST_EVERY_N = 200
+# For top-up runs (only fetching recent data), use higher concurrency than the
+# global FETCH_CONCURRENCY_LIMIT since each request is tiny (a few hours of data).
+TOP_UP_CONCURRENCY_LIMIT = 20
 SPREAD_REFRESH_CONCURRENCY_BY_VENUE = {
+    "aster": 2,
+    "hyperliquid": 2,
     "lighter": 1,
+    "trade_xyz": 2,
+    "variational": 1,
 }
 SPREAD_REFRESH_DELAY_BY_VENUE_SECONDS = {
+    "aster": 0.25,
+    "hyperliquid": 0.25,
     "lighter": 1.0,
+    "trade_xyz": 0.25,
+    "variational": 0.5,
 }
 SPREAD_ERROR_ALERT_MAX_ITEMS = 10
 
@@ -116,7 +127,7 @@ async def send_spread_error_alert(
         print(f"backfill spread telegram alert failed: {exc!r}")
 
 
-async def run_backfill() -> None:
+async def run_backfill(*, skip_spread_refresh: bool = False, symbols_filter: set[str] | None = None) -> None:
     store = FundingHistoryStore(FUNDING_HISTORY_PATH)
     spread_store = OrderbookSpreadStore(ORDERBOOK_SPREADS_PATH)
     all_points = {
@@ -137,7 +148,8 @@ async def run_backfill() -> None:
             venue_symbols[venue] = symbols
             print(f"backfill discovered {venue}: {len(symbols)} symbols")
 
-        pending_keys = []
+        pending_keys: list[tuple[str, str]] = []
+        top_up_keys: set[tuple[str, str]] = set()
         incremental_starts: dict[tuple[str, str], int] = {}
         skipped_complete = 0
         top_up_scheduled = 0
@@ -146,6 +158,8 @@ async def run_backfill() -> None:
             if venue not in FETCHERS:
                 continue
             for symbol in sorted(venue_symbols.get(venue, set())):
+                if symbols_filter is not None and symbol.upper() not in symbols_filter:
+                    continue
                 merged_cached_points = merge_points_by_interval_bucket(all_points.get((venue, symbol), []))
                 cached_points = trim_points_to_analysis_days(
                     merged_cached_points,
@@ -156,6 +170,7 @@ async def run_backfill() -> None:
                         start_ms = backfill_incremental_start_ms(merged_cached_points)
                         if start_ms is not None:
                             pending_keys.append((venue, symbol))
+                            top_up_keys.add((venue, symbol))
                             incremental_starts[(venue, symbol)] = start_ms
                             top_up_scheduled += 1
                     else:
@@ -183,6 +198,17 @@ async def run_backfill() -> None:
 
         immediate_keys, loris_batched_keys = split_loris_batched_keys(pending_keys)
 
+        # Sort loris keys by staleness: most-stale (fewest recent points) first,
+        # so critical symbols get updated even if the backfill is interrupted.
+        def _staleness_key(key: tuple[str, str]) -> int:
+            pts = trim_points_to_analysis_days(
+                all_points.get(key, []),
+                analysis_days=7,
+            )
+            return len(pts)  # ascending: fewer points = more stale = goes first
+
+        loris_batched_keys.sort(key=_staleness_key)
+
         if immediate_keys:
             print(f"backfill direct size={len(immediate_keys)}")
             tasks = []
@@ -192,7 +218,10 @@ async def run_backfill() -> None:
                     tasks.append(FETCHERS_SINCE[venue](session, symbol, start_ms))
                 else:
                     tasks.append(FETCHERS[venue](session, symbol))
-            results = await gather_limited(tasks, limit=FETCH_CONCURRENCY_LIMIT, return_exceptions=True)
+            # Use higher concurrency when all pending keys are top-ups (tiny incremental fetches).
+            is_all_top_up = all(k in top_up_keys for k in immediate_keys)
+            direct_limit = TOP_UP_CONCURRENCY_LIMIT if is_all_top_up else FETCH_CONCURRENCY_LIMIT
+            results = await gather_limited(tasks, limit=direct_limit, return_exceptions=True)
 
             dirty = 0
             for key, result in zip(immediate_keys, results):
@@ -324,7 +353,7 @@ async def run_backfill() -> None:
                 )
                 #print(f"backfill stored {key}: {len(all_points[key])} points")
 
-        if spread_refresh_keys:
+        if spread_refresh_keys and not skip_spread_refresh:
             spread_keys_by_venue: dict[str, list[tuple[str, str]]] = {}
             for key in spread_refresh_keys:
                 spread_keys_by_venue.setdefault(key[0], []).append(key)
@@ -384,5 +413,11 @@ async def run_backfill() -> None:
 
 
 if __name__ == "__main__":
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--no-spread-refresh", action="store_true", help="skip orderbook spread refresh (faster top-up)")
+    parser.add_argument("--symbols", type=str, default=None, help="comma-separated symbols to backfill, e.g. ZRO,BTC")
+    _args = parser.parse_args()
+    _symbols_filter = {s.strip().upper() for s in _args.symbols.split(",")} if _args.symbols else None
     configure_windows_event_loop_policy()
-    asyncio.run(run_backfill())
+    asyncio.run(run_backfill(skip_spread_refresh=_args.no_spread_refresh, symbols_filter=_symbols_filter))

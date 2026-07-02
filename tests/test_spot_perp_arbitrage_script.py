@@ -922,6 +922,130 @@ class SpotPerpArbitrageRecordingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(events, ["place_1", "cancel", "place_2", "place_market"])
         self.assertEqual(adapter.assert_empty_order_result, {})
 
+    async def test_variational_fill_confirmation_unavailable_is_repriced(self) -> None:
+        events: list[str] = []
+
+        class MakerAdapter:
+            def __init__(self) -> None:
+                self.place_attempts = 0
+
+            async def place_limit_order(self, **kwargs):
+                self.place_attempts += 1
+                events.append(f"place_{self.place_attempts}")
+                return {"ok": True, "order_id": f"maker-{self.place_attempts}"}
+
+            async def wait_for_order_fill(self, **kwargs):
+                events.append(f"wait_{self.place_attempts}")
+                if self.place_attempts == 1:
+                    raise RuntimeError(
+                        "variational limit order fill confirmation unavailable: "
+                        "browser ORDER_RESULT must include filled=true or status=FILLED"
+                    )
+                return {"ok": True, "filled": True, "status": "FILLED"}
+
+            async def cancel_order(self, **kwargs):
+                events.append("cancel")
+                return {"ok": True}
+
+        class TakerAdapter:
+            async def place_market_order(self, **kwargs):
+                events.append("place_market")
+                return {"ok": True}
+
+        with patch("asyncio.sleep", new=AsyncMock()):
+            result = await execute_single_clip(
+                symbol="COPPER",
+                clip_usd=100.0,
+                quantity=Decimal("10"),
+                maker_venue="variational",
+                taker_venue="aster",
+                short_venue="variational",
+                long_venue="aster",
+                maker_adapter=MakerAdapter(),
+                taker_adapter=TakerAdapter(),
+                max_hedge_retries=0,
+                state_machine=SimpleNamespace(
+                    to_preview_ready=lambda: None,
+                    to_awaiting_confirm=lambda: None,
+                    to_placing_maker_leg=lambda: None,
+                    to_hedging_taker_leg=lambda: None,
+                    to_completed=lambda: None,
+                    to_retrying_hedge=lambda: None,
+                    to_emergency_exit=lambda: None,
+                ),
+                maker_price="10.1",
+                require_maker_fill_confirmation=True,
+                max_maker_reprice_attempts=1,
+            )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(events, ["place_1", "wait_1", "cancel", "place_2", "wait_2", "place_market"])
+
+    async def test_keep_existing_order_waits_before_rechecking_fill(self) -> None:
+        events: list[str] = []
+
+        class MakerAdapter:
+            def __init__(self) -> None:
+                self.wait_attempts = 0
+
+            async def place_limit_order(self, **kwargs):
+                events.append("place")
+                return {"ok": True, "order_id": "maker-1"}
+
+            async def wait_for_order_fill(self, **kwargs):
+                self.wait_attempts += 1
+                events.append(f"wait_{self.wait_attempts}")
+                if self.wait_attempts == 1:
+                    raise RuntimeError("maker fill timeout")
+                return {"ok": True, "filled": True, "status": "FILLED"}
+
+            async def cancel_order(self, **kwargs):
+                events.append("cancel")
+                return {"ok": True}
+
+        class TakerAdapter:
+            async def place_market_order(self, **kwargs):
+                events.append("place_market")
+                return {"ok": True}
+
+        async def refreshed_price():
+            events.append("refresh")
+            return "0.1956"
+
+        sleep_mock = AsyncMock()
+        with patch("asyncio.sleep", new=sleep_mock):
+            result = await execute_single_clip(
+                symbol="COPPER",
+                clip_usd=100.0,
+                quantity=Decimal("10"),
+                maker_venue="variational",
+                taker_venue="aster",
+                short_venue="variational",
+                long_venue="aster",
+                maker_adapter=MakerAdapter(),
+                taker_adapter=TakerAdapter(),
+                max_hedge_retries=0,
+                state_machine=SimpleNamespace(
+                    to_preview_ready=lambda: None,
+                    to_awaiting_confirm=lambda: None,
+                    to_placing_maker_leg=lambda: None,
+                    to_hedging_taker_leg=lambda: None,
+                    to_completed=lambda: None,
+                    to_retrying_hedge=lambda: None,
+                    to_emergency_exit=lambda: None,
+                ),
+                maker_price="0.1956",
+                require_maker_fill_confirmation=True,
+                max_maker_reprice_attempts=1,
+                maker_reprice_min_change_pct=0.0005,
+                maker_price_refresher=refreshed_price,
+                maker_keep_existing_check_delay_seconds=10.0,
+            )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(events, ["place", "wait_1", "refresh", "wait_2", "place_market"])
+        sleep_mock.assert_awaited_once_with(10.0)
+
     async def test_second_reprice_timeout_does_not_reuse_cancelled_order_id(self) -> None:
         cancelled_results: list[dict] = []
 

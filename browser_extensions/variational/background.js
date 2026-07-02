@@ -2,6 +2,7 @@ const DEBUGGER_VERSION = "1.3";
 const ORDER_AUTOMATION_VERSION = "variational-order-automation-2026-06-05-2";
 const MAX_QUEUE_SIZE = 1000;
 const AUTO_RELOAD_COOLDOWN_MS = 5000;
+const MAX_ORDER_RELOAD_RETRIES = 2;
 
 const DEFAULT_CONFIG = {
   wsEndpoint: "ws://127.0.0.1:8766",
@@ -375,14 +376,56 @@ function isNotFoundError(error) {
   return false;
 }
 
-function reloadTabPromise(tabId) {
+function isSubmitDisabledAfterAmountError(error) {
+  const msg = String(error || "").toLowerCase();
+  return msg.includes("submit button stayed disabled after amount input");
+}
+
+function reloadTabAndWaitForComplete(tabId, timeoutMs = 15000) {
   return new Promise((resolve, reject) => {
+    let settled = false;
+    let timeoutId = null;
+
+    const cleanup = () => {
+      if (timeoutId) {
+        clearTimeout(timeoutId);
+      }
+      chrome.tabs.onUpdated.removeListener(onUpdated);
+    };
+
+    const finish = () => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      cleanup();
+      resolve();
+    };
+
+    const fail = (error) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      cleanup();
+      reject(error);
+    };
+
+    const onUpdated = (updatedTabId, changeInfo) => {
+      if (updatedTabId === tabId && changeInfo.status === "complete") {
+        finish();
+      }
+    };
+
+    chrome.tabs.onUpdated.addListener(onUpdated);
+    timeoutId = setTimeout(() => {
+      fail(new Error(`Timed out waiting for tab ${tabId} to finish reload`));
+    }, timeoutMs);
+
     chrome.tabs.reload(tabId, {}, () => {
       const err = chrome.runtime.lastError;
       if (err) {
-        reject(new Error(err.message));
-      } else {
-        resolve();
+        fail(new Error(err.message));
       }
     });
   });
@@ -393,10 +436,17 @@ async function runOrderInjectionWithReload(payload) {
   let result = injectionResult?.result || {};
 
   // Don't reload for submitOnly — the form was already prepared; a reload would wipe it
-  if (!payload.submitOnly && result && !result.ok && isNotFoundError(result.error)) {
-    console.log("[variational] not found — reloading page and retrying");
-    await reloadTabPromise(state.attachedTabId);
-    await sleep(5000);
+  for (let reloadAttempt = 0; !payload.submitOnly && result && !result.ok && reloadAttempt < MAX_ORDER_RELOAD_RETRIES; reloadAttempt += 1) {
+    const shouldReload = isNotFoundError(result.error) || isSubmitDisabledAfterAmountError(result.error);
+    if (!shouldReload) {
+      break;
+    }
+    const reason = isSubmitDisabledAfterAmountError(result.error)
+      ? "submit disabled after amount input"
+      : "not found";
+    console.log(`[variational] ${reason} — reloading page and retrying`);
+    await reloadTabAndWaitForComplete(state.attachedTabId);
+    await sleep(2000);
     injectionResult = await runVariationalOrderInjection(payload);
     result = injectionResult?.result || {};
     if (result && !result.ok) {
@@ -1210,6 +1260,51 @@ function executeVariationalOrder(command) {
       .find((el) => /\bmid\b/i.test(textOf(el)));
   }
 
+  function isReduceOnlyEnabled(control) {
+    const containers = [
+      control,
+      control.closest("label"),
+      control.closest("button"),
+      control.parentElement,
+      control.parentElement?.parentElement,
+    ].filter(Boolean);
+    for (const container of containers) {
+      const ariaChecked = container.getAttribute("aria-checked");
+      if (ariaChecked === "true") {
+        return true;
+      }
+      if (ariaChecked === "false") {
+        return false;
+      }
+      const checkedInput = container.querySelector?.("input[type='checkbox'],input[type='radio']");
+      if (checkedInput) {
+        return Boolean(checkedInput.checked);
+      }
+      const className = String(container.className || "").toLowerCase();
+      if (className.includes("bg-azure") && !className.includes("bg-transparent")) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  async function ensureReduceOnly(enabled) {
+    if (!enabled) {
+      return { ok: true, changed: false };
+    }
+    const control = Array.from(document.querySelectorAll(clickableSelector))
+      .filter(visible)
+      .find((el) => /\breduce\s+only\b/i.test(textOf(el)));
+    if (!control) {
+      return { ok: false, error: "Could not find Reduce Only control on Variational page." };
+    }
+    if (!isReduceOnlyEnabled(control)) {
+      click(control);
+      await sleep(200);
+    }
+    return { ok: true, changed: true };
+  }
+
   function findLimitPriceInput() {
     const exactPriceInput = Array.from(document.querySelectorAll(
       'input[data-testid="limit-price-input"],textarea[data-testid="limit-price-input"]'
@@ -1311,6 +1406,24 @@ function executeVariationalOrder(command) {
       return { ok: false, usedMid: true, priceInput: populatedInput, error: "Mid button clicked but price input did not populate within 9s." };
     }
     return { ok: true, usedMid: true, priceInput: populatedInput };
+  }
+
+  async function retryLimitMidAfterDisabledSubmit(side) {
+    const priceResult = await setLimitPriceOrClickMid("");
+    if (!priceResult.ok) {
+      return {
+        button: null,
+        disabledButton: null,
+        clickedMidAfterDisabledSubmit: false,
+        error: priceResult.error,
+      };
+    }
+    await sleep(250);
+    const retryMidAfterDisabledSubmit = await waitForEnabledSubmitButton(side, 5000);
+    return {
+      ...retryMidAfterDisabledSubmit,
+      clickedMidAfterDisabledSubmit: true,
+    };
   }
 
   async function selectOrderType(orderType) {
@@ -1498,6 +1611,7 @@ function executeVariationalOrder(command) {
     const amount = String(command.amount || "").trim();
     const orderType = String(command.orderType || "MARKET").toUpperCase();
     const explicitLimitPrice = String(command.price || "").trim();
+    const reduceOnly = Boolean(command.reduceOnly);
     const requestedSymbol = normalizeVariationalSymbol(command.symbol || command.market);
     const currentSymbol = currentVariationalSymbol();
     if (!["BUY", "SELL"].includes(side)) {
@@ -1528,6 +1642,10 @@ function executeVariationalOrder(command) {
     // submitOnly: page state from prepareOnly may have reset, so redo the full market order flow
     if (command.submitOnly) {
       await selectOrderType("MARKET"); // MARKET button may be absent if already active — that's OK
+      const reduceOnlyResult = await ensureReduceOnly(reduceOnly);
+      if (!reduceOnlyResult.ok) {
+        return { ok: false, error: reduceOnlyResult.error, details: { automationVersion, reduceOnly, diagnostics: collectOrderDomDiagnostics() } };
+      }
       const sideBtn = side === "BUY"
         ? findButton([/\bbuy\b/i, /\blong\b/i])
         : findButton([/\bsell\b/i, /\bshort\b/i]);
@@ -1552,7 +1670,7 @@ function executeVariationalOrder(command) {
       }
       click(submitButton);
       await sleep(Number(command.timeoutMs || 1500));
-      return { ok: true, details: { automationVersion, side, orderType, amount, submitOnly: true, clickedSubmitText: textOf(submitButton) } };
+      return { ok: true, details: { automationVersion, side, orderType, amount, submitOnly: true, reduceOnly, clickedSubmitText: textOf(submitButton) } };
     }
 
     const selectedOrderType = await selectOrderType(orderType);
@@ -1606,6 +1724,15 @@ function executeVariationalOrder(command) {
       };
     }
 
+    const reduceOnlyResult = await ensureReduceOnly(reduceOnly);
+    if (!reduceOnlyResult.ok) {
+      return {
+        ok: false,
+        error: reduceOnlyResult.error,
+        details: { automationVersion, reduceOnly, diagnostics: collectOrderDomDiagnostics() }
+      };
+    }
+
     const sideButton = side === "BUY"
       ? findButton([/\bbuy\b/i, /\blong\b/i])
       : findButton([/\bsell\b/i, /\bshort\b/i]);
@@ -1621,7 +1748,7 @@ function executeVariationalOrder(command) {
 
     // prepareOnly (MARKET taker pre-stage): side is selected, no amount input needed — submit triggered separately
     if (command.prepareOnly && orderType === "MARKET") {
-      return { ok: true, prepared: true, details: { automationVersion, side, orderType } };
+      return { ok: true, prepared: true, details: { automationVersion, side, orderType, reduceOnly } };
     }
 
     const amountInput = findAmountInput(orderType, excludedAmountInput);
@@ -1640,15 +1767,37 @@ function executeVariationalOrder(command) {
       side,
       Number(command.submitEnableTimeoutMs || 5000)
     );
-    if (!submitButton) {
-      if (disabledButton) {
+    let finalSubmitButton = submitButton;
+    let finalDisabledButton = disabledButton;
+    let clickedMidAfterDisabledSubmit = false;
+    if (!finalSubmitButton && finalDisabledButton && orderType === "LIMIT") {
+      const retryResult = await retryLimitMidAfterDisabledSubmit(side);
+      if (retryResult.error) {
+        return {
+          ok: false,
+          error: retryResult.error,
+          details: {
+            automationVersion,
+            amount,
+            clickedSubmitText: textOf(finalDisabledButton),
+            diagnostics: collectOrderDomDiagnostics()
+          }
+        };
+      }
+      finalSubmitButton = retryResult.button;
+      finalDisabledButton = retryResult.disabledButton || finalDisabledButton;
+      clickedMidAfterDisabledSubmit = Boolean(retryResult.clickedMidAfterDisabledSubmit);
+    }
+    if (!finalSubmitButton) {
+      if (finalDisabledButton) {
         return {
           ok: false,
           error: "Submit button stayed disabled after amount input.",
           details: {
             automationVersion,
             amount,
-            clickedSubmitText: textOf(disabledButton),
+            clickedMidAfterDisabledSubmit,
+            clickedSubmitText: textOf(finalDisabledButton),
             diagnostics: collectOrderDomDiagnostics()
           }
         };
@@ -1659,7 +1808,7 @@ function executeVariationalOrder(command) {
         details: { automationVersion, diagnostics: collectOrderDomDiagnostics() }
       };
     }
-    click(submitButton);
+    click(finalSubmitButton);
     await sleep(Number(command.timeoutMs || 1500));
 
     const usedLimitPrice = orderType === "LIMIT"
@@ -1673,10 +1822,12 @@ function executeVariationalOrder(command) {
         side,
         orderType,
         amount,
+        reduceOnly,
         explicitLimitPrice: explicitLimitPrice || null,
         usedLimitPrice,
+        clickedMidAfterDisabledSubmit,
         market: command.market || null,
-        clickedSubmitText: textOf(submitButton)
+        clickedSubmitText: textOf(finalSubmitButton)
       }
     };
   })();

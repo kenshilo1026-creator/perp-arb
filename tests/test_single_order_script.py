@@ -71,6 +71,18 @@ class SingleOrderScriptTests(unittest.TestCase):
         self.assertEqual(single_order_method_name("market"), "place_market_order")
         self.assertEqual(single_order_method_name("limit"), "place_limit_order")
 
+    def test_variational_place_order_payload_supports_reduce_only(self) -> None:
+        payload = build_place_order_payload(
+            request_id="req-1",
+            symbol="PROVE",
+            side="BUY",
+            amount="1000",
+            order_type="limit",
+            reduce_only=True,
+        )
+
+        self.assertTrue(payload["reduceOnly"])
+
     def test_format_cli_error(self) -> None:
         self.assertIn("下單失敗", format_cli_error(RuntimeError("aster quantity 0.0001 is below minimum stepSize=0.001")))
 

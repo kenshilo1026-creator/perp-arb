@@ -325,7 +325,13 @@ class LighterExecutionAdapter:
                 headers={"accept": "application/json"},
             )
 
-    async def _get_order_status(self, client_order_index: object, market_index: int) -> dict[str, object]:
+    async def _get_order_status(
+        self,
+        client_order_index: object,
+        market_index: int,
+        original_base_amount: int | None = None,
+        base_amount_multiplier: int | None = None,
+    ) -> dict[str, object]:
         account_index = int(os.getenv("LIGHTER_ACCOUNT_INDEX", "0"))
         try:
             auth_token = self._create_auth_token()
@@ -341,7 +347,29 @@ class LighterExecutionAdapter:
             for order in orders:
                 coi = order.get("client_order_index") or order.get("client_order_id")
                 if coi is not None and int(coi) == int(client_order_index):
-                    return {"status": "OPEN", "raw": order}
+                    result: dict[str, object] = {"status": "OPEN", "raw": order}
+                    # Try to expose filled_qty so extract_filled_quantity can find it.
+                    # Lighter may include filled_base_amount directly, or we compute
+                    # filled = original - remaining (base_amount in active orders = remaining).
+                    if original_base_amount is not None and base_amount_multiplier:
+                        try:
+                            for field in ("filled_base_amount", "filledBaseAmount"):
+                                raw_filled = order.get(field)
+                                if raw_filled is not None:
+                                    filled_qty = Decimal(str(raw_filled)) / Decimal(str(base_amount_multiplier))
+                                    result["filled_qty"] = str(filled_qty.normalize())
+                                    break
+                            else:
+                                # Assume base_amount in active orders = remaining
+                                remaining_raw = order.get("base_amount")
+                                if remaining_raw is not None:
+                                    filled_raw = int(original_base_amount) - int(remaining_raw)
+                                    if filled_raw > 0:
+                                        filled_qty = Decimal(str(filled_raw)) / Decimal(str(base_amount_multiplier))
+                                        result["filled_qty"] = str(filled_qty.normalize())
+                        except Exception:
+                            pass
+                    return result
             return {"status": "FILLED", "raw": data}
         except Exception as exc:
             print(f"[lighter] order status poll failed: {exc} — assuming OPEN", flush=True)
@@ -517,6 +545,8 @@ class LighterExecutionAdapter:
             "tx_hash": tx_hash,
             "client_order_index": request["client_order_index"],
             "market_index": request["market_index"],
+            "base_amount": request["base_amount"],
+            "base_amount_multiplier": market_config["base_amount_multiplier"],
         }
 
     async def place_market_order(self, *, symbol: str, side: str, amount: str, clip_usd: float) -> dict[str, object]:
@@ -557,10 +587,17 @@ class LighterExecutionAdapter:
         if market_index is None:
             market_config = self._normalize_market_config(await self._load_market_config(symbol))
             market_index = market_config["market_index"]
+        original_base_amount = order_result.get("base_amount")
+        base_amount_multiplier = order_result.get("base_amount_multiplier")
         # wait for blockchain to index the order before first poll
         await asyncio.sleep(initial_delay_seconds)
         return await poll_until_filled(
-            fetch_status=lambda: self._get_order_status(client_order_index, int(market_index)),
+            fetch_status=lambda: self._get_order_status(
+                client_order_index,
+                int(market_index),
+                original_base_amount=original_base_amount,
+                base_amount_multiplier=base_amount_multiplier,
+            ),
             timeout_seconds=timeout_seconds,
             poll_interval_seconds=poll_interval_seconds,
             timeout_message="lighter limit order fill timeout",
@@ -579,6 +616,21 @@ class LighterExecutionAdapter:
         market_index = order_result.get("market_index")
         if client_order_index is None or market_index is None:
             raise RuntimeError("lighter cancel_order requires client_order_index and market_index in order_result")
+
+        # Snapshot fill before cancelling so resolve_executed_quantity gets the real partial fill
+        original_base_amount = order_result.get("base_amount")
+        base_amount_multiplier = order_result.get("base_amount_multiplier")
+        pre_cancel_status = None
+        try:
+            pre_cancel_status = await self._get_order_status(
+                client_order_index,
+                int(market_index),
+                original_base_amount=original_base_amount,
+                base_amount_multiplier=base_amount_multiplier,
+            )
+        except Exception as exc:
+            print(f"[lighter] pre-cancel status query failed: {exc}", flush=True)
+
         client = self._get_client()
         cancel = getattr(client, "cancel_order", None)
         if not callable(cancel):
@@ -589,7 +641,13 @@ class LighterExecutionAdapter:
         _tx, tx_hash, error = result
         if error is not None:
             raise RuntimeError(f"lighter cancel_order failed: {error}")
-        return {"ok": True, "tx_hash": tx_hash}
+
+        cancel_result: dict[str, object] = {"ok": True, "tx_hash": tx_hash}
+        if pre_cancel_status is not None:
+            filled_qty = pre_cancel_status.get("filled_qty")
+            if filled_qty is not None:
+                cancel_result["filled_qty"] = filled_qty
+        return cancel_result
 
     async def close_position(
         self,

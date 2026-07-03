@@ -17,9 +17,11 @@ from hydra_basis.backfill import (
     split_loris_batched_keys,
     capture_backfill_spread_snapshot_with_error,
     persist_backfill_progress,
+    prune_funding_history_keys,
     backfill_incremental_start_ms,
     backfill_needs_top_up,
 )
+from hydra_basis.adapters.variational import VARIATIONAL_LORIS_INVALID_SYMBOLS
 from hydra_basis.config import (
     BACKFILL_SPREAD_CLIP_USD,
     FETCH_CONCURRENCY_LIMIT,
@@ -53,6 +55,7 @@ PERSIST_EVERY_N = 200
 # For top-up runs (only fetching recent data), use higher concurrency than the
 # global FETCH_CONCURRENCY_LIMIT since each request is tiny (a few hours of data).
 TOP_UP_CONCURRENCY_LIMIT = 20
+LORIS_BATCH_CONCURRENCY_LIMIT = 1
 SPREAD_REFRESH_CONCURRENCY_BY_VENUE = {
     "aster": 2,
     "hyperliquid": 2,
@@ -135,6 +138,18 @@ async def run_backfill(*, skip_spread_refresh: bool = False, symbols_filter: set
         for key, points in store.load().items()
     }
     all_spreads = spread_store.load()
+    pruned_invalid_variational = prune_funding_history_keys(
+        all_points,
+        keys_to_remove={("variational", symbol) for symbol in VARIATIONAL_LORIS_INVALID_SYMBOLS},
+    )
+    if pruned_invalid_variational:
+        print(f"backfill pruned invalid variational history keys={pruned_invalid_variational}")
+        persist_backfill_progress(
+            history_store=store,
+            spread_store=spread_store,
+            funding_points=all_points,
+            spreads=all_spreads,
+        )
     current_now_ms = now_ms()
 
     async with aiohttp.ClientSession(headers={"User-Agent": "funding-arb-backfill/0.1"}) as session:
@@ -284,7 +299,10 @@ async def run_backfill(*, skip_spread_refresh: bool = False, symbols_filter: set
 
         batches = chunk_sequence(loris_batched_keys, chunk_size=BACKFILL_BATCH_SIZE)
         for batch_index, batch in enumerate(batches, start=1):
-            print(f"backfill loris-batch {batch_index}/{len(batches)} size={len(batch)}")
+            print(
+                f"backfill loris-batch {batch_index}/{len(batches)} "
+                f"size={len(batch)} concurrency={LORIS_BATCH_CONCURRENCY_LIMIT}"
+            )
             tasks = []
             for venue, symbol in batch:
                 start_ms = incremental_starts.get((venue, symbol))
@@ -292,7 +310,7 @@ async def run_backfill(*, skip_spread_refresh: bool = False, symbols_filter: set
                     tasks.append(FETCHERS_SINCE[venue](session, symbol, start_ms))
                 else:
                     tasks.append(FETCHERS[venue](session, symbol))
-            results = await gather_limited(tasks, limit=1, return_exceptions=True)
+            results = await gather_limited(tasks, limit=LORIS_BATCH_CONCURRENCY_LIMIT, return_exceptions=True)
 
             dirty = 0
             for key, result in zip(batch, results):

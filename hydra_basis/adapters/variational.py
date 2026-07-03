@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import datetime as dt
+import json
+import os
+from pathlib import Path
 
 from hydra_basis.adapters.base import fetch_json
 from hydra_basis.adapters.loris_browser import (
@@ -23,6 +26,65 @@ LORIS_EMPTY_SERIES_RETRIES = 1
 LORIS_RATE_LIMIT_RETRIES = 3
 LORIS_RATE_LIMIT_BACKOFF_SECONDS = 30.0
 LORIS_COMPARISON_INTERVAL_HOURS = 8.0
+VARIATIONAL_LORIS_INVALID_SYMBOLS_PATH = Path(
+    os.getenv("VARIATIONAL_LORIS_INVALID_SYMBOLS_PATH", "data/variational_loris_invalid_symbols.json")
+)
+
+
+def _load_persisted_invalid_symbols(*, path: Path | None = None) -> set[str]:
+    invalid_symbols_path = path or VARIATIONAL_LORIS_INVALID_SYMBOLS_PATH
+    try:
+        if not invalid_symbols_path.exists():
+            return set()
+        data = json.loads(invalid_symbols_path.read_text(encoding="utf-8"))
+    except Exception:
+        return set()
+    if isinstance(data, dict):
+        data = data.get("symbols", [])
+    if not isinstance(data, list):
+        return set()
+    return {str(item).upper() for item in data if str(item).strip()}
+
+
+VARIATIONAL_LORIS_DISCOVERED_INVALID_SYMBOLS = _load_persisted_invalid_symbols()
+VARIATIONAL_LORIS_INVALID_SYMBOLS = set(VARIATIONAL_LORIS_DISCOVERED_INVALID_SYMBOLS)
+
+
+def mark_variational_loris_invalid_symbol(symbol: str) -> None:
+    ticker = symbol.upper()
+    if not ticker or ticker in VARIATIONAL_LORIS_INVALID_SYMBOLS:
+        return
+    VARIATIONAL_LORIS_DISCOVERED_INVALID_SYMBOLS.add(ticker)
+    VARIATIONAL_LORIS_INVALID_SYMBOLS.add(ticker)
+    _VARIATIONAL_STATS_CACHE.clear()
+    try:
+        VARIATIONAL_LORIS_INVALID_SYMBOLS_PATH.parent.mkdir(parents=True, exist_ok=True)
+        VARIATIONAL_LORIS_INVALID_SYMBOLS_PATH.write_text(
+            json.dumps(sorted(VARIATIONAL_LORIS_DISCOVERED_INVALID_SYMBOLS), indent=2) + "\n",
+            encoding="utf-8",
+        )
+    except Exception as exc:
+        print(f"failed to persist variational invalid symbol {ticker}: {exc}", flush=True)
+
+
+def _is_loris_explicit_invalid_symbol_error(exc: Exception, *, symbol: str) -> bool:
+    message = str(exc).lower()
+    ticker = symbol.upper().lower()
+    if ticker not in message:
+        return False
+    return any(
+        phrase in message
+        for phrase in (
+            "symbol not found",
+            "invalid symbol",
+            "unknown symbol",
+            "unsupported symbol",
+            "not a valid symbol",
+            "404",
+        )
+    )
+
+
 LORIS_BROWSER_HEADERS = {
     "Accept": "*/*",
     "Accept-Language": "zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7",
@@ -54,6 +116,8 @@ def parse_stats_listings(data: dict) -> dict[str, dict[str, float]]:
     for listing in listings:
         ticker = str(listing.get("ticker") or "").upper()
         if not ticker:
+            continue
+        if ticker in VARIATIONAL_LORIS_INVALID_SYMBOLS:
             continue
         funding_rate = listing.get("funding_rate")
         funding_interval_s = listing.get("funding_interval_s")
@@ -158,6 +222,8 @@ async def fetch_variational_funding(session, symbol: str) -> list[FundingPoint]:
 
 
 async def fetch_variational_funding_since(session, symbol: str, start_time_ms: int, end_time_ms: int | None = None) -> list[FundingPoint]:
+    if symbol.upper() in VARIATIONAL_LORIS_INVALID_SYMBOLS:
+        return []
     stats = await fetch_variational_stats(session)
     entry = stats.get(symbol.upper())
     if entry is None:
@@ -170,15 +236,22 @@ async def fetch_variational_funding_since(session, symbol: str, start_time_ms: i
         rate_limit_attempts = 0
         empty_series_attempts = 0
         while True:
-            data = await run_serialized(
-                "variational",
-                lambda: fetch_loris_historical_with_nodriver(
+            try:
+                data = await fetch_loris_historical_with_nodriver(
                     symbol=symbol.upper(),
                     start=start_iso,
                     end=end_iso,
-                ),
-                delay_seconds=VARIATIONAL_REQUEST_DELAY_SECONDS,
-            )
+                )
+            except RuntimeError as exc:
+                if _is_loris_explicit_invalid_symbol_error(exc, symbol=symbol):
+                    mark_variational_loris_invalid_symbol(symbol)
+                    print(
+                        f"marked variational loris invalid symbol={symbol.upper()} "
+                        "reason=explicit_invalid_symbol",
+                        flush=True,
+                    )
+                    return []
+                raise
             if _loris_series_count(data or {}, venue="variational") > 0:
                 break
             # Distinguish rate-limit responses from genuinely empty series

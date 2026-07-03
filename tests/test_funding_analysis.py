@@ -6,7 +6,7 @@ import json
 import tempfile
 import datetime as dt
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 from types import SimpleNamespace
 from aiohttp import WSServerHandshakeError
 
@@ -49,6 +49,7 @@ from hydra_basis.adapters.variational import (
     fetch_variational_stats,
     _VARIATIONAL_STATS_CACHE,
 )
+import hydra_basis.adapters.variational as variational_adapter
 from hydra_basis.adapters.loris_browser import _fetch_loris_historical_with_nodriver_inner
 import hydra_basis.adapters.loris_browser as loris_browser
 from hydra_basis.funding_engine.analysis import analyze_spread
@@ -69,6 +70,7 @@ from hydra_basis.backfill import (
     split_loris_batched_keys,
     capture_backfill_spread_snapshot,
     persist_backfill_progress,
+    prune_funding_history_keys,
     backfill_needs_top_up,
     backfill_incremental_start_ms,
     capture_backfill_spread_snapshot_with_error,
@@ -337,6 +339,12 @@ class LorisBrowserTests(unittest.IsolatedAsyncioTestCase):
         loris_browser._shared_loop = None
         loris_browser._browser_context_lock = None
         loris_browser._shared_start_error = None
+        loris_browser._browser_pool_lock = None
+        loris_browser._browser_pool_semaphore = None
+        loris_browser._browser_pool_loop = None
+        loris_browser._browser_pool_size = None
+        loris_browser._browser_pool_start_error = None
+        loris_browser._browser_pool = []
 
     async def asyncTearDown(self) -> None:
         loris_browser._shared_browser = None
@@ -344,26 +352,57 @@ class LorisBrowserTests(unittest.IsolatedAsyncioTestCase):
         loris_browser._shared_loop = None
         loris_browser._browser_context_lock = None
         loris_browser._shared_start_error = None
+        loris_browser._browser_pool_lock = None
+        loris_browser._browser_pool_semaphore = None
+        loris_browser._browser_pool_loop = None
+        loris_browser._browser_pool_size = None
+        loris_browser._browser_pool_start_error = None
+        loris_browser._browser_pool = []
 
-    async def test_nodriver_fetch_includes_api_key_header_when_configured(self) -> None:
+    def _build_network_capture_page(
+        self,
+        payload: dict | list[dict],
+        *,
+        status: int = 200,
+    ) -> tuple[AsyncMock, AsyncMock]:
         browser = AsyncMock()
         page = AsyncMock()
         browser.get.return_value = page
-        page.get = AsyncMock(return_value=page)
-        page.evaluate = AsyncMock(
-            return_value=json.dumps(
-                {
-                    "bodyText": json.dumps({"series": {"variational": []}}),
-                    "preText": "",
-                }
-            )
-        )
+        payloads = payload if isinstance(payload, list) else [payload]
+        body_index = {"value": 0}
 
-        with patch.dict(
-            os.environ,
-            {"LORIS_API_KEY": "demo-key", "LORIS_API_KEY_HEADER": "X-API-Key"},
-            clear=False,
-        ):
+        async def page_get(url):
+            self.assertIn("https://loris.tools/funding/historical", url)
+            return page
+
+        async def page_send(_command):
+            return "script-1"
+
+        async def page_evaluate(_expression, **_kwargs):
+            index = min(body_index["value"], len(payloads) - 1)
+            body_index["value"] += 1
+            symbol = "BTC" if index == 0 else "ETH"
+            return json.dumps([
+                {
+                    "url": (
+                        "https://api.loris.tools/funding/historical?"
+                        f"symbol={symbol}&start=2026-06-11T00%3A00%3A00.000Z&end=2026-06-12T00%3A00%3A00.000Z"
+                    ),
+                    "ok": status < 400,
+                    "status": status,
+                    "text": json.dumps(payloads[index]),
+                }
+            ])
+
+        page.get = AsyncMock(side_effect=page_get)
+        page.send = AsyncMock(side_effect=page_send)
+        page.evaluate = AsyncMock(side_effect=page_evaluate)
+        return browser, page
+
+    async def test_nodriver_fetch_captures_loris_frontend_network_response(self) -> None:
+        browser, page = self._build_network_capture_page({"series": {"variational": []}})
+
+        with patch.dict(os.environ, {"LORIS_NODRIVER_WORKER_DELAY_SECONDS": "0"}, clear=True):
             with patch("nodriver.start", new=AsyncMock(return_value=browser)):
                 await _fetch_loris_historical_with_nodriver_inner(
                     symbol="BTC",
@@ -372,23 +411,16 @@ class LorisBrowserTests(unittest.IsolatedAsyncioTestCase):
                 )
 
         browser.get.assert_awaited_once()
+        self.assertIn("https://loris.tools/", browser.get.await_args.args)
         page.get.assert_awaited_once()
+        self.assertEqual(page.send.await_count, 2)
 
-    async def test_nodriver_fetch_reads_json_document_after_navigation(self) -> None:
-        browser = AsyncMock()
-        page = AsyncMock()
-        browser.get = AsyncMock(return_value=page)
-        page.get = AsyncMock(return_value=page)
-        page.evaluate = AsyncMock(
-            return_value=json.dumps(
-                {
-                    "bodyText": json.dumps({"series": {"variational": [{"t": "2026-06-11T03:00:00Z", "y": 1.0}]}}),
-                    "preText": "",
-                }
-            )
+    async def test_nodriver_fetch_reads_json_from_frontend_network_response(self) -> None:
+        browser, page = self._build_network_capture_page(
+            {"series": {"variational": [{"t": "2026-06-11T03:00:00Z", "y": 1.0}]}}
         )
 
-        with patch.dict(os.environ, {}, clear=True):
+        with patch.dict(os.environ, {"LORIS_NODRIVER_WORKER_DELAY_SECONDS": "0"}, clear=True):
             with patch("nodriver.start", new=AsyncMock(return_value=browser)):
                 payload = await _fetch_loris_historical_with_nodriver_inner(
                     symbol="BTC",
@@ -399,30 +431,17 @@ class LorisBrowserTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("variational", payload["series"])
         self.assertEqual(browser.get.await_count, 1)
         page.get.assert_awaited_once()
+        page.evaluate.assert_awaited()
 
     async def test_nodriver_fetch_reuses_shared_browser_between_requests(self) -> None:
-        browser = AsyncMock()
-        page = AsyncMock()
-        browser.get = AsyncMock(return_value=page)
-        page.get = AsyncMock(return_value=page)
-        page.evaluate = AsyncMock(
-            side_effect=[
-                json.dumps(
-                    {
-                        "bodyText": json.dumps({"series": {"variational": [{"t": "2026-06-11T03:00:00Z", "y": 1.0}]}}),
-                        "preText": "",
-                    }
-                ),
-                json.dumps(
-                    {
-                        "bodyText": json.dumps({"series": {"variational": [{"t": "2026-06-11T04:00:00Z", "y": 2.0}]}}),
-                        "preText": "",
-                    }
-                ),
+        browser, page = self._build_network_capture_page(
+            [
+                {"series": {"variational": [{"t": "2026-06-11T03:00:00Z", "y": 1.0}]}},
+                {"series": {"variational": [{"t": "2026-06-11T04:00:00Z", "y": 2.0}]}},
             ]
         )
 
-        with patch.dict(os.environ, {}, clear=True):
+        with patch.dict(os.environ, {"LORIS_NODRIVER_WORKER_DELAY_SECONDS": "0"}, clear=True):
             with patch("nodriver.start", new=AsyncMock(return_value=browser)) as start_browser:
                 first = await _fetch_loris_historical_with_nodriver_inner(
                     symbol="BTC",
@@ -440,11 +459,12 @@ class LorisBrowserTests(unittest.IsolatedAsyncioTestCase):
         start_browser.assert_awaited_once()
         browser.get.assert_awaited_once()
         self.assertEqual(page.get.await_count, 2)
+        self.assertEqual(page.evaluate.await_count, 2)
 
     async def test_nodriver_start_failure_is_cached_to_avoid_reopening_browser_per_symbol(self) -> None:
         start_browser = AsyncMock(side_effect=RuntimeError("chrome start failed"))
 
-        with patch.dict(os.environ, {}, clear=True):
+        with patch.dict(os.environ, {"LORIS_NODRIVER_WORKER_DELAY_SECONDS": "0"}, clear=True):
             with patch("nodriver.start", new=start_browser):
                 with self.assertRaisesRegex(RuntimeError, "chrome start failed"):
                     await _fetch_loris_historical_with_nodriver_inner(
@@ -461,16 +481,13 @@ class LorisBrowserTests(unittest.IsolatedAsyncioTestCase):
 
         start_browser.assert_awaited_once()
 
-    async def test_nodriver_fetch_raises_clear_error_when_navigation_body_missing(self) -> None:
-        browser = AsyncMock()
-        page = AsyncMock()
-        browser.get = AsyncMock(return_value=page)
-        page.get = AsyncMock(return_value=page)
-        page.evaluate = AsyncMock(
-            side_effect=RuntimeError("navigation body empty")
+    async def test_nodriver_fetch_raises_clear_error_when_frontend_network_response_is_error(self) -> None:
+        browser, _page = self._build_network_capture_page(
+            {"error": "Missing API key."},
+            status=401,
         )
 
-        with patch.dict(os.environ, {}, clear=True):
+        with patch.dict(os.environ, {"LORIS_NODRIVER_WORKER_DELAY_SECONDS": "0"}, clear=True):
             with patch("nodriver.start", new=AsyncMock(return_value=browser)):
                 with self.assertRaises(RuntimeError) as ctx:
                     await _fetch_loris_historical_with_nodriver_inner(
@@ -479,7 +496,8 @@ class LorisBrowserTests(unittest.IsolatedAsyncioTestCase):
                         end="2026-06-12T00:00:00.000Z",
                     )
 
-        self.assertIn("loris nodriver navigation fetch failed", str(ctx.exception))
+        self.assertIn("loris nodriver frontend response capture failed", str(ctx.exception))
+        self.assertIn("Missing API key", str(ctx.exception))
 
 
 class MexcAdapterTests(unittest.IsolatedAsyncioTestCase):
@@ -801,6 +819,110 @@ class VariationalAdapterTests(unittest.IsolatedAsyncioTestCase):
             symbols = await list_variational_symbols(session=object())
 
         self.assertEqual(symbols, {"BTC", "ETH"})
+
+    async def test_list_symbols_skips_known_loris_invalid_symbols(self) -> None:
+        payload = {
+            "listings": [
+                {"ticker": "BTC", "funding_rate": "0.0001", "funding_interval_s": 28800},
+                {"ticker": "1000000MOG", "funding_rate": "0.0002", "funding_interval_s": 28800},
+                {"ticker": "HOOD", "funding_rate": "0.0003", "funding_interval_s": 28800},
+                {"ticker": "1000BONK", "funding_rate": "0.0004", "funding_interval_s": 28800},
+                {"ticker": "XAUT", "funding_rate": "0.0005", "funding_interval_s": 28800},
+            ]
+        }
+        with tempfile.TemporaryDirectory() as temp_dir:
+            invalid_path = Path(temp_dir) / "invalid_symbols.json"
+            invalid_path.write_text(json.dumps(["1000000MOG", "1000BONK", "XAUT"]), encoding="utf-8")
+            with patch.object(
+                variational_adapter,
+                "VARIATIONAL_LORIS_INVALID_SYMBOLS",
+                variational_adapter._load_persisted_invalid_symbols(path=invalid_path),
+            ):
+                with patch("hydra_basis.adapters.variational.fetch_json", new=AsyncMock(return_value=payload)):
+                    symbols = await list_variational_symbols(session=object())
+
+        self.assertEqual(symbols, {"BTC", "HOOD"})
+
+    async def test_fetch_variational_funding_skips_known_loris_invalid_symbol(self) -> None:
+        with patch(
+            "hydra_basis.adapters.variational.fetch_loris_historical_with_nodriver",
+            new=AsyncMock(),
+        ) as fetch_loris:
+            with patch.object(variational_adapter, "VARIATIONAL_LORIS_INVALID_SYMBOLS", {"1000000MOG"}):
+                points = await fetch_variational_funding_since(
+                    session=object(),
+                    symbol="1000000MOG",
+                    start_time_ms=1,
+                    end_time_ms=2,
+                )
+
+        self.assertEqual(points, [])
+        fetch_loris.assert_not_awaited()
+
+    async def test_fetch_variational_funding_does_not_mark_frontend_timeout_symbol_invalid(self) -> None:
+        stats_payload = {
+            "listings": [
+                {"ticker": "123BAD", "funding_rate": "0.0001", "funding_interval_s": 28800},
+            ]
+        }
+        with tempfile.TemporaryDirectory() as temp_dir:
+            invalid_path = Path(temp_dir) / "invalid_symbols.json"
+            variational_adapter.VARIATIONAL_LORIS_INVALID_SYMBOLS.discard("123BAD")
+            with patch.object(variational_adapter, "VARIATIONAL_LORIS_INVALID_SYMBOLS_PATH", invalid_path):
+                with patch.dict(os.environ, {"LORIS_USE_NODRIVER": "true"}, clear=False):
+                    with patch("hydra_basis.adapters.variational.fetch_json", new=AsyncMock(return_value=stats_payload)):
+                        with patch(
+                            "hydra_basis.adapters.variational.fetch_loris_historical_with_nodriver",
+                            new=AsyncMock(
+                                side_effect=RuntimeError(
+                                    "loris nodriver frontend response capture failed for 123BAD: "
+                                    "timed out waiting for Loris frontend historical response for 123BAD"
+                                )
+                            ),
+                        ):
+                            with self.assertRaisesRegex(RuntimeError, "timed out waiting"):
+                                await fetch_variational_funding_since(
+                                    session=object(),
+                                    symbol="123BAD",
+                                    start_time_ms=1,
+                                    end_time_ms=2,
+                                )
+
+            self.assertNotIn("123BAD", variational_adapter.VARIATIONAL_LORIS_INVALID_SYMBOLS)
+            self.assertFalse(invalid_path.exists())
+            variational_adapter.VARIATIONAL_LORIS_INVALID_SYMBOLS.discard("123BAD")
+            variational_adapter.VARIATIONAL_LORIS_DISCOVERED_INVALID_SYMBOLS.discard("123BAD")
+
+    async def test_fetch_variational_funding_marks_explicit_invalid_symbol_error(self) -> None:
+        stats_payload = {
+            "listings": [
+                {"ticker": "123BAD", "funding_rate": "0.0001", "funding_interval_s": 28800},
+            ]
+        }
+        with tempfile.TemporaryDirectory() as temp_dir:
+            invalid_path = Path(temp_dir) / "invalid_symbols.json"
+            variational_adapter.VARIATIONAL_LORIS_INVALID_SYMBOLS.discard("123BAD")
+            variational_adapter.VARIATIONAL_LORIS_DISCOVERED_INVALID_SYMBOLS.discard("123BAD")
+            with patch.object(variational_adapter, "VARIATIONAL_LORIS_INVALID_SYMBOLS_PATH", invalid_path):
+                with patch.dict(os.environ, {"LORIS_USE_NODRIVER": "true"}, clear=False):
+                    with patch("hydra_basis.adapters.variational.fetch_json", new=AsyncMock(return_value=stats_payload)):
+                        with patch(
+                            "hydra_basis.adapters.variational.fetch_loris_historical_with_nodriver",
+                            new=AsyncMock(side_effect=RuntimeError("symbol not found: 123BAD")),
+                        ):
+                            points = await fetch_variational_funding_since(
+                                session=object(),
+                                symbol="123BAD",
+                                start_time_ms=1,
+                                end_time_ms=2,
+                            )
+
+            self.assertEqual(points, [])
+            self.assertIn("123BAD", variational_adapter.VARIATIONAL_LORIS_INVALID_SYMBOLS)
+            saved = json.loads(invalid_path.read_text(encoding="utf-8"))
+            self.assertIn("123BAD", saved)
+            variational_adapter.VARIATIONAL_LORIS_INVALID_SYMBOLS.discard("123BAD")
+            variational_adapter.VARIATIONAL_LORIS_DISCOVERED_INVALID_SYMBOLS.discard("123BAD")
 
     async def test_fetch_variational_current_funding_reads_metadata_stats_without_loris(self) -> None:
         payload = {
@@ -1361,6 +1483,23 @@ class BackfillSpreadSnapshotTests(unittest.IsolatedAsyncioTestCase):
 
         history_store.save.assert_called_once_with(points)
         spread_store.save.assert_called_once_with(spreads)
+
+    def test_prune_funding_history_keys_removes_only_matching_invalid_keys(self) -> None:
+        points = {
+            ("variational", "1000BONK"): [],
+            ("variational", "HOOD"): [],
+            ("aster", "1000BONK"): [],
+        }
+
+        removed = prune_funding_history_keys(
+            points,
+            keys_to_remove={("variational", "1000BONK")},
+        )
+
+        self.assertEqual(removed, 1)
+        self.assertNotIn(("variational", "1000BONK"), points)
+        self.assertIn(("variational", "HOOD"), points)
+        self.assertIn(("aster", "1000BONK"), points)
 
 
 class FormattingTests(unittest.TestCase):

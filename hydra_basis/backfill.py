@@ -92,6 +92,19 @@ def build_no_new_points_warning(
     )
 
 
+def prune_funding_history_keys(
+    funding_points: dict[tuple[str, str], list],
+    *,
+    keys_to_remove: set[tuple[str, str]],
+) -> int:
+    removed = 0
+    for key in list(keys_to_remove):
+        if key in funding_points:
+            del funding_points[key]
+            removed += 1
+    return removed
+
+
 NO_ORDERBOOK_SENTINEL = "no_orderbook"
 INVALID_SYMBOL_SENTINEL = "invalid_symbol"
 

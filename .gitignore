@@ -1,5 +1,6 @@
 data/funding_history.json
 data/variational_current_funding.json
+data/variational_loris_invalid_symbols.json
 **/__pycache__/
 *.pyc
 .env

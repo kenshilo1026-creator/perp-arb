@@ -36,6 +36,7 @@ from hydra_basis.execution_engine.mexc_spot_adapter import MexcSpotExecutionAdap
 from hydra_basis.notifications.telegram import send_telegram
 from hydra_basis.execution_engine.variational_monitor_adapter import VariationalMonitorPositionAdapter
 from hydra_basis.risk_management.closers import MarketTypeRouterCloser
+from hydra_basis.risk_management.common import closer_key_for_venue as _closer_key_for_venue, position_key as _position_key
 from hydra_basis.risk_management.exchange_watchers import (
     AsterMarginHealthPoller,
     AsterForceOrdersPoller,
@@ -67,6 +68,7 @@ from hydra_basis.risk_management.models import PositionLeg
 from hydra_basis.risk_management.registry import PositionRegistry
 from hydra_basis.risk_management.reconciliation import reconcile_registry_positions
 from hydra_basis.risk_management.runtime import process_watcher_once
+from hydra_basis.risk_management.supervisor import supervise
 
 
 load_environment()
@@ -449,22 +451,6 @@ def build_margin_watchers(enabled: set[str], *, mark_price_caches: dict[str, Liv
     return watchers
 
 
-def _closer_key_for_venue(venue: str) -> str:
-    normalized = venue.strip().lower()
-    if normalized == "mexc_spot":
-        return "mexc"
-    return normalized
-
-
-def _position_key(*, venue: str, symbol: str, market_type: str, side: str) -> tuple[str, str, str, str]:
-    return (
-        venue.strip().lower(),
-        symbol.strip().upper(),
-        market_type.strip().lower(),
-        side.strip().upper(),
-    )
-
-
 async def build_live_funding_summary_registry(
     *,
     registry: PositionRegistry,
@@ -669,6 +655,15 @@ async def run_risk_manager(*, venues: set[str], live: bool) -> None:
     margin_config = load_margin_topup_config(MARGIN_TOPUP_CONFIG_PATH)
     funding_config = load_funding_risk_config(FUNDING_RISK_CONFIG_PATH)
     mode = "LIVE" if live else "DRY_RUN"
+    # Serializes every load->modify->save of the shared registry file across the
+    # concurrent loops so their read-modify-write cycles cannot clobber each other.
+    registry_lock = asyncio.Lock()
+
+    async def alert_loop_crash(name: str, exc: BaseException) -> None:
+        await send_telegram(
+            f"風控 loop 崩潰，30 秒後自動重啟\nloop={name}\nerror={exc!r}\nmode={mode}"
+        )
+
     print(f"risk manager running mode={mode} registry={POSITION_REGISTRY_PATH}")
     print(f"margin top-up config={MARGIN_TOPUP_CONFIG_PATH} enabled={margin_config.enabled}")
     print(f"funding risk config={FUNDING_RISK_CONFIG_PATH} enabled={funding_config.enabled}")
@@ -691,6 +686,9 @@ async def run_risk_manager(*, venues: set[str], live: bool) -> None:
     async def run_one_watcher(watcher) -> None:
         while True:
             try:
+                # Not guarded by registry_lock: process_watcher_once blocks on the
+                # venue WS stream waiting for the next event, which would hold the
+                # lock indefinitely. Emergency events are rare and should win.
                 result = await process_watcher_once(
                     registry_path=POSITION_REGISTRY_PATH,
                     watcher=watcher,
@@ -710,62 +708,63 @@ async def run_risk_manager(*, venues: set[str], live: bool) -> None:
         lighter_alert_last_sent_ms: dict[str, int] = {}
         while True:
             async for signal in watcher.watch():
-                registry = PositionRegistry.load(POSITION_REGISTRY_PATH)
-                manager = MarginTopupManager(
-                    registry=registry,
-                    toppers=closers,
-                    config=margin_config,
-                    dry_run=dry_run,
-                )
-                emergency_manager = EmergencyRiskManager(
-                    registry=registry,
-                    closers=closers,
-                    dry_run=dry_run,
-                )
-                for snapshot in build_snapshots_for_signal(registry=registry, signal=signal):
-                    if snapshot.venue.strip().lower() == "lighter":
-                        distance_pct = liquidation_distance_pct(
-                            side=snapshot.side,
-                            mark_price=snapshot.mark_price,
-                            liquidation_price=snapshot.liquidation_price,
-                        )
-                        if distance_pct > margin_config.liq_distance_trigger_pct:
+                # Alerts/telegram are collected while holding the registry lock so
+                # the load->modify->save cycle stays consistent, then flushed after.
+                pending_messages: list[str] = []
+                async with registry_lock:
+                    registry = PositionRegistry.load(POSITION_REGISTRY_PATH)
+                    manager = MarginTopupManager(
+                        registry=registry,
+                        toppers=closers,
+                        config=margin_config,
+                        dry_run=dry_run,
+                    )
+                    emergency_manager = EmergencyRiskManager(
+                        registry=registry,
+                        closers=closers,
+                        dry_run=dry_run,
+                    )
+                    for snapshot in build_snapshots_for_signal(registry=registry, signal=signal):
+                        if snapshot.venue.strip().lower() == "lighter":
+                            distance_pct = liquidation_distance_pct(
+                                side=snapshot.side,
+                                mark_price=snapshot.mark_price,
+                                liquidation_price=snapshot.liquidation_price,
+                            )
+                            if distance_pct > margin_config.liq_distance_trigger_pct:
+                                continue
+                            now_ms = int(time.time() * 1000)
+                            cooldown_ms = margin_config.cooldown_seconds * 1000
+                            last_sent_ms = lighter_alert_last_sent_ms.get(snapshot.leg_id)
+                            if last_sent_ms is not None and now_ms - last_sent_ms < cooldown_ms:
+                                continue
+                            lighter_alert_last_sent_ms[snapshot.leg_id] = now_ms
+                            pending_messages.append(
+                                "Lighter 強平風險\n"
+                                f"symbol={snapshot.symbol} side={snapshot.side} leg={snapshot.leg_id}\n"
+                                f"distance={distance_pct:.4f}% "
+                                f"mark={snapshot.mark_price} liq={snapshot.liquidation_price}\n"
+                                f"mode={mode}"
+                            )
                             continue
-                        now_ms = int(time.time() * 1000)
-                        cooldown_ms = margin_config.cooldown_seconds * 1000
-                        last_sent_ms = lighter_alert_last_sent_ms.get(snapshot.leg_id)
-                        if last_sent_ms is not None and now_ms - last_sent_ms < cooldown_ms:
-                            continue
-                        lighter_alert_last_sent_ms[snapshot.leg_id] = now_ms
-                        message = (
-                            "Lighter 強平風險\n"
-                            f"symbol={snapshot.symbol} side={snapshot.side} leg={snapshot.leg_id}\n"
-                            f"distance={distance_pct:.4f}% "
-                            f"mark={snapshot.mark_price} liq={snapshot.liquidation_price}\n"
-                            f"mode={mode}"
-                        )
-                        print(message)
-                        await send_telegram(message)
-                        continue
-                    result = await manager.handle_snapshot(snapshot)
-                    if result.get("action") in {"topup_done", "topup_dry_run", "topup_failed"}:
-                        message = (
-                            f"保證金風控\n"
-                            f"venue={snapshot.venue} symbol={snapshot.symbol} leg={snapshot.leg_id}\n"
-                            f"action={result.get('action')} distance={float(result.get('distance_pct', 0)):.4f}%\n"
-                            f"amount={result.get('topup_amount_usd')} mode={mode}"
-                        )
-                        print(message)
-                        await send_telegram(message)
-                    if result.get("risk_event") is not None:
-                        emergency_result = await emergency_manager.handle_event(result["risk_event"])
-                        emergency_message = "補保證金失敗，已觸發緊急平倉\n" + format_emergency_risk_message(
-                            result=emergency_result,
-                            mode=mode,
-                        )
-                        print(emergency_message)
-                        await send_telegram(emergency_message)
-                registry.save(POSITION_REGISTRY_PATH)
+                        result = await manager.handle_snapshot(snapshot)
+                        if result.get("action") in {"topup_done", "topup_dry_run", "topup_failed"}:
+                            pending_messages.append(
+                                f"保證金風控\n"
+                                f"venue={snapshot.venue} symbol={snapshot.symbol} leg={snapshot.leg_id}\n"
+                                f"action={result.get('action')} distance={float(result.get('distance_pct', 0)):.4f}%\n"
+                                f"amount={result.get('topup_amount_usd')} mode={mode}"
+                            )
+                        if result.get("risk_event") is not None:
+                            emergency_result = await emergency_manager.handle_event(result["risk_event"])
+                            pending_messages.append(
+                                "補保證金失敗，已觸發緊急平倉\n"
+                                + format_emergency_risk_message(result=emergency_result, mode=mode)
+                            )
+                    registry.save(POSITION_REGISTRY_PATH)
+                for message in pending_messages:
+                    print(message)
+                    await send_telegram(message)
             await asyncio.sleep(0)
 
     async def run_funding_risk_loop() -> None:
@@ -778,15 +777,16 @@ async def run_risk_manager(*, venues: set[str], live: bool) -> None:
                 sleep_seconds = seconds_until_next_hourly_minute()
                 print(f"funding risk next check in {sleep_seconds:.1f}s at minute {FUNDING_CHECK_MINUTE:02d}")
                 await asyncio.sleep(sleep_seconds)
-                result = await process_funding_risk_once(
-                    registry_path=POSITION_REGISTRY_PATH,
-                    state_path=FUNDING_RISK_STATE_PATH,
-                    provider=provider,
-                    closers=closers,
-                    config=funding_config,
-                    dry_run=dry_run,
-                    funding_auto_closer=execute_funding_auto_close_with_maker_taker,
-                )
+                async with registry_lock:
+                    result = await process_funding_risk_once(
+                        registry_path=POSITION_REGISTRY_PATH,
+                        state_path=FUNDING_RISK_STATE_PATH,
+                        provider=provider,
+                        closers=closers,
+                        config=funding_config,
+                        dry_run=dry_run,
+                        funding_auto_closer=execute_funding_auto_close_with_maker_taker,
+                    )
                 for message in result.get("messages", []):
                     text = f"資費風控\n{message}\nmode={mode}"
                     print(text)
@@ -807,10 +807,11 @@ async def run_risk_manager(*, venues: set[str], live: bool) -> None:
 
     async def run_reconciliation_loop() -> None:
         while True:
-            registry = PositionRegistry.load(POSITION_REGISTRY_PATH)
-            result = await reconcile_registry_positions(registry=registry, closers=closers)
-            if reconciliation_result_requires_registry_save(result):
-                registry.save(POSITION_REGISTRY_PATH)
+            async with registry_lock:
+                registry = PositionRegistry.load(POSITION_REGISTRY_PATH)
+                result = await reconcile_registry_positions(registry=registry, closers=closers)
+                if reconciliation_result_requires_registry_save(result):
+                    registry.save(POSITION_REGISTRY_PATH)
             if result.get("messages"):
                 text = (
                     "倉位同步檢查\n"
@@ -820,14 +821,33 @@ async def run_risk_manager(*, venues: set[str], live: bool) -> None:
                 print(text)
             await asyncio.sleep(RECONCILIATION_INTERVAL_SECONDS)
 
-    await asyncio.gather(
-        *((run_aster_mark_price_cache(mark_price_caches["aster"]),) if "aster" in venues else ()),
-        *((run_hyperliquid_mids_cache(mark_price_caches["hyperliquid"]),) if "hyperliquid" in venues else ()),
-        run_reconciliation_loop(),
-        *(run_one_watcher(watcher) for watcher in watchers),
-        *(run_one_margin_watcher(watcher) for watcher in margin_watchers),
-        *((run_funding_risk_loop(),) if funding_config.enabled else ()),
-    )
+    def supervised(name: str, factory):
+        # Each loop is supervised independently: a crash in one is logged,
+        # alerted, and restarted after a backoff instead of cancelling every
+        # other loop through the shared gather.
+        return supervise(name=name, loop_factory=factory, on_error=alert_loop_crash)
+
+    supervised_loops = [supervised("reconciliation", run_reconciliation_loop)]
+    if "aster" in venues:
+        supervised_loops.append(
+            supervised("aster_mark_price", lambda: run_aster_mark_price_cache(mark_price_caches["aster"]))
+        )
+    if "hyperliquid" in venues:
+        supervised_loops.append(
+            supervised("hyperliquid_mids", lambda: run_hyperliquid_mids_cache(mark_price_caches["hyperliquid"]))
+        )
+    for watcher in watchers:
+        supervised_loops.append(
+            supervised(f"watcher:{watcher.__class__.__name__}", (lambda w=watcher: run_one_watcher(w)))
+        )
+    for watcher in margin_watchers:
+        supervised_loops.append(
+            supervised(f"margin:{watcher.__class__.__name__}", (lambda w=watcher: run_one_margin_watcher(w)))
+        )
+    if funding_config.enabled:
+        supervised_loops.append(supervised("funding_risk", run_funding_risk_loop))
+
+    await asyncio.gather(*supervised_loops)
 
 
 def parse_args() -> argparse.Namespace:

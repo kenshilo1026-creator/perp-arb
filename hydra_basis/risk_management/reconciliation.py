@@ -3,24 +3,12 @@ from __future__ import annotations
 import time
 from decimal import Decimal, InvalidOperation
 
+from hydra_basis.risk_management.common import (
+    closer_key_for_venue as _closer_key_for_venue,
+    position_key as _position_key,
+)
 from hydra_basis.risk_management.models import PositionLeg
 from hydra_basis.risk_management.registry import PositionRegistry
-
-
-def _position_key(*, venue: str, symbol: str, market_type: str, side: str) -> tuple[str, str, str, str]:
-    return (
-        venue.strip().lower(),
-        symbol.strip().upper(),
-        market_type.strip().lower(),
-        side.strip().upper(),
-    )
-
-
-def _closer_key_for_venue(venue: str) -> str:
-    normalized = venue.strip().lower()
-    if normalized == "mexc_spot":
-        return "mexc"
-    return normalized
 
 
 def _is_registry_fallback_venue(venue: str) -> bool:
@@ -180,7 +168,14 @@ async def reconcile_registry_positions(
                 f"leg={leg.leg_id} registry={leg.side} live={live_side}"
             )
             continue
-        if live_quantity and live_quantity != leg.quantity:
+        live_quantity_value = _quantity_key(live_quantity)
+        if (
+            live_quantity
+            and live_quantity_value is not None
+            and live_quantity_value != _quantity_key(leg.quantity)
+        ):
+            # Compare numerically so venue formatting differences ("1" vs "1.00")
+            # do not trigger a spurious update-and-save every reconciliation cycle.
             old_quantity = leg.quantity
             leg.quantity = live_quantity
             updated_leg_ids.append(leg.leg_id)

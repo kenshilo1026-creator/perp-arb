@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import datetime as dt
-import json
 from pathlib import Path
 import time
 from collections.abc import Awaitable, Callable
@@ -9,6 +8,7 @@ from typing import Protocol
 
 import aiohttp
 
+from hydra_basis.risk_management.persistence import atomic_write_json, read_json_with_recovery
 from hydra_basis.adapters.registry import FETCHERS, FETCHERS_SINCE
 from hydra_basis.adapters.aster import fetch_aster_current_funding
 from hydra_basis.adapters.hyperliquid import fetch_hyperliquid_current_funding
@@ -49,41 +49,58 @@ class CurrentFundingCacheStore:
         interval_hours: float,
         ts_ms: int,
     ) -> None:
-        payload = self.load()
-        normalized_venue = venue.strip().lower()
-        normalized_symbol = symbol.strip().upper()
-        key = f"{normalized_venue}::{normalized_symbol}"
-        cutoff_ms = ts_ms - self.lookback_ms
-        rows = [
-            row
-            for row in payload.get(key, [])
-            if int(row.get("ts_ms", 0)) >= cutoff_ms and int(row.get("ts_ms", 0)) != ts_ms
-        ]
-        rows.append(
-            {
-                "venue": normalized_venue,
-                "symbol": normalized_symbol,
-                "ts_ms": ts_ms,
-                "date": dt.datetime.fromtimestamp(ts_ms / 1000, tz=dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-                "funding_rate": float(funding_rate),
-                "interval_hours": float(interval_hours),
-                "source": f"{normalized_venue}_current",
-            }
+        self.append_many(
+            [
+                {
+                    "venue": venue,
+                    "symbol": symbol,
+                    "funding_rate": funding_rate,
+                    "interval_hours": interval_hours,
+                    "ts_ms": ts_ms,
+                }
+            ]
         )
-        payload[key] = sorted(rows, key=lambda row: int(row["ts_ms"]))
+
+    def append_many(self, rows: list[dict[str, object]]) -> None:
+        """Append several funding samples with a single load/save round-trip.
+
+        Rewriting the whole cache file once per leg is O(legs x filesize); a
+        funding-risk cycle can touch many legs, so batching keeps the hourly
+        check cheap.
+        """
+        if not rows:
+            return
+        payload = self.load()
+        for row in rows:
+            normalized_venue = str(row["venue"]).strip().lower()
+            normalized_symbol = str(row["symbol"]).strip().upper()
+            ts_ms = int(row["ts_ms"])
+            key = f"{normalized_venue}::{normalized_symbol}"
+            cutoff_ms = ts_ms - self.lookback_ms
+            existing = [
+                item
+                for item in payload.get(key, [])
+                if int(item.get("ts_ms", 0)) >= cutoff_ms and int(item.get("ts_ms", 0)) != ts_ms
+            ]
+            existing.append(
+                {
+                    "venue": normalized_venue,
+                    "symbol": normalized_symbol,
+                    "ts_ms": ts_ms,
+                    "date": dt.datetime.fromtimestamp(ts_ms / 1000, tz=dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                    "funding_rate": float(row["funding_rate"]),
+                    "interval_hours": float(row["interval_hours"]),
+                    "source": f"{normalized_venue}_current",
+                }
+            )
+            payload[key] = sorted(existing, key=lambda item: int(item["ts_ms"]))
         self.save(payload)
 
     def load(self) -> dict[str, list[dict[str, object]]]:
-        if not self.path.exists():
-            return {}
-        return json.loads(self.path.read_text(encoding="utf-8"))
+        return read_json_with_recovery(self.path, default={})
 
     def save(self, payload: dict[str, list[dict[str, object]]]) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.path.write_text(
-            json.dumps(payload, indent=2, sort_keys=True),
-            encoding="utf-8",
-        )
+        atomic_write_json(self.path, payload)
 
 
 class FundingRiskDataProvider(Protocol):
@@ -165,6 +182,7 @@ class FundingHistoryRiskDataProvider:
             strategy_id: list(rates)
             for strategy_id, rates in self._latest_rates_by_strategy.items()
         }
+        cache_rows: list[dict[str, object]] = []
         for strategy_id in registry.open_strategy_ids():
             for leg in registry.legs_for_strategy(strategy_id):
                 if leg.status != "open" or leg.market_type == "spot":
@@ -184,12 +202,14 @@ class FundingHistoryRiskDataProvider:
                 if projected is None:
                     continue
                 if self.current_funding_cache is not None:
-                    self.current_funding_cache.append(
-                        venue=leg.venue,
-                        symbol=leg.symbol,
-                        funding_rate=projected.funding_rate,
-                        interval_hours=projected.interval_hours,
-                        ts_ms=int(self._now_ms_func()),
+                    cache_rows.append(
+                        {
+                            "venue": leg.venue,
+                            "symbol": leg.symbol,
+                            "funding_rate": projected.funding_rate,
+                            "interval_hours": projected.interval_hours,
+                            "ts_ms": int(self._now_ms_func()),
+                        }
                     )
                 rows = [
                     row
@@ -198,6 +218,8 @@ class FundingHistoryRiskDataProvider:
                 ]
                 rows.append(projected)
                 rates_by_strategy[strategy_id] = rows
+        if self.current_funding_cache is not None and cache_rows:
+            self.current_funding_cache.append_many(cache_rows)
         return rates_by_strategy
 
     async def _fetch_recent_points(

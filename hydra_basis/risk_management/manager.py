@@ -2,17 +2,11 @@ from __future__ import annotations
 
 from typing import Protocol
 
+from hydra_basis.risk_management.common import closer_key_for_venue as _closer_key_for_venue
 from hydra_basis.risk_management.models import RiskEvent, close_side_for_position
 from hydra_basis.risk_management.registry import PositionRegistry
 
 MANUAL_CLOSE_ONLY_VENUES = {"variational"}
-
-
-def _closer_key_for_venue(venue: str) -> str:
-    normalized = venue.strip().lower()
-    if normalized == "mexc_spot":
-        return "mexc"
-    return normalized
 
 
 class PositionCloser(Protocol):
@@ -115,10 +109,15 @@ class EmergencyRiskManager:
         for attempt in range(1, max_attempts + 1):
             live_position = await self._fetch_live_position(closer=closer, leg=leg)
             if live_position is None:
+                # A successful query that returns no position means the leg is
+                # already flat (e.g. it was itself liquidated/ADL'd). The goal of
+                # an emergency close is a flat position, so treat this as done
+                # rather than a failure that would raise a false alarm.
                 return {
-                    "ok": False,
+                    "ok": True,
+                    "already_flat": True,
                     "attempts": attempts,
-                    "error": f"no live open position for {leg.venue}:{leg.symbol}",
+                    "message": f"no live open position for {leg.venue}:{leg.symbol}; already flat",
                 }
             if isinstance(live_position, dict) and live_position.get("ok") is False:
                 live_position["attempts"] = attempts

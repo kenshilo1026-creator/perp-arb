@@ -7,6 +7,7 @@ from typing import Any
 
 from hydra_basis.risk_management.margin_topup import _strip_json_line_comments
 from hydra_basis.risk_management.models import PositionLeg, PositionSide, RiskEvent
+from hydra_basis.risk_management.persistence import atomic_write_json, read_json_with_recovery
 from hydra_basis.risk_management.registry import PositionRegistry
 
 
@@ -90,16 +91,13 @@ class FundingRiskState:
 
     @classmethod
     def load(cls, path: Path) -> "FundingRiskState":
-        if not path.exists():
+        payload = read_json_with_recovery(path, default=None)
+        if payload is None:
             return cls()
-        return cls.from_payload(json.loads(path.read_text(encoding="utf-8")))
+        return cls.from_payload(payload)
 
     def save(self, path: Path) -> None:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(
-            json.dumps(self.to_payload(), indent=2, sort_keys=True),
-            encoding="utf-8",
-        )
+        atomic_write_json(path, self.to_payload())
 
 
 def load_funding_risk_config(path: Path) -> FundingRiskConfig:

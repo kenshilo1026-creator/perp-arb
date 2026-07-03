@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 from hydra_basis.risk_management.models import PositionLeg, PositionStatus
+from hydra_basis.risk_management.persistence import atomic_write_json, read_json_with_recovery
 
 
 class PositionRegistry:
@@ -63,13 +63,10 @@ class PositionRegistry:
 
     @classmethod
     def load(cls, path: Path) -> "PositionRegistry":
-        if not path.exists():
+        payload = read_json_with_recovery(path, default=None)
+        if payload is None:
             return cls()
-        return cls.from_payload(json.loads(path.read_text(encoding="utf-8")))
+        return cls.from_payload(payload)
 
     def save(self, path: Path) -> None:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(
-            json.dumps(self.to_payload(), indent=2, sort_keys=True),
-            encoding="utf-8",
-        )
+        atomic_write_json(path, self.to_payload())

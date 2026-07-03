@@ -2215,5 +2215,130 @@ class EmergencyCloserAdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(calls, ["spot:BTC", "perp:BTC"])
 
 
+class PersistenceTests(unittest.TestCase):
+    def test_atomic_write_then_recover_from_corrupt(self) -> None:
+        from hydra_basis.risk_management.persistence import (
+            atomic_write_json,
+            read_json_with_recovery,
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "state.json"
+            atomic_write_json(path, {"a": 1})
+            self.assertEqual(read_json_with_recovery(path), {"a": 1})
+
+            path.write_text("{ this is not valid json", encoding="utf-8")
+            self.assertEqual(read_json_with_recovery(path, default={}), {})
+            self.assertTrue((Path(tmp) / "state.json.corrupt").exists())
+
+    def test_registry_load_recovers_from_corrupt_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "registry.json"
+            path.write_text("{ half-written", encoding="utf-8")
+            registry = PositionRegistry.load(path)
+            self.assertEqual(registry.open_strategy_ids(), [])
+
+
+class EmergencyAlreadyFlatTests(unittest.IsolatedAsyncioTestCase):
+    async def test_missing_live_position_is_treated_as_already_closed(self) -> None:
+        class FakeCloser:
+            async def get_open_position(self, *, symbol: str, market_type: str):
+                return None
+
+            async def close_position(self, **kwargs):
+                raise AssertionError("must not close an already-flat position")
+
+        registry = PositionRegistry(
+            legs=[
+                PositionLeg("arb-flat", "trigger", "aster", "ETH", "perp", "SHORT", "1", "open"),
+                PositionLeg("arb-flat", "other", "lighter", "ETH", "perp", "LONG", "1", "open"),
+            ]
+        )
+        manager = EmergencyRiskManager(registry=registry, closers={"lighter": FakeCloser()})
+
+        result = await manager.handle_event(RiskEvent("arb-flat", "trigger", "aster", "ETH", "ADL"))
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["closed_leg_ids"], ["other"])
+        self.assertEqual(result["failed_leg_ids"], [])
+        self.assertTrue(result["close_results"]["other"]["already_flat"])
+        self.assertEqual(registry.get_leg("other").status, "emergency_closed")
+
+
+class ReconcileQuantityFormattingTests(unittest.IsolatedAsyncioTestCase):
+    async def test_formatting_only_quantity_difference_is_not_an_update(self) -> None:
+        class FakeCloser:
+            async def get_open_position(self, *, symbol: str, market_type: str):
+                return {"symbol": symbol, "market_type": market_type, "side": "LONG", "quantity": "1.00"}
+
+        registry = PositionRegistry(
+            legs=[PositionLeg("arb-q", "long", "lighter", "SOL", "perp", "LONG", "1", "open")]
+        )
+
+        result = await reconcile_registry_positions(registry=registry, closers={"lighter": FakeCloser()})
+
+        self.assertEqual(result["updated_leg_ids"], [])
+        self.assertEqual(registry.get_leg("long").quantity, "1")
+
+
+class CurrentFundingCacheBatchTests(unittest.TestCase):
+    def test_append_many_persists_all_rows_with_single_save(self) -> None:
+        from hydra_basis.risk_management.funding_runtime import CurrentFundingCacheStore
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = CurrentFundingCacheStore(Path(tmp) / "cache.json")
+            save_calls = {"count": 0}
+            original_save = store.save
+
+            def counting_save(payload):
+                save_calls["count"] += 1
+                original_save(payload)
+
+            store.save = counting_save  # type: ignore[assignment]
+            store.append_many(
+                [
+                    {"venue": "aster", "symbol": "BTC", "funding_rate": 0.0001, "interval_hours": 8, "ts_ms": 1_000},
+                    {"venue": "lighter", "symbol": "ETH", "funding_rate": -0.0002, "interval_hours": 1, "ts_ms": 2_000},
+                ]
+            )
+
+            self.assertEqual(save_calls["count"], 1)
+            payload = store.load()
+            self.assertIn("aster::BTC", payload)
+            self.assertIn("lighter::ETH", payload)
+
+
+class SupervisorTests(unittest.IsolatedAsyncioTestCase):
+    async def test_supervise_restarts_after_crash_and_reports(self) -> None:
+        from hydra_basis.risk_management.supervisor import supervise
+
+        calls: list[int] = []
+        errors: list[str] = []
+
+        async def factory() -> None:
+            calls.append(1)
+            if len(calls) <= 2:
+                raise RuntimeError("boom")
+            raise asyncio.CancelledError()
+
+        async def on_error(name: str, exc: BaseException) -> None:
+            errors.append(f"{name}:{exc!r}")
+
+        async def fake_sleep(_seconds: float) -> None:
+            return None
+
+        with self.assertRaises(asyncio.CancelledError):
+            await supervise(
+                name="unit",
+                loop_factory=factory,
+                on_error=on_error,
+                sleep=fake_sleep,
+            )
+
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(len(errors), 2)
+        self.assertTrue(all(item.startswith("unit:") for item in errors))
+
+
 if __name__ == "__main__":
     unittest.main()

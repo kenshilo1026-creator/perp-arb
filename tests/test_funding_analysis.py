@@ -263,9 +263,10 @@ class RuntimeTests(unittest.TestCase):
         if not hasattr(asyncio, "WindowsSelectorEventLoopPolicy"):
             self.skipTest("Windows selector policy not available on this platform")
 
-        with patch("hydra_basis.runtime.sys.platform", "win32"):
-            with patch("hydra_basis.runtime.asyncio.set_event_loop_policy") as set_policy:
-                configure_windows_event_loop_policy()
+        with patch.dict(os.environ, {"LORIS_USE_NODRIVER": ""}, clear=False):
+            with patch("hydra_basis.runtime.sys.platform", "win32"):
+                with patch("hydra_basis.runtime.asyncio.set_event_loop_policy") as set_policy:
+                    configure_windows_event_loop_policy()
 
         set_policy.assert_called_once()
 
@@ -345,6 +346,7 @@ class LorisBrowserTests(unittest.IsolatedAsyncioTestCase):
         loris_browser._browser_pool_size = None
         loris_browser._browser_pool_start_error = None
         loris_browser._browser_pool = []
+        loris_browser._next_request_at_monotonic = 0.0
 
     async def asyncTearDown(self) -> None:
         loris_browser._shared_browser = None
@@ -359,50 +361,48 @@ class LorisBrowserTests(unittest.IsolatedAsyncioTestCase):
         loris_browser._browser_pool_start_error = None
         loris_browser._browser_pool = []
 
-    def _build_network_capture_page(
+    _FAST_LORIS_ENV = {
+        "LORIS_NODRIVER_WORKER_DELAY_SECONDS": "0",
+        "LORIS_MIN_REQUEST_INTERVAL_SECONDS": "0",
+    }
+
+    def _build_page_fetch_mocks(
         self,
         payload: dict | list[dict],
         *,
-        status: int = 200,
-    ) -> tuple[AsyncMock, AsyncMock]:
+        statuses: list[int] | None = None,
+    ) -> tuple[AsyncMock, AsyncMock, list[str]]:
         browser = AsyncMock()
         page = AsyncMock()
         browser.get.return_value = page
         payloads = payload if isinstance(payload, list) else [payload]
-        body_index = {"value": 0}
+        call_index = {"value": 0}
+        navigated_urls: list[str] = []
 
         async def page_get(url):
-            self.assertIn("https://loris.tools/funding/historical", url)
+            navigated_urls.append(url)
             return page
 
-        async def page_send(_command):
-            return "script-1"
-
         async def page_evaluate(_expression, **_kwargs):
-            index = min(body_index["value"], len(payloads) - 1)
-            body_index["value"] += 1
-            symbol = "BTC" if index == 0 else "ETH"
-            return json.dumps([
-                {
-                    "url": (
-                        "https://api.loris.tools/funding/historical?"
-                        f"symbol={symbol}&start=2026-06-11T00%3A00%3A00.000Z&end=2026-06-12T00%3A00%3A00.000Z"
-                    ),
-                    "ok": status < 400,
-                    "status": status,
-                    "text": json.dumps(payloads[index]),
-                }
-            ])
+            index = min(call_index["value"], len(payloads) - 1)
+            call_index["value"] += 1
+            status = statuses[index] if statuses else 200
+            return json.dumps({
+                "ok": True,
+                "status": status,
+                "text": json.dumps(payloads[index]),
+            })
 
         page.get = AsyncMock(side_effect=page_get)
-        page.send = AsyncMock(side_effect=page_send)
         page.evaluate = AsyncMock(side_effect=page_evaluate)
-        return browser, page
+        return browser, page, navigated_urls
 
-    async def test_nodriver_fetch_captures_loris_frontend_network_response(self) -> None:
-        browser, page = self._build_network_capture_page({"series": {"variational": []}})
+    async def test_nodriver_fetch_runs_in_page_fetch_without_navigation(self) -> None:
+        browser, page, navigated_urls = self._build_page_fetch_mocks(
+            {"series": {"variational": []}}
+        )
 
-        with patch.dict(os.environ, {"LORIS_NODRIVER_WORKER_DELAY_SECONDS": "0"}, clear=True):
+        with patch.dict(os.environ, self._FAST_LORIS_ENV, clear=True):
             with patch("nodriver.start", new=AsyncMock(return_value=browser)):
                 await _fetch_loris_historical_with_nodriver_inner(
                     symbol="BTC",
@@ -412,15 +412,19 @@ class LorisBrowserTests(unittest.IsolatedAsyncioTestCase):
 
         browser.get.assert_awaited_once()
         self.assertIn("https://loris.tools/", browser.get.await_args.args)
-        page.get.assert_awaited_once()
-        self.assertEqual(page.send.await_count, 2)
+        page.get.assert_not_awaited()
+        page.evaluate.assert_awaited_once()
+        self.assertIn(
+            "https://api.loris.tools/funding/historical?symbol=BTC",
+            page.evaluate.await_args.args[0],
+        )
 
-    async def test_nodriver_fetch_reads_json_from_frontend_network_response(self) -> None:
-        browser, page = self._build_network_capture_page(
+    async def test_nodriver_fetch_reads_json_from_fetch_response(self) -> None:
+        browser, page, _navigated_urls = self._build_page_fetch_mocks(
             {"series": {"variational": [{"t": "2026-06-11T03:00:00Z", "y": 1.0}]}}
         )
 
-        with patch.dict(os.environ, {"LORIS_NODRIVER_WORKER_DELAY_SECONDS": "0"}, clear=True):
+        with patch.dict(os.environ, self._FAST_LORIS_ENV, clear=True):
             with patch("nodriver.start", new=AsyncMock(return_value=browser)):
                 payload = await _fetch_loris_historical_with_nodriver_inner(
                     symbol="BTC",
@@ -430,18 +434,18 @@ class LorisBrowserTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIn("variational", payload["series"])
         self.assertEqual(browser.get.await_count, 1)
-        page.get.assert_awaited_once()
+        page.get.assert_not_awaited()
         page.evaluate.assert_awaited()
 
     async def test_nodriver_fetch_reuses_shared_browser_between_requests(self) -> None:
-        browser, page = self._build_network_capture_page(
+        browser, page, _navigated_urls = self._build_page_fetch_mocks(
             [
                 {"series": {"variational": [{"t": "2026-06-11T03:00:00Z", "y": 1.0}]}},
                 {"series": {"variational": [{"t": "2026-06-11T04:00:00Z", "y": 2.0}]}},
             ]
         )
 
-        with patch.dict(os.environ, {"LORIS_NODRIVER_WORKER_DELAY_SECONDS": "0"}, clear=True):
+        with patch.dict(os.environ, self._FAST_LORIS_ENV, clear=True):
             with patch("nodriver.start", new=AsyncMock(return_value=browser)) as start_browser:
                 first = await _fetch_loris_historical_with_nodriver_inner(
                     symbol="BTC",
@@ -458,7 +462,7 @@ class LorisBrowserTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("variational", second["series"])
         start_browser.assert_awaited_once()
         browser.get.assert_awaited_once()
-        self.assertEqual(page.get.await_count, 2)
+        page.get.assert_not_awaited()
         self.assertEqual(page.evaluate.await_count, 2)
 
     async def test_nodriver_start_failure_is_cached_to_avoid_reopening_browser_per_symbol(self) -> None:
@@ -481,13 +485,38 @@ class LorisBrowserTests(unittest.IsolatedAsyncioTestCase):
 
         start_browser.assert_awaited_once()
 
-    async def test_nodriver_fetch_raises_clear_error_when_frontend_network_response_is_error(self) -> None:
-        browser, _page = self._build_network_capture_page(
-            {"error": "Missing API key."},
-            status=401,
+    async def test_nodriver_fetch_refreshes_session_when_missing_api_key(self) -> None:
+        browser, page, navigated_urls = self._build_page_fetch_mocks(
+            [
+                {"error": "Missing API key.", "docs": "https://loris.tools/docs/authentication"},
+                {"series": {"variational": [{"t": "2026-06-11T03:00:00Z", "y": 1.0}]}},
+            ],
+            statuses=[401, 200],
         )
 
-        with patch.dict(os.environ, {"LORIS_NODRIVER_WORKER_DELAY_SECONDS": "0"}, clear=True):
+        with patch.dict(os.environ, self._FAST_LORIS_ENV, clear=True):
+            with patch("nodriver.start", new=AsyncMock(return_value=browser)):
+                payload = await _fetch_loris_historical_with_nodriver_inner(
+                    symbol="BTC",
+                    start="2026-06-11T00:00:00.000Z",
+                    end="2026-06-12T00:00:00.000Z",
+                )
+
+        self.assertIn("variational", payload["series"])
+        # 401 fetch -> home page navigation (session refresh) -> retry fetch
+        self.assertEqual(navigated_urls, ["https://loris.tools/"])
+        self.assertEqual(page.evaluate.await_count, 2)
+
+    async def test_nodriver_fetch_raises_when_missing_api_key_persists_after_session_refresh(self) -> None:
+        browser, page, navigated_urls = self._build_page_fetch_mocks(
+            [
+                {"error": "Missing API key.", "docs": "https://loris.tools/docs/authentication"},
+                {"error": "Missing API key.", "docs": "https://loris.tools/docs/authentication"},
+            ],
+            statuses=[401, 401],
+        )
+
+        with patch.dict(os.environ, self._FAST_LORIS_ENV, clear=True):
             with patch("nodriver.start", new=AsyncMock(return_value=browser)):
                 with self.assertRaises(RuntimeError) as ctx:
                     await _fetch_loris_historical_with_nodriver_inner(
@@ -496,8 +525,21 @@ class LorisBrowserTests(unittest.IsolatedAsyncioTestCase):
                         end="2026-06-12T00:00:00.000Z",
                     )
 
-        self.assertIn("loris nodriver frontend response capture failed", str(ctx.exception))
         self.assertIn("Missing API key", str(ctx.exception))
+        self.assertEqual(navigated_urls, ["https://loris.tools/"])
+        self.assertEqual(page.evaluate.await_count, 2)
+
+    async def test_throttle_spaces_consecutive_loris_requests(self) -> None:
+        import time as time_module
+
+        with patch.dict(os.environ, {"LORIS_MIN_REQUEST_INTERVAL_SECONDS": "0.05"}, clear=True):
+            started = time_module.monotonic()
+            await loris_browser._throttle_loris_request()
+            await loris_browser._throttle_loris_request()
+            await loris_browser._throttle_loris_request()
+            elapsed = time_module.monotonic() - started
+
+        self.assertGreaterEqual(elapsed, 0.1)
 
 
 class MexcAdapterTests(unittest.IsolatedAsyncioTestCase):
@@ -807,6 +849,10 @@ class AsterAdapterTests(unittest.IsolatedAsyncioTestCase):
 class VariationalAdapterTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         _VARIATIONAL_STATS_CACHE.clear()
+        # Pin the nodriver flag off so a leaked LORIS_USE_NODRIVER (e.g. loaded
+        # from .env by another test module's imports) cannot flip the aiohttp
+        # tests onto the real-browser path. Tests that need it set it themselves.
+        self.enterContext(patch.dict(os.environ, {"LORIS_USE_NODRIVER": ""}, clear=False))
 
     async def test_list_symbols_reads_metadata_stats(self) -> None:
         payload = {

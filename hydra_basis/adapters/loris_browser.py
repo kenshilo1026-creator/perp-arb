@@ -5,15 +5,21 @@ import inspect
 import json
 import os
 import sys
+import threading
+import time
 from typing import Any
-from urllib.parse import parse_qs, urlencode, urlparse
+from urllib.parse import urlencode
 
 
 LORIS_HOME_URL = "https://loris.tools/"
-LORIS_FRONTEND_HISTORICAL_URL = "https://loris.tools/funding/historical"
 LORIS_HISTORICAL_URL = "https://api.loris.tools/funding/historical"
 DEFAULT_LORIS_NODRIVER_TIMEOUT_SECONDS = 45.0
 DEFAULT_LORIS_API_KEY_HEADER = "X-API-Key"
+# Loris historical endpoints allow ~30 requests/min per session; pace slightly
+# under that so backfill bursts never trip a 429.
+DEFAULT_LORIS_MIN_REQUEST_INTERVAL_SECONDS = 2.2
+_throttle_mutex = threading.Lock()
+_next_request_at_monotonic = 0.0
 _browser_context_lock: asyncio.Lock | None = None
 _shared_browser: Any | None = None
 _shared_page: Any | None = None
@@ -60,11 +66,38 @@ def _nodriver_pool_size() -> int:
 
 
 def _nodriver_worker_delay_seconds() -> float:
-    raw = os.getenv("LORIS_NODRIVER_WORKER_DELAY_SECONDS", "2.0").strip()
+    # Pacing is handled by the global request throttle, so no extra delay by default.
+    raw = os.getenv("LORIS_NODRIVER_WORKER_DELAY_SECONDS", "0").strip()
     try:
         return max(0.0, float(raw))
     except ValueError:
-        return 2.0
+        return 0.0
+
+
+def _loris_min_request_interval_seconds() -> float:
+    raw = os.getenv("LORIS_MIN_REQUEST_INTERVAL_SECONDS", "").strip()
+    if not raw:
+        return DEFAULT_LORIS_MIN_REQUEST_INTERVAL_SECONDS
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        return DEFAULT_LORIS_MIN_REQUEST_INTERVAL_SECONDS
+
+
+async def _throttle_loris_request() -> None:
+    """Reserve the next request slot; safe across event loops and threads."""
+    global _next_request_at_monotonic
+    interval = _loris_min_request_interval_seconds()
+    if interval <= 0:
+        return
+    while True:
+        with _throttle_mutex:
+            now = time.monotonic()
+            if now >= _next_request_at_monotonic:
+                _next_request_at_monotonic = now + interval
+                return
+            wait = _next_request_at_monotonic - now
+        await asyncio.sleep(wait)
 
 
 async def _maybe_await(value: Any) -> Any:
@@ -120,147 +153,41 @@ async def _evaluate_json(page: Any, expression: str) -> Any:
     raise RuntimeError("nodriver evaluate failed")
 
 
-async def _read_json_document(page: Any) -> dict:
-    body_text = await _evaluate_json(
-        page,
-        """
-            JSON.stringify({
-                bodyText: document.body ? document.body.innerText : "",
-                preText: document.querySelector("pre") ? document.querySelector("pre").innerText : ""
-            })
-        """,
-    )
-    if not isinstance(body_text, str):
-        body_text = json.dumps(body_text)
-    payload = json.loads(body_text)
-    text = str(payload.get("preText") or payload.get("bodyText") or "").strip()
-    if not text:
-        raise RuntimeError("nodriver document body was empty")
-    return json.loads(text)
-
-
-def _install_loris_fetch_hook_script() -> str:
-    return """
-        (() => {
-            if (window.__lorisHistoricalFetchHookInstalled) {
-                return;
-            }
-            window.__lorisHistoricalFetchHookInstalled = true;
-            window.__lorisHistoricalResponses = [];
-            const originalFetch = window.fetch.bind(window);
-            window.fetch = async (...args) => {
-                const response = await originalFetch(...args);
-                try {
-                    const requestUrl = typeof args[0] === "string" ? args[0] : (args[0] && args[0].url) || "";
-                    if (requestUrl.includes("api.loris.tools/funding/historical")) {
-                        const text = await response.clone().text();
-                        window.__lorisHistoricalResponses.push({
-                            url: requestUrl,
-                            ok: response.ok,
-                            status: response.status,
-                            text,
-                            ts: Date.now(),
-                        });
-                    }
-                } catch (error) {
-                    window.__lorisHistoricalResponses.push({
-                        url: "",
-                        ok: false,
-                        status: 0,
-                        error: error && error.message ? error.message : String(error),
-                        ts: Date.now(),
-                    });
-                }
-                return response;
-            };
-        })();
-    """
-
-
-def _is_loris_historical_response_for_symbol(entry: dict, *, symbol: str) -> bool:
-    url = str(entry.get("url") or "")
-    if "api.loris.tools/funding/historical" not in url:
+def _is_missing_api_key_response(data: object) -> bool:
+    if not isinstance(data, dict):
         return False
-    query = parse_qs(urlparse(url).query)
-    return (query.get("symbol") or [""])[0].upper() == symbol.upper()
+    error = str(data.get("error") or data.get("detail") or "").lower()
+    return "missing api key" in error
 
 
-async def _read_loris_historical_responses(page: Any) -> list[dict]:
-    payload = await _evaluate_json(
-        page,
-        "JSON.stringify(window.__lorisHistoricalResponses || [])",
-    )
+_PAGE_FETCH_SCRIPT_TEMPLATE = """
+    (async () => {
+        try {
+            const response = await fetch(%s, { credentials: "include" });
+            const text = await response.text();
+            return JSON.stringify({ ok: true, status: response.status, text: text });
+        } catch (error) {
+            return JSON.stringify({ ok: false, error: String(error) });
+        }
+    })()
+"""
+
+
+async def _fetch_api_json_in_page(page: Any, *, url: str) -> tuple[int, dict]:
+    """Run fetch() inside the loris.tools page so the session cookie and Origin
+    match real frontend traffic, without paying a full page navigation."""
+    await _throttle_loris_request()
+    payload = await _evaluate_json(page, _PAGE_FETCH_SCRIPT_TEMPLATE % json.dumps(url))
     if not isinstance(payload, str):
-        raise RuntimeError(f"loris response buffer returned non-string response: {type(payload).__name__}")
-    data = json.loads(payload or "[]")
-    return data if isinstance(data, list) else []
-
-
-async def _capture_loris_historical_response_from_frontend(
-    *,
-    browser: Any,
-    page: Any,
-    symbol: str,
-    api_url: str,
-) -> tuple[Any, dict]:
-    from nodriver import cdp
-
-    target_symbol = symbol.upper()
-    script_id = None
-    try:
-        script_id = await _maybe_await(
-            page.send(
-                cdp.page.add_script_to_evaluate_on_new_document(
-                    source=_install_loris_fetch_hook_script(),
-                    run_immediately=True,
-                )
-            )
-        )
-        page = await _navigate_page(
-            browser=browser,
-            page=page,
-            url=_frontend_historical_url(symbol),
-        )
-        timeout_seconds = float(os.getenv("LORIS_NODRIVER_NETWORK_TIMEOUT_SECONDS", "30"))
-        deadline = asyncio.get_running_loop().time() + timeout_seconds
-        while True:
-            responses = await _read_loris_historical_responses(page)
-            matches = [
-                item for item in responses
-                if isinstance(item, dict)
-                and _is_loris_historical_response_for_symbol(item, symbol=target_symbol)
-            ]
-            if matches:
-                latest = matches[-1]
-                text = str(latest.get("text") or "")
-                if not latest.get("ok"):
-                    status = latest.get("status")
-                    error = latest.get("error") or text[:500]
-                    raise RuntimeError(f"loris historical response {status}: {error}")
-                if not text.strip():
-                    raise RuntimeError("loris historical response body was empty")
-                return page, json.loads(text)
-            if asyncio.get_running_loop().time() >= deadline:
-                raise RuntimeError(f"timed out waiting for Loris frontend historical response for {target_symbol}")
-            await asyncio.sleep(0.5)
-    finally:
-        if script_id is not None:
-            try:
-                await _maybe_await(
-                    page.send(cdp.page.remove_script_to_evaluate_on_new_document(script_id))
-                )
-            except Exception:
-                pass
-
-
-def _frontend_historical_url(symbol: str) -> str:
-    params = urlencode({
-        "symbol": symbol.upper(),
-        "range": "7d",
-        "unit": "apy",
-        "exchanges": "variational",
-    })
-    return f"{LORIS_FRONTEND_HISTORICAL_URL}?{params}"
+        payload = json.dumps(payload)
+    result = json.loads(payload)
+    if not isinstance(result, dict) or not result.get("ok"):
+        error = result.get("error") if isinstance(result, dict) else result
+        raise RuntimeError(f"in-page loris fetch failed: {error}")
+    text = str(result.get("text") or "").strip()
+    if not text:
+        raise RuntimeError("loris API response body was empty")
+    return int(result.get("status") or 0), json.loads(text)
 
 
 async def _stop_shared_browser() -> None:
@@ -476,11 +403,35 @@ async def _fetch_loris_historical_with_nodriver_inner(
         user_data_dir=user_data_dir,
     )
     try:
-        page = await _navigate_page(browser=browser, page=page, url=url)
-        data = await _read_json_document(page)
+        refresh_reason: str | None = None
+        status = 0
+        data: dict = {}
+        try:
+            status, data = await _fetch_api_json_in_page(page, url=url)
+        except RuntimeError as exc:
+            # e.g. the page drifted off loris.tools so the CORS fetch failed;
+            # reloading the home page below re-parks it on the right origin.
+            refresh_reason = f"in-page fetch error: {exc}"
+        if refresh_reason is None and (status == 401 or _is_missing_api_key_response(data)):
+            # api.loris.tools authorizes anonymous browsers via the loris_session
+            # cookie issued when loris.tools is loaded. That cookie expires after
+            # ~17 minutes, so reload the home page for a fresh session and retry.
+            refresh_reason = "session expired"
+        if refresh_reason is not None:
+            print(
+                f"loris refreshing loris.tools session ({refresh_reason}) "
+                f"symbol={symbol.upper()}",
+                flush=True,
+            )
+            page = await _navigate_page(browser=browser, page=page, url=LORIS_HOME_URL)
+            status, data = await _fetch_api_json_in_page(page, url=url)
+            if status == 401 or _is_missing_api_key_response(data):
+                raise RuntimeError(
+                    "loris API still returned 'Missing API key' after session refresh"
+                )
         _shared_page = page
         return data
     except Exception as exc:
-        raise RuntimeError(f"loris nodriver navigation fetch failed for {symbol.upper()}: {exc}") from exc
+        raise RuntimeError(f"loris nodriver fetch failed for {symbol.upper()}: {exc}") from exc
     finally:
         await _release_browser_context(context, page=page)

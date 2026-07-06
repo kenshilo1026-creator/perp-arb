@@ -154,6 +154,7 @@ WS   /ws/execute                          → 送 {params, live} → 串流 prog
 - 改 venue 或天數 → 即時（本地）重算 APY + 走勢圖，不下單。
 - 「預覽」→ 顯示 plan；「確認送出」→ WebSocket 執行、下方即時滾動進度。
 - spot-perp 分頁欄位微調（perp 做空 venue + 現貨腿 + 槓桿），APY 用單邊 positive funding。
+- **spot-perp 的現貨腿目前只支援 mexc**：UI 現貨交易所固定為 mexc（顯示但不可改），`OpenParams.long_venue` 在 spot_perp 模式固定為 `mexc`。
 
 ## 執行流程（間隔 / 防抖）
 

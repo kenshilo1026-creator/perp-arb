@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8" />
+  <title>下單面板</title>
+  <link rel="stylesheet" href="/style.css" />
+  <link rel="stylesheet" href="/vendor/uPlot.min.css" />
+  <script src="/vendor/uPlot.iife.min.js"></script>
+</head>
+<body>
+  <h1>下單面板</h1>
+  <div id="kind-tabs">
+    <button data-kind="perp_perp" class="active">perp-perp</button>
+    <button data-kind="spot_perp">spot-perp</button>
+  </div>
+  <div class="row">
+    <label>模式
+      <select id="mode"><option value="open">開倉</option><option value="close">平倉</option></select>
+    </label>
+    <label>執行方式
+      <select id="exec-mode">
+        <option value="maker_taker">掛單+吃單</option>
+        <option value="taker">純吃單 (尚未實作)</option>
+      </select>
+    </label>
+  </div>
+  <div class="row">
+    <label>幣種 <input id="symbol" list="symbol-list" placeholder="BTC" /></label>
+    <datalist id="symbol-list"></datalist>
+    <label>做空交易所 <select id="short-venue"></select></label>
+    <label id="long-venue-wrap">做多交易所 <select id="long-venue"></select></label>
+    <label id="spot-venue-note" style="display:none">現貨腿 <input value="mexc" disabled /></label>
+  </div>
+  <div class="row">
+    <label>槓桿 <input id="leverage" type="number" value="3" /></label>
+    <label>總數量 <input id="total-size" placeholder="0.5" /></label>
+    <label>每批數量 <input id="clip-size" placeholder="0.1" /></label>
+    <label>批次間隔(ms) <input id="interval-ms" type="number" value="500" /></label>
+    <label>防抖(ms) <input id="debounce-ms" type="number" value="300" /></label>
+  </div>
+  <fieldset>
+    <legend>歷史 APY</legend>
+    <div id="days">
+      <button data-days="1">1</button><button data-days="3">3</button>
+      <button data-days="7" class="active">7</button><button data-days="14">14</button>
+      <button data-days="30">30</button>
+    </div>
+    <div id="apy-stats">—</div>
+    <div id="apy-chart"></div>
+  </fieldset>
+  <div class="row">
+    <button id="btn-preview">預覽</button>
+    <button id="btn-submit" disabled>確認送出</button>
+  </div>
+  <pre id="preview-box"></pre>
+  <h3>執行進度</h3>
+  <pre id="progress-log"></pre>
+  <script src="/app.js"></script>
+</body>
+</html>

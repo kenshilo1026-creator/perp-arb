@@ -19,6 +19,7 @@ from hydra_basis.execution_engine.aster_adapter import AsterExecutionAdapter
 import aiohttp
 
 from hydra_basis.execution_engine.executor import execute_single_clip, execute_single_clip_with_sides, passive_limit_price_from_orderbook, execution_sides_for_signal
+from hydra_basis.execution_engine.order_service import Deps, progress_printer, run_batched_execution
 from hydra_basis.execution_engine.order_fill import extract_filled_quantity
 from hydra_basis.execution_engine.market_data import fetch_orderbook_snapshot
 from hydra_basis.execution_engine.hyperliquid_adapter import HyperliquidExecutionAdapter
@@ -499,6 +500,114 @@ def find_close_pairs(legs: list[PositionLeg]) -> list[tuple[PositionLeg, Positio
     return [(s, l) for s in short_legs for l in long_legs]
 
 
+async def execute_open_clip(
+    *,
+    symbol: str,
+    short_venue: str,
+    long_venue: str,
+    maker_venue: str,
+    taker_venue: str,
+    leverage: int,
+    clip_size: Decimal,
+    clip_usd: float,
+    batch_clip_size: Decimal,
+    broker_url: str | None = None,
+) -> dict[str, object]:
+    """Execute one maker+taker open clip. Module-level so both the CLI and the
+    web UI can drive it; the body is the former ``execute_one_batch`` closure with
+    its captured variables promoted to parameters (behavior unchanged)."""
+    batch_clip_usd = float(batch_clip_size) / float(clip_size) * clip_usd
+    maker_adapter = build_adapter_for_venue(maker_venue, leverage=leverage, broker_url=broker_url)
+    taker_adapter = build_adapter_for_venue(taker_venue, leverage=leverage, broker_url=broker_url)
+    try:
+        warm_up = getattr(taker_adapter, "warm_up", None)
+        if callable(warm_up):
+            await warm_up()
+        async with aiohttp.ClientSession(headers={"User-Agent": "funding-arb-execution-open/0.1"}) as _sess:
+            _fresh = await asyncio.gather(
+                fetch_orderbook_snapshot(_sess, venue=maker_venue, symbol=symbol, clip_usd=batch_clip_usd),
+                fetch_orderbook_snapshot(_sess, venue=taker_venue, symbol=symbol, clip_usd=batch_clip_usd),
+            )
+        maker_book, taker_book = _fresh[0], _fresh[1]
+        gap_overridden = await check_pre_trade_price_gap(
+            maker_venue=maker_venue,
+            taker_venue=taker_venue,
+            maker_book=maker_book,
+            taker_book=taker_book,
+        )
+        maker_side, taker_side = execution_sides_for_signal(
+            maker_venue=maker_venue,
+            short_venue=short_venue,
+            long_venue=long_venue,
+        )
+        use_maker_orderbook = None if maker_venue == "variational" else maker_book
+
+        async def _refresh_open_maker_price() -> str:
+            async with aiohttp.ClientSession(headers={"User-Agent": "funding-arb-execution-open/0.1"}) as _s:
+                fresh_book = await fetch_orderbook_snapshot(_s, venue=maker_venue, symbol=symbol, clip_usd=batch_clip_usd)
+            return passive_limit_price_from_orderbook(fresh_book, maker_side)
+
+        async def _refresh_variational_open_maker_price() -> str:
+            return await maker_adapter.get_limit_price_preview(symbol=symbol)
+
+        if maker_venue == "variational":
+            open_price_refresher = _refresh_variational_open_maker_price
+        else:
+            open_price_refresher = _refresh_open_maker_price
+
+        taker_pre_hook = None
+        prepare_fn = getattr(taker_adapter, "prepare_market_order", None)
+        if taker_venue == "variational" and callable(prepare_fn):
+            async def _prepare_open_taker():
+                await prepare_fn(symbol=symbol, side=taker_side, amount=str(batch_clip_size), clip_usd=batch_clip_usd)
+            taker_pre_hook = _prepare_open_taker
+
+        result = await execute_single_clip(
+            symbol=symbol,
+            clip_usd=batch_clip_usd,
+            quantity=batch_clip_size,
+            maker_venue=maker_venue,
+            taker_venue=taker_venue,
+            short_venue=short_venue,
+            long_venue=long_venue,
+            maker_adapter=maker_adapter,
+            taker_adapter=taker_adapter,
+            max_hedge_retries=0,
+            state_machine=ExecutionStateMachine(),
+            maker_orderbook=use_maker_orderbook,
+            taker_orderbook=taker_book,
+            require_maker_fill_confirmation=True,
+            maker_fill_timeout_seconds=MAKER_FILL_TIMEOUT_SECONDS,
+            max_maker_reprice_attempts=MAKER_REPRICE_ATTEMPTS,
+            maker_reprice_min_change_pct=(
+                VARIATIONAL_MAKER_REPRICE_MIN_CHANGE_PCT
+                if maker_venue == "variational"
+                else 0.0
+            ),
+            maker_price_refresher=open_price_refresher,
+            taker_pre_hook=taker_pre_hook,
+            max_execution_price_gap_pct=float("inf") if gap_overridden else MAX_PRE_TRADE_PRICE_GAP,
+        )
+        if result.get("ok", False):
+            strategy_id = await record_open_execution_from_live_positions(
+                execution_result=result,
+                adapters_by_venue={
+                    maker_venue: maker_adapter,
+                    taker_venue: taker_adapter,
+                },
+                symbol=symbol,
+                short_venue=short_venue,
+                long_venue=long_venue,
+            )
+            result["recorded_strategy_id"] = strategy_id
+            print(f"position_registry recorded strategy_id={strategy_id}")
+        return result
+    finally:
+        await close_adapter_if_supported(maker_adapter)
+        if taker_adapter is not maker_adapter:
+            await close_adapter_if_supported(taker_adapter)
+
+
 async def run_open_execution_once(
     *,
     cli_ticker: str | None = None,
@@ -579,113 +688,41 @@ async def run_open_execution_once(
     clip_usd = preview.clip_usd
 
     async def execute_one_batch(*, broker_url: str | None = None, batch_clip_size: Decimal) -> dict[str, object]:
-        batch_clip_usd = float(batch_clip_size) / float(clip_size) * clip_usd
-        maker_adapter = build_adapter_for_venue(preview.maker_venue, leverage=leverage, broker_url=broker_url)
-        taker_adapter = build_adapter_for_venue(preview.taker_venue, leverage=leverage, broker_url=broker_url)
-        try:
-            warm_up = getattr(taker_adapter, "warm_up", None)
-            if callable(warm_up):
-                await warm_up()
-            async with aiohttp.ClientSession(headers={"User-Agent": "funding-arb-execution-open/0.1"}) as _sess:
-                _fresh = await asyncio.gather(
-                    fetch_orderbook_snapshot(_sess, venue=preview.maker_venue, symbol=signal.symbol, clip_usd=batch_clip_usd),
-                    fetch_orderbook_snapshot(_sess, venue=preview.taker_venue, symbol=signal.symbol, clip_usd=batch_clip_usd),
-                )
-            maker_book, taker_book = _fresh[0], _fresh[1]
-            gap_overridden = await check_pre_trade_price_gap(
-                maker_venue=preview.maker_venue,
-                taker_venue=preview.taker_venue,
-                maker_book=maker_book,
-                taker_book=taker_book,
-            )
-            maker_side, taker_side = execution_sides_for_signal(
-                maker_venue=preview.maker_venue,
-                short_venue=signal.short_venue,
-                long_venue=signal.long_venue,
-            )
-            use_maker_orderbook = None if preview.maker_venue == "variational" else maker_book
+        return await execute_open_clip(
+            symbol=signal.symbol,
+            short_venue=signal.short_venue,
+            long_venue=signal.long_venue,
+            maker_venue=preview.maker_venue,
+            taker_venue=preview.taker_venue,
+            leverage=leverage,
+            clip_size=clip_size,
+            clip_usd=clip_usd,
+            batch_clip_size=batch_clip_size,
+            broker_url=broker_url,
+        )
 
-            async def _refresh_open_maker_price() -> str:
-                async with aiohttp.ClientSession(headers={"User-Agent": "funding-arb-execution-open/0.1"}) as _s:
-                    fresh_book = await fetch_orderbook_snapshot(_s, venue=preview.maker_venue, symbol=signal.symbol, clip_usd=batch_clip_usd)
-                return passive_limit_price_from_orderbook(fresh_book, maker_side)
+    async def run_batches(*, broker_url: str | None = None) -> dict:
+        # The real per-batch execution (execute_one_batch) is unchanged; the
+        # order_service loop only adds progress reporting (and interval/debounce
+        # which the CLI leaves at 0, preserving prior behavior).
+        def _make_run_batch(bound_broker_url):
+            async def _run_batch(this_clip: Decimal) -> dict:
+                return await execute_one_batch(broker_url=bound_broker_url, batch_clip_size=this_clip)
+            return _run_batch
 
-            async def _refresh_variational_open_maker_price() -> str:
-                return await maker_adapter.get_limit_price_preview(symbol=signal.symbol)
-
-            if preview.maker_venue == "variational":
-                open_price_refresher = _refresh_variational_open_maker_price
-            else:
-                open_price_refresher = _refresh_open_maker_price
-
-            taker_pre_hook = None
-            prepare_fn = getattr(taker_adapter, "prepare_market_order", None)
-            if preview.taker_venue == "variational" and callable(prepare_fn):
-                async def _prepare_open_taker():
-                    await prepare_fn(symbol=signal.symbol, side=taker_side, amount=str(batch_clip_size), clip_usd=batch_clip_usd)
-                taker_pre_hook = _prepare_open_taker
-
-            result = await execute_single_clip(
-                symbol=signal.symbol,
-                clip_usd=batch_clip_usd,
-                quantity=batch_clip_size,
-                maker_venue=preview.maker_venue,
-                taker_venue=preview.taker_venue,
-                short_venue=signal.short_venue,
-                long_venue=signal.long_venue,
-                maker_adapter=maker_adapter,
-                taker_adapter=taker_adapter,
-                max_hedge_retries=0,
-                state_machine=ExecutionStateMachine(),
-                maker_orderbook=use_maker_orderbook,
-                taker_orderbook=taker_book,
-                require_maker_fill_confirmation=True,
-                maker_fill_timeout_seconds=MAKER_FILL_TIMEOUT_SECONDS,
-                max_maker_reprice_attempts=MAKER_REPRICE_ATTEMPTS,
-                maker_reprice_min_change_pct=(
-                    VARIATIONAL_MAKER_REPRICE_MIN_CHANGE_PCT
-                    if preview.maker_venue == "variational"
-                    else 0.0
-                ),
-                maker_price_refresher=open_price_refresher,
-                taker_pre_hook=taker_pre_hook,
-                max_execution_price_gap_pct=float("inf") if gap_overridden else MAX_PRE_TRADE_PRICE_GAP,
-            )
-            if result.get("ok", False):
-                strategy_id = await record_open_execution_from_live_positions(
-                    execution_result=result,
-                    adapters_by_venue={
-                        preview.maker_venue: maker_adapter,
-                        preview.taker_venue: taker_adapter,
-                    },
-                    symbol=signal.symbol,
-                    short_venue=signal.short_venue,
-                    long_venue=signal.long_venue,
-                )
-                result["recorded_strategy_id"] = strategy_id
-                print(f"position_registry recorded strategy_id={strategy_id}")
-            return result
-        finally:
-            await close_adapter_if_supported(maker_adapter)
-            if taker_adapter is not maker_adapter:
-                await close_adapter_if_supported(taker_adapter)
-
-    async def run_batches(*, broker_url: str | None = None) -> None:
-        remaining = total_size
-        batch_idx = 0
-        while remaining > 0:
-            batch_idx += 1
-            this_clip = min(clip_size, remaining)
-            print(f"\nbatch {batch_idx}/{num_batches}  clip_size_token={this_clip}")
-            result = await execute_one_batch(broker_url=broker_url, batch_clip_size=this_clip)
-            print_execution_prices(result, maker_venue=preview.maker_venue, taker_venue=preview.taker_venue)
-            if not result.get("ok", False):
-                raise RuntimeError(f"batch {batch_idx} failed — stopping")
-            executed_quantity = Decimal(str(result.get("executed_quantity") or this_clip))
-            if executed_quantity <= 0:
-                raise RuntimeError(f"batch {batch_idx} executed zero quantity — stopping")
-            remaining = max(Decimal("0"), remaining - executed_quantity)
-        print(f"\nopen complete: {batch_idx} batch(es) executed")
+        return await run_batched_execution(
+            symbol=signal.symbol,
+            total_size=total_size,
+            clip_size=clip_size,
+            batch_count=num_batches,
+            clip_usd=preview.clip_usd,
+            venues=[preview.maker_venue, preview.taker_venue],
+            interval_ms=0,
+            debounce_ms=0,
+            run_batch=_make_run_batch(broker_url),
+            on_progress=progress_printer(),
+            deps=Deps(),
+        )
 
     if "variational" in {preview.maker_venue, preview.taker_venue}:
         print(
@@ -709,9 +746,11 @@ async def run_open_execution_once(
             print("extension connected — waiting for portfolio data...")
             await server.wait_for_portfolio(timeout_seconds=15.0)
             print("portfolio data received")
-            await run_batches(broker_url=server.ws_url)
+            _open_result = await run_batches(broker_url=server.ws_url)
     else:
-        await run_batches()
+        _open_result = await run_batches()
+    if not _open_result.get("ok", False):
+        raise RuntimeError(_open_result.get("error", "open execution failed"))
 
 
 async def run_close_execution_once(*, cli_ticker: str | None = None) -> None:

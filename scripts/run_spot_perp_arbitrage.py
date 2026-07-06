@@ -29,6 +29,7 @@ from hydra_basis.execution_engine.market_data import (
     fetch_orderbook_snapshot,
 )
 from hydra_basis.execution_engine.mexc_spot_adapter import MexcSpotExecutionAdapter
+from hydra_basis.execution_engine.order_service import Deps, progress_printer, run_batched_execution
 from hydra_basis.execution_engine.risk import compute_spread_pct
 from hydra_basis.execution_engine.state_machine import ExecutionStateMachine
 from hydra_basis.execution_engine.variational_broker import VariationalCommandBrokerServer
@@ -599,18 +600,15 @@ async def run_spot_perp_arbitrage() -> None:
         return
 
     async def execute_batches(*, broker_url: str | None = None) -> dict[str, object]:
-        remaining = total_size
-        batch_index = 0
-        last_result: dict[str, object] = {"ok": True}
-        reference_spot_book = spot_book
-        reference_perp_book = perp_book
-        while remaining > 0:
-            batch_index += 1
-            this_clip_size = min(clip_size, remaining)
+        # The per-batch spot-perp execution is unchanged; order_service only drives
+        # the loop (progress + interval/debounce, left at 0 here to match prior CLI).
+        reference_books = [spot_book, perp_book]
+
+        async def _run_batch(this_clip_size: Decimal) -> dict[str, object]:
             estimated_clip_usd = estimate_clip_usd_from_books(
                 clip_size=this_clip_size,
-                spot_book=reference_spot_book,
-                perp_book=reference_perp_book,
+                spot_book=reference_books[0],
+                perp_book=reference_books[1],
             )
             assert_min_spot_perp_notional(clip_size=this_clip_size, clip_usd=estimated_clip_usd)
             fresh_spot_book, fresh_perp_book = await fetch_plan_books(
@@ -618,8 +616,8 @@ async def run_spot_perp_arbitrage() -> None:
                 short_venue=short_venue,
                 clip_usd=estimated_clip_usd,
             )
-            reference_spot_book = fresh_spot_book
-            reference_perp_book = fresh_perp_book
+            reference_books[0] = fresh_spot_book
+            reference_books[1] = fresh_perp_book
             batch_plan = build_spot_perp_plan(
                 symbol=symbol,
                 mode=mode,
@@ -630,27 +628,36 @@ async def run_spot_perp_arbitrage() -> None:
                 perp_book=fresh_perp_book,
             )
             assert_min_spot_perp_notional(clip_size=this_clip_size, clip_usd=batch_plan.clip_usd)
-            print(f"\nbatch {batch_index}/{num_batches}  clip_size_token={decimal_to_plain(this_clip_size)}")
             print(f"estimated_clip_usd: {batch_plan.clip_usd:.2f}")
             print(f"maker: {batch_plan.maker_venue} {batch_plan.maker_side} limit price={batch_plan.maker_price}")
             print(f"taker: {batch_plan.taker_venue} {batch_plan.taker_side} market")
             print(f"pre_trade_price_gap: {float(batch_plan.maker_taker_price_gap_pct):.2%}")
-            last_result = await execute_spot_perp_plan(
+            result = await execute_spot_perp_plan(
                 plan=batch_plan,
                 leverage=leverage,
                 broker_url=broker_url,
                 allow_large_price_gap=allow_large_price_gap,
             )
-            for line in format_spot_perp_execution_summary(plan=batch_plan, result=last_result):
+            for line in format_spot_perp_execution_summary(plan=batch_plan, result=result):
                 print(line)
-            if not last_result.get("ok", False):
-                raise RuntimeError(f"batch {batch_index} failed — stopping")
-            executed_quantity = Decimal(str(last_result.get("executed_quantity") or this_clip_size))
-            if executed_quantity <= 0:
-                raise RuntimeError(f"batch {batch_index} executed zero quantity — stopping")
-            remaining = max(Decimal("0"), remaining - executed_quantity)
-        print(f"\nspot-perp complete: {batch_index} batch(es) executed")
-        return last_result
+            return result
+
+        result = await run_batched_execution(
+            symbol=symbol,
+            total_size=total_size,
+            clip_size=clip_size,
+            batch_count=num_batches,
+            clip_usd=plan.clip_usd,
+            venues=[plan.maker_venue, plan.taker_venue],
+            interval_ms=0,
+            debounce_ms=0,
+            run_batch=_run_batch,
+            on_progress=progress_printer(include_filled=False),
+            deps=Deps(),
+        )
+        if not result.get("ok", False):
+            raise RuntimeError(result.get("error", "spot-perp execution failed"))
+        return result
 
     if "variational" in {plan.maker_venue, plan.taker_venue}:
         print(

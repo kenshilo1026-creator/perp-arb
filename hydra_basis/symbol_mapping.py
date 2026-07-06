@@ -27,6 +27,14 @@ def load_symbol_mappings(path: str = str(DEFAULT_SYMBOL_MAPPINGS_PATH)) -> dict:
             for venue, mappings in (payload.get("venues") or {}).items()
             if isinstance(mappings, dict)
         },
+        "venue_symbols": {
+            str(venue).lower(): {
+                str(canonical).upper(): str(native).upper()
+                for canonical, native in mappings.items()
+            }
+            for venue, mappings in (payload.get("venue_symbols") or {}).items()
+            if isinstance(mappings, dict)
+        },
     }
 
 
@@ -38,3 +46,10 @@ def canonicalize_symbol(symbol: str, *, venue: str | None = None) -> str:
         if normalized in venue_map:
             return venue_map[normalized]
     return mappings["global"].get(normalized, normalized)
+
+
+def venue_symbol(symbol: str, *, venue: str) -> str:
+    normalized = str(symbol).upper()
+    mappings = load_symbol_mappings()
+    venue_map = mappings.get("venue_symbols", {}).get(str(venue).lower(), {})
+    return venue_map.get(normalized, normalized)

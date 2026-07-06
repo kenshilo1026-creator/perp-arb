@@ -9,6 +9,7 @@ from urllib.parse import urlencode
 
 import aiohttp
 
+from hydra_basis.symbol_mapping import canonicalize_symbol, venue_symbol
 from hydra_basis.execution_engine.order_fill import poll_until_filled
 
 
@@ -136,7 +137,7 @@ class MexcSpotExecutionAdapter:
                 return data
 
     def _spot_symbol(self, symbol: str) -> str:
-        normalized = symbol.strip().upper()
+        normalized = venue_symbol(symbol, venue="mexc_spot")
         if normalized.endswith("USDT"):
             return normalized
         return f"{normalized}USDT"
@@ -240,7 +241,7 @@ class MexcSpotExecutionAdapter:
     async def get_open_position(self, *, symbol: str, market_type: str) -> dict | None:
         if market_type != "spot":
             raise RuntimeError("mexc spot live position query only supports spot")
-        asset = symbol.strip().upper()
+        asset = venue_symbol(symbol, venue="mexc_spot")
         account = await self._get_account()
         for item in account.get("balances", []):
             if str(item.get("asset", "")).strip().upper() != asset:
@@ -251,7 +252,7 @@ class MexcSpotExecutionAdapter:
             if quantity <= 0:
                 continue
             return {
-                "symbol": asset,
+                "symbol": canonicalize_symbol(asset, venue="mexc_spot"),
                 "market_type": "spot",
                 "side": "LONG",
                 "quantity": format(quantity.normalize(), "f"),
@@ -274,7 +275,7 @@ class MexcSpotExecutionAdapter:
             positions.append(
                 {
                     "venue": "mexc_spot",
-                    "symbol": asset,
+                    "symbol": canonicalize_symbol(asset, venue="mexc_spot"),
                     "market_type": "spot",
                     "side": "LONG",
                     "quantity": format(quantity.normalize(), "f"),

@@ -78,7 +78,7 @@ from hydra_basis.backfill import (
 )
 from hydra_basis.runtime import configure_windows_event_loop_policy
 from hydra_basis.execution_engine.market_data import fetch_tradexyz_orderbook
-from hydra_basis.symbol_mapping import canonicalize_symbol, load_symbol_mappings
+from hydra_basis.symbol_mapping import canonicalize_symbol, load_symbol_mappings, venue_symbol
 from hydra_basis.universe import build_symbol_venue_index, select_shared_symbols
 from hydra_basis.universe import symbols_requiring_complete_history
 from scripts._bootstrap import ensure_project_root_on_path
@@ -294,6 +294,11 @@ class SymbolMappingTests(unittest.TestCase):
     def test_load_symbol_mappings_normalizes_case(self) -> None:
         mappings = load_symbol_mappings()
         self.assertEqual(mappings["global"]["KPEPE"], "PEPE")
+
+    def test_venue_symbol_uses_native_exchange_mapping(self) -> None:
+        self.assertEqual(venue_symbol("ASPECTA", venue="mexc_spot"), "ASP")
+        self.assertEqual(canonicalize_symbol("ASP", venue="mexc_spot"), "ASPECTA")
+        self.assertEqual(venue_symbol("ASPECTA", venue="variational"), "ASPECTA")
 
 
 class LighterAdapterTests(unittest.IsolatedAsyncioTestCase):

@@ -9,7 +9,7 @@ from unittest import mock
 
 from hydra_basis.config import EXECUTION_VENUES_PATH, MONITOR_SIGNALS_PATH
 from hydra_basis.execution_engine.interfaces import FakeExecutionAdapter
-from hydra_basis.execution_engine.market_data import select_variational_quote_fields
+from hydra_basis.execution_engine.market_data import fetch_mexc_spot_orderbook, select_variational_quote_fields
 from hydra_basis.execution_engine.models import ExecutionPreview, ExecutionRequest, ExecutionSignal
 from hydra_basis.execution_engine.orderbook_spread_store import OrderbookSpreadStore
 from hydra_basis.execution_engine.runtime import estimate_clip_usd_from_size
@@ -126,6 +126,25 @@ class ExecutionConfigTests(unittest.TestCase):
         self.assertIn("成交均價", text)
         self.assertNotIn("details", text)
         self.assertNotIn("very", text)
+
+
+class MexcSpotOrderbookTests(unittest.IsolatedAsyncioTestCase):
+    async def test_fetch_mexc_spot_orderbook_uses_native_symbol_mapping(self) -> None:
+        calls: list[dict] = []
+
+        async def fake_fetch_json(session, method, url, **kwargs):
+            calls.append({"method": method, "url": url, **kwargs})
+            return {
+                "bids": [["1.23", "10"]],
+                "asks": [["1.24", "11"]],
+            }
+
+        with mock.patch("hydra_basis.execution_engine.market_data.fetch_json", new=fake_fetch_json):
+            book = await fetch_mexc_spot_orderbook(session=object(), symbol="ASPECTA")
+
+        self.assertEqual(calls[0]["params"]["symbol"], "ASPUSDT")
+        self.assertEqual(book["bid"], 1.23)
+        self.assertEqual(book["ask"], 1.24)
 
 
 class MonitorSignalStoreTests(unittest.TestCase):
@@ -1978,6 +1997,24 @@ class MexcSpotExecutionAdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(calls[0]["type"], "MARKET")
         self.assertEqual(calls[0]["quantity"], "0.1")
 
+    async def test_place_market_order_uses_mexc_spot_native_symbol_mapping(self) -> None:
+        calls: list[dict] = []
+
+        class Adapter(MexcSpotExecutionAdapter):
+            async def _post_order(self, params: dict) -> dict:
+                calls.append(dict(params))
+                return {"orderId": "spot-1"}
+
+        result = await Adapter(api_key="k", api_secret="s").place_market_order(
+            symbol="ASPECTA",
+            side="BUY",
+            amount="10",
+            clip_usd=0.0,
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(calls[0]["symbol"], "ASPUSDT")
+
     async def test_place_limit_order_posts_spot_limit_price(self) -> None:
         calls: list[dict] = []
 
@@ -2073,6 +2110,20 @@ class MexcSpotExecutionAdapterTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(position["side"], "LONG")
         self.assertEqual(position["quantity"], "0.3")
+
+    async def test_mexc_spot_get_open_position_maps_native_asset_to_canonical_symbol(self) -> None:
+        class Adapter(MexcSpotExecutionAdapter):
+            async def _get_account(self) -> dict:
+                return {
+                    "balances": [
+                        {"asset": "ASP", "free": "10", "locked": "0"},
+                    ]
+                }
+
+        position = await Adapter(api_key="k", api_secret="s").get_open_position(symbol="ASPECTA", market_type="spot")
+
+        self.assertEqual(position["symbol"], "ASPECTA")
+        self.assertEqual(position["quantity"], "10")
 
 
 class AsterOrderFillWatcherTests(unittest.IsolatedAsyncioTestCase):

@@ -12,7 +12,7 @@ from hydra_basis.adapters.lighter import fetch_lighter_market_map
 from hydra_basis.adapters.mexc import mexc_contract_symbol
 from hydra_basis.adapters.tradexyz import fetch_tradexyz_universe
 from hydra_basis.adapters.variational import VARIATIONAL_BASE_URL
-from hydra_basis.symbol_mapping import canonicalize_symbol
+from hydra_basis.symbol_mapping import canonicalize_symbol, venue_symbol
 
 
 async def fetch_orderbook_snapshot(
@@ -39,7 +39,7 @@ async def fetch_orderbook_snapshot(
 
 
 async def fetch_mexc_spot_orderbook(session: aiohttp.ClientSession, symbol: str) -> dict[str, float | int]:
-    spot_symbol = symbol.strip().upper()
+    spot_symbol = venue_symbol(symbol, venue="mexc_spot")
     if not spot_symbol.endswith("USDT"):
         spot_symbol = f"{spot_symbol}USDT"
     data = await fetch_json(

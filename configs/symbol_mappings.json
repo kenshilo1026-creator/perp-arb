@@ -20,9 +20,17 @@
     "hyperliquid": {},
     "lighter": {},
     "mexc": {},
+    "mexc_spot": {
+      "ASP": "ASPECTA"
+    },
     "aster": {},
     "variational": {
       "XCU": "COPPER"
+    }
+  },
+  "venue_symbols": {
+    "mexc_spot": {
+      "ASPECTA": "ASP"
     }
   }
 }

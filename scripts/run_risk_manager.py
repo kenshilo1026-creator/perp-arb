@@ -74,7 +74,9 @@ from hydra_basis.risk_management.supervisor import supervise
 load_environment()
 
 RECONCILIATION_INTERVAL_SECONDS = 60
-FUNDING_CHECK_MINUTE = 1
+# Funding rate is checked twice per hour, a minute before each half hour so the
+# reading is as close as possible to the :00 / :30 funding settlement boundaries.
+FUNDING_CHECK_MINUTES = (29, 59)
 DISPLAY_MIN_POSITION_QUANTITY = Decimal("1")
 
 
@@ -129,21 +131,39 @@ def format_emergency_risk_message(*, result: dict[str, object], mode: str) -> st
     ]
     manual_ids = result.get("manual_leg_ids") or []
     if manual_ids:
-        lines.append("注意: Variational 需要手動平倉，系統不會用 browser 在 VPS 自動操作。")
+        closed_ids = result.get("closed_leg_ids") or []
+        failed_ids = result.get("failed_leg_ids") or []
+        if closed_ids or failed_ids:
+            # The hedge leg was closed (or failed) but the Variational leg cannot
+            # be auto-closed on the Ubuntu VPS (no Chrome), so the position is now
+            # one-sided/naked with open directional risk. Make this scream.
+            lines.append(
+                "🚨🚨 單邊裸倉風險: 對沖腿已平/處理，Variational 腿仍開倉，"
+                "目前為單邊方向性風險，請立即手動平倉 Variational!"
+            )
+        lines.append(
+            "注意: Variational 需要手動平倉，Ubuntu VPS 無法用 browser 自動操作。"
+        )
+        lines.append(f"需手動平倉的 Variational 腿: {manual_ids}")
     return "\n".join(lines)
 
 
-def seconds_until_next_hourly_minute(
+def seconds_until_next_scheduled_minute(
     *,
     now: dt.datetime | None = None,
-    minute: int = FUNDING_CHECK_MINUTE,
+    minutes: tuple[int, ...] = FUNDING_CHECK_MINUTES,
 ) -> float:
     current = now or dt.datetime.now().astimezone()
     if current.tzinfo is None:
         current = current.astimezone()
-    target = current.replace(minute=minute, second=0, microsecond=0)
-    if target <= current:
-        target += dt.timedelta(hours=1)
+    candidates: list[dt.datetime] = []
+    for hour_offset in (0, 1):
+        base = (current + dt.timedelta(hours=hour_offset)).replace(second=0, microsecond=0)
+        for minute in minutes:
+            candidate = base.replace(minute=minute)
+            if candidate > current:
+                candidates.append(candidate)
+    target = min(candidates)
     return max(0.0, (target - current).total_seconds())
 
 
@@ -189,6 +209,68 @@ def format_funding_position_summary(
     if not has_rows:
         lines.append("沒有 open perp position 需要檢查資費。")
     return "\n".join(lines)
+
+
+def build_net_negative_funding_alerts(
+    *,
+    registry: PositionRegistry,
+    projected_rates_by_strategy: dict[str, list[ProjectedFundingRate]],
+    mode: str,
+) -> list[str]:
+    """Alert when a strategy's net funding cashflow is negative.
+
+    ``funding_cashflow_pct`` is positive when a leg *receives* funding and
+    negative when it *pays*. Because venues settle funding on different
+    intervals (e.g. 8h vs 1h), each leg's cashflow is first normalized to a
+    per-hour rate (``cashflow / interval_hours``) so the two sides are compared
+    on the same time base before summing. If the per-hour net is negative the
+    arb is bleeding funding overall (e.g. long Aster -0.01% earns while short
+    Lighter -0.02% pays more), which warrants an immediate heads-up.
+    """
+    alerts: list[str] = []
+    for strategy_id in registry.open_strategy_ids():
+        legs = [
+            leg
+            for leg in registry.legs_for_strategy(strategy_id)
+            if leg.status == "open"
+            and leg.market_type != "spot"
+            and should_display_position_quantity(leg.quantity)
+        ]
+        if len(legs) < 2:
+            continue
+        rates = {row.leg_id: row for row in projected_rates_by_strategy.get(strategy_id, [])}
+        leg_rows: list[tuple[PositionLeg, ProjectedFundingRate, float]] = []
+        missing = False
+        for leg in legs:
+            rate = rates.get(leg.leg_id)
+            if rate is None or rate.interval_hours <= 0:
+                missing = True
+                break
+            hourly_cashflow = funding_cashflow_pct(side=leg.side, funding_rate=rate.funding_rate) / rate.interval_hours
+            leg_rows.append((leg, rate, hourly_cashflow))
+        if missing or not leg_rows:
+            continue
+        net_hourly = sum(hourly for _, _, hourly in leg_rows)
+        if net_hourly >= 0:
+            continue
+        detail_lines = [
+            f"  {leg.venue} {leg.side} "
+            f"rate={rate.funding_rate:.6%}/{rate.interval_hours:g}h "
+            f"hourly={hourly:.6%}/h leg={leg.leg_id}"
+            for leg, rate, hourly in leg_rows
+        ]
+        alerts.append(
+            "\n".join(
+                [
+                    "⚠️ 資費淨值為負（已換算每小時）",
+                    f"- {format_position_pair_summary(legs)}",
+                    f"strategy={strategy_id} net_hourly={net_hourly:.6%}/h",
+                    *detail_lines,
+                    f"mode={mode}",
+                ]
+            )
+        )
+    return alerts
 
 
 def build_closers() -> dict[str, object]:
@@ -774,8 +856,9 @@ async def run_risk_manager(*, venues: set[str], live: bool) -> None:
                 current_funding_cache_path=VARIATIONAL_CURRENT_FUNDING_CACHE_PATH,
             )
             while True:
-                sleep_seconds = seconds_until_next_hourly_minute()
-                print(f"funding risk next check in {sleep_seconds:.1f}s at minute {FUNDING_CHECK_MINUTE:02d}")
+                sleep_seconds = seconds_until_next_scheduled_minute()
+                check_minutes = ",".join(f":{m:02d}" for m in FUNDING_CHECK_MINUTES)
+                print(f"funding risk next check in {sleep_seconds:.1f}s at minutes {check_minutes}")
                 await asyncio.sleep(sleep_seconds)
                 async with registry_lock:
                     result = await process_funding_risk_once(
@@ -804,6 +887,13 @@ async def run_risk_manager(*, venues: set[str], live: bool) -> None:
                 )
                 print(summary)
                 await send_telegram(summary)
+                for alert in build_net_negative_funding_alerts(
+                    registry=summary_registry,
+                    projected_rates_by_strategy=summary_rates,
+                    mode=mode,
+                ):
+                    print(alert)
+                    await send_telegram(alert)
 
     async def run_reconciliation_loop() -> None:
         while True:

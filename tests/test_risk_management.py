@@ -48,7 +48,8 @@ from scripts.run_risk_manager import (
     format_emergency_risk_message,
     format_funding_position_summary,
     reconciliation_result_requires_registry_save,
-    seconds_until_next_hourly_minute,
+    seconds_until_next_scheduled_minute,
+    build_net_negative_funding_alerts,
 )
 
 
@@ -244,6 +245,26 @@ class GlobalRiskManagementTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("event=ADL", message)
         self.assertIn("manual=['var-long']", message)
         self.assertIn("Variational 需要手動平倉", message)
+        # Hedge leg (mexc-spot) was closed while the variational leg stays open,
+        # so the alert must warn about the resulting one-sided/naked position.
+        self.assertIn("單邊裸倉風險", message)
+
+    def test_risk_manager_message_omits_naked_warning_when_nothing_was_closed(self) -> None:
+        message = format_emergency_risk_message(
+            result={
+                "event_type": "ADL",
+                "trigger_leg_id": "var-long",
+                "trigger_venue": "variational",
+                "trigger_symbol": "LAB",
+                "closed_leg_ids": [],
+                "failed_leg_ids": [],
+                "manual_leg_ids": ["var-long"],
+            },
+            mode="LIVE",
+        )
+
+        self.assertIn("Variational 需要手動平倉", message)
+        self.assertNotIn("單邊裸倉風險", message)
 
     async def test_missing_closer_marks_leg_close_failed(self) -> None:
         registry = PositionRegistry(
@@ -757,23 +778,102 @@ class FundingRiskRuntimeTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(funding_runtime.CURRENT_FUNDING_ONLY_VENUES, {"variational"})
 
-    def test_seconds_until_next_hourly_minute_targets_minute_one(self) -> None:
+    def test_seconds_until_next_scheduled_minute_targets_29_and_59(self) -> None:
         import datetime as dt
 
         tz = dt.timezone.utc
 
+        # 10:00:30 -> next mark is 10:29:00 (28m30s away).
         self.assertEqual(
-            seconds_until_next_hourly_minute(now=dt.datetime(2026, 6, 23, 10, 0, 30, tzinfo=tz)),
-            30.0,
+            seconds_until_next_scheduled_minute(now=dt.datetime(2026, 6, 23, 10, 0, 30, tzinfo=tz)),
+            1710.0,
         )
+        # 10:29:00 exactly -> already fired, next is 10:59:00 (30m away).
         self.assertEqual(
-            seconds_until_next_hourly_minute(now=dt.datetime(2026, 6, 23, 10, 1, 0, tzinfo=tz)),
-            3600.0,
+            seconds_until_next_scheduled_minute(now=dt.datetime(2026, 6, 23, 10, 29, 0, tzinfo=tz)),
+            1800.0,
         )
+        # 10:59:30 -> wraps to 11:29:00 (29m30s away).
         self.assertEqual(
-            seconds_until_next_hourly_minute(now=dt.datetime(2026, 6, 23, 10, 30, 0, tzinfo=tz)),
-            1860.0,
+            seconds_until_next_scheduled_minute(now=dt.datetime(2026, 6, 23, 10, 59, 30, tzinfo=tz)),
+            1770.0,
         )
+
+    def test_net_negative_funding_triggers_alert(self) -> None:
+        registry = PositionRegistry(
+            legs=[
+                PositionLeg("arb-neg", "a-long", "aster", "LAB", "perp", "LONG", "10", "open"),
+                PositionLeg("arb-neg", "l-short", "lighter", "LAB", "perp", "SHORT", "10", "open"),
+            ]
+        )
+        # long aster @ -0.01% -> earns (+0.01%); short lighter @ -0.02% -> pays (-0.02%);
+        # same 8h interval -> net = -0.01% -> negative -> alert.
+        rates = {
+            "arb-neg": [
+                ProjectedFundingRate(leg_id="a-long", funding_rate=-0.0001, interval_hours=8),
+                ProjectedFundingRate(leg_id="l-short", funding_rate=-0.0002, interval_hours=8),
+            ]
+        }
+
+        alerts = build_net_negative_funding_alerts(
+            registry=registry,
+            projected_rates_by_strategy=rates,
+            mode="LIVE",
+        )
+
+        self.assertEqual(len(alerts), 1)
+        self.assertIn("資費淨值為負", alerts[0])
+        self.assertIn("strategy=arb-neg", alerts[0])
+
+    def test_net_negative_funding_no_alert_when_net_positive(self) -> None:
+        registry = PositionRegistry(
+            legs=[
+                PositionLeg("arb-ok", "a-long", "aster", "LAB", "perp", "LONG", "10", "open"),
+                PositionLeg("arb-ok", "l-short", "lighter", "LAB", "perp", "SHORT", "10", "open"),
+            ]
+        )
+        # long aster @ -0.02% -> earns (+0.02%); short lighter @ +0.01% -> earns (+0.01%);
+        # net clearly positive -> no alert.
+        rates = {
+            "arb-ok": [
+                ProjectedFundingRate(leg_id="a-long", funding_rate=-0.0002, interval_hours=8),
+                ProjectedFundingRate(leg_id="l-short", funding_rate=0.0001, interval_hours=8),
+            ]
+        }
+
+        alerts = build_net_negative_funding_alerts(
+            registry=registry,
+            projected_rates_by_strategy=rates,
+            mode="LIVE",
+        )
+
+        self.assertEqual(alerts, [])
+
+    def test_net_negative_funding_normalizes_different_intervals_to_per_hour(self) -> None:
+        registry = PositionRegistry(
+            legs=[
+                PositionLeg("arb-iv", "a-long", "aster", "LAB", "perp", "LONG", "10", "open"),
+                PositionLeg("arb-iv", "l-short", "lighter", "LAB", "perp", "SHORT", "10", "open"),
+            ]
+        )
+        # long aster @ -0.10% earns +0.10% over 8h -> +0.0125%/h;
+        # short lighter @ -0.05% pays -0.05% over 1h -> -0.05%/h.
+        # Raw sum would be +0.05% (positive), but per-hour net is -0.0375%/h -> alert.
+        rates = {
+            "arb-iv": [
+                ProjectedFundingRate(leg_id="a-long", funding_rate=-0.0010, interval_hours=8),
+                ProjectedFundingRate(leg_id="l-short", funding_rate=-0.0005, interval_hours=1),
+            ]
+        }
+
+        alerts = build_net_negative_funding_alerts(
+            registry=registry,
+            projected_rates_by_strategy=rates,
+            mode="LIVE",
+        )
+
+        self.assertEqual(len(alerts), 1)
+        self.assertIn("每小時", alerts[0])
 
     def test_format_funding_position_summary_reports_existing_open_position_rates(self) -> None:
         registry = PositionRegistry(

@@ -1455,6 +1455,61 @@ class SpotPerpArbitrageRecordingTests(unittest.IsolatedAsyncioTestCase):
             ["maker_submit", "maker_wait", "maker_cancel", "maker_cancel", "maker_cancel"],
         )
 
+    async def test_missing_variational_cancel_button_does_not_place_taker(self) -> None:
+        calls: list[str] = []
+
+        class MakerAdapter:
+            async def place_limit_order(self, **kwargs):
+                calls.append("maker_submit")
+                return {"ok": True, "order_id": "maker-1", "raw": {"status": "NEW"}}
+
+            async def wait_for_order_fill(self, **kwargs):
+                calls.append("maker_wait")
+                raise RuntimeError("variational limit order fill timeout after 60s")
+
+            async def cancel_order(self, **kwargs):
+                calls.append("maker_cancel")
+                raise RuntimeError(
+                    "variational cancel_order failed for SNX: "
+                    "Could not identify cancel button for Variational order."
+                )
+
+        class TakerAdapter:
+            async def place_market_order(self, **kwargs):
+                calls.append("taker_market")
+                return {"ok": True, "order_id": "taker-1"}
+
+        with patch("asyncio.sleep", new=AsyncMock()):
+            with self.assertRaisesRegex(RuntimeError, "cancel failed"):
+                await execute_single_clip(
+                    symbol="SNX",
+                    clip_usd=690.0,
+                    quantity=Decimal("3000"),
+                    maker_venue="variational",
+                    taker_venue="hyperliquid",
+                    short_venue="hyperliquid",
+                    long_venue="variational",
+                    maker_adapter=MakerAdapter(),
+                    taker_adapter=TakerAdapter(),
+                    max_hedge_retries=1,
+                    state_machine=SimpleNamespace(
+                        to_preview_ready=lambda: None,
+                        to_awaiting_confirm=lambda: None,
+                        to_placing_maker_leg=lambda: None,
+                        to_hedging_taker_leg=lambda: None,
+                        to_completed=lambda: None,
+                        to_retrying_hedge=lambda: None,
+                        to_emergency_exit=lambda: None,
+                    ),
+                    require_maker_fill_confirmation=True,
+                    maker_fill_timeout_seconds=5.0,
+                    max_maker_reprice_attempts=1,
+                )
+
+        self.assertNotIn("taker_market", calls)
+        self.assertEqual(calls[:2], ["maker_submit", "maker_wait"])
+        self.assertEqual(calls.count("maker_cancel"), 6)
+
     async def test_task_cancellation_cleans_up_active_maker(self) -> None:
         calls: list[str] = []
 

@@ -357,7 +357,17 @@ class AsterExecutionAdapter:
             "symbol": raw_symbol,
             "orderId": str(order_id),
         })
-        data = await self._delete_signed_query(f"{self.BASE_URL}/fapi/v3/order", params)
+        try:
+            data = await self._delete_signed_query(f"{self.BASE_URL}/fapi/v3/order", params)
+        except RuntimeError as exc:
+            if "-2011" not in str(exc):
+                raise
+            # -2011 "Unknown order sent." means the order already left the book,
+            # usually because the remainder filled between the caller's last fill
+            # check and this cancel. Resolve the race by returning the terminal
+            # order state so callers can pick up the final executedQty.
+            status = await self._get_order_status(symbol=symbol, order_id=order_id)
+            return {"ok": True, "already_gone": True, "raw": status}
         return {"ok": True, "raw": data}
 
     async def ensure_isolated_margin(self, symbol: str) -> None:

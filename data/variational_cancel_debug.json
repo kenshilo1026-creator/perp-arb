@@ -1,16 +1,26 @@
 {
   "type": "CANCEL_RESULT",
-  "requestId": "3f1ef446-6c7c-4642-b775-745c37b3678c",
+  "requestId": "5c30c006-59dc-4133-8e8e-ccd8252d3bb4",
   "ok": false,
   "orderId": null,
   "error": "Could not identify cancel button for Variational order.",
   "details": {
     "automationVersion": "variational-order-automation-2026-06-05-2",
-    "amount": "8494",
+    "amount": "3000",
     "diagnostics": {
       "buttons": [
         {
-          "className": "disabled:opacity-50 items-center p-4 pt-5 text-blackwhite border-b-4 transition-all border-azure pointer-events-none disabled:text-azure/50 text-center h-full p",
+          "className": "overflow-hidden shrink-0 w-[26px] min-[1300px]:w-auto min-[1300px]:max-w-none",
+          "disabled": false,
+          "text": ""
+        },
+        {
+          "className": "",
+          "disabled": false,
+          "text": "Trade Trade"
+        },
+        {
+          "className": "h-8 max-h-8 px-2.5 py-1.5 text-xs bg-transparent text-tab-foreground-active rounded-md font-inter inline-flex items-center justify-center outline-none focus:out",
           "disabled": false,
           "text": "Trade Trade"
         },
@@ -20,7 +30,7 @@
           "text": "Portfolio Portfolio"
         },
         {
-          "className": "disabled:opacity-50 items-center p-4 pt-5 border-b-4 transition-all border-transparent text-blackwhite/80 hover:border-azure/50 disabled:pointer-events-none tex",
+          "className": "h-8 max-h-8 px-2.5 py-1.5 text-xs bg-transparent hover:bg-tab-background-hover text-tab-foreground rounded-md font-inter inline-flex items-center justify-center",
           "disabled": false,
           "text": "Portfolio Portfolio"
         },
@@ -30,17 +40,12 @@
           "text": "Markets Markets"
         },
         {
-          "className": "disabled:opacity-50 items-center p-4 pt-5 border-b-4 transition-all border-transparent text-blackwhite/80 hover:border-azure/50 disabled:pointer-events-none tex",
+          "className": "h-8 max-h-8 px-2.5 py-1.5 text-xs bg-transparent hover:bg-tab-background-hover text-tab-foreground rounded-md font-inter inline-flex items-center justify-center",
           "disabled": false,
           "text": "Markets Markets"
         },
         {
-          "className": "",
-          "disabled": false,
-          "text": "Rewards Rewards"
-        },
-        {
-          "className": "disabled:opacity-50 items-center p-4 pt-5 border-b-4 transition-all border-transparent text-blackwhite/80 hover:border-azure/50 disabled:pointer-events-none tex",
+          "className": "h-8 max-h-8 px-2.5 py-1.5 text-xs bg-transparent hover:bg-tab-background-hover text-tab-foreground rounded-md font-inter inline-flex items-center justify-center",
           "disabled": false,
           "text": "Rewards Rewards"
         },
@@ -50,7 +55,7 @@
           "text": "Points Points"
         },
         {
-          "className": "disabled:opacity-50 items-center p-4 pt-5 border-b-4 transition-all border-transparent text-blackwhite/80 hover:border-azure/50 disabled:pointer-events-none tex",
+          "className": "h-8 max-h-8 px-2.5 py-1.5 text-xs bg-transparent hover:bg-tab-background-hover text-tab-foreground rounded-md font-inter inline-flex items-center justify-center",
           "disabled": false,
           "text": "Points Points"
         },
@@ -60,7 +65,7 @@
           "text": "Leaderboard Leaderboard"
         },
         {
-          "className": "disabled:opacity-50 items-center p-4 pt-5 border-b-4 transition-all border-transparent text-blackwhite/80 hover:border-azure/50 disabled:pointer-events-none tex",
+          "className": "h-8 max-h-8 px-2.5 py-1.5 text-xs bg-transparent hover:bg-tab-background-hover text-tab-foreground rounded-md font-inter inline-flex items-center justify-center",
           "disabled": false,
           "text": "Leaderboard Leaderboard"
         },
@@ -70,248 +75,208 @@
           "text": "Competition Competition"
         },
         {
-          "className": "disabled:opacity-50 items-center p-4 pt-5 border-b-4 transition-all border-transparent text-blackwhite/80 hover:border-azure/50 disabled:pointer-events-none tex",
+          "className": "h-8 max-h-8 px-2.5 py-1.5 text-xs bg-transparent hover:bg-tab-background-hover text-tab-foreground rounded-md font-inter inline-flex items-center justify-center",
           "disabled": false,
           "text": "Competition Competition"
         },
         {
-          "className": "flex items-center gap-1 text-xs border-transparent hover:border-azure/50 border-0 border-b-4 text-blackwhite/80 text-nowrap pt-5 pb-4 px-2",
+          "className": "h-8 max-h-8 px-2.5 py-1.5 text-xs bg-transparent hover:bg-tab-background-hover text-tab-foreground rounded-md font-inter inline-flex items-center justify-center",
           "disabled": false,
-          "text": "More... More... Info"
+          "text": "More More"
         },
         {
-          "className": "min-h-8 h-8 px-3 py-1 bg-azure hover:bg-azure-200 focus:bg-azure-200 active:bg-azure-300 text-blackwhite-400 text-xs rounded-md items-center justify-center disa",
+          "className": "text-xs",
           "disabled": false,
-          "text": "Transfer Transfer"
+          "text": "Portfolio $10,525.31 Portfolio $10,525.31"
         },
         {
-          "className": "min-h-6 px-2 py-1 bg-none hover:bg-azure/12 focus:bg-azure/12 active:bg-azure/20 text-xs rounded-md flex items-center justify-center disabled:opacity-50 outline",
+          "className": "min-h-8 h-8 max-h-8 p-2 bg-button-primary-background hover:bg-button-primary-background-hover focus:bg-button-primary-background-hover active:bg-button-primary-",
           "disabled": false,
-          "text": "0x96Ba...38B3 0x96Ba...38B3 0x96Ba..."
+          "text": "Deposit Deposit"
         },
         {
-          "className": "min-h-8 bg-none hover:bg-azure/12 focus:bg-azure/12 active:bg-azure/20 text-xs rounded-md items-center justify-center disabled:opacity-50 outline-none focus:out",
+          "className": "min-w-8 min-h-8 h-8 max-h-8 p-2 hover:bg-button-secondary-background-hover border border-button-secondary-border text-button-secondary-foreground disabled:text-",
+          "disabled": false,
+          "text": "0x96...8B3 0x96...8B3"
+        },
+        {
+          "className": "min-w-8 min-h-8 max-h-8 p-2 hover:bg-button-secondary-background-hover border border-button-secondary-border text-button-secondary-foreground disabled:text-butt",
           "disabled": false,
           "text": "Link a mobile device"
         },
         {
-          "className": "min-h-6 bg-none hover:bg-azure/12 focus:bg-azure/12 active:bg-azure/20 text-xs rounded-md flex items-center justify-center disabled:opacity-50 outline-none focu",
+          "className": "min-w-8 min-h-8 max-h-8 p-2 hover:bg-button-secondary-background-hover border border-button-secondary-border text-button-secondary-foreground disabled:text-butt",
           "disabled": false,
-          "text": "Settings"
+          "text": ""
         },
         {
-          "className": "token-pill flex items-center gap-1 px-2 py-0.5 text-white outline-none rounded-md text-xl hover:bg-azure/12 cursor-pointer transition ease-in-out duration-300 m",
+          "className": "min-w-8 min-h-8 max-h-8 p-2 hover:bg-button-secondary-background-hover border border-button-secondary-border text-button-secondary-foreground disabled:text-butt",
           "disabled": false,
-          "text": "STABLE / STABLE / STABLE"
+          "text": ""
         },
         {
-          "className": "text-blackwhite/50 tooltip-link",
+          "className": "min-w-10 min-h-10 h-10 max-h-10 p-2 hover:bg-button-secondary-background-hover border border-button-secondary-border text-button-secondary-foreground disabled:t",
+          "disabled": false,
+          "text": "SNX SNX"
+        },
+        {
+          "className": "font-inter font-normal text-2xs leading-4 text-foreground-muted tooltip-link",
           "disabled": false,
           "text": "Mark Price Mark Price"
         },
         {
-          "className": "text-blackwhite/50 tooltip-link",
+          "className": "font-inter font-normal text-2xs leading-4 text-foreground-muted tooltip-link",
           "disabled": false,
           "text": "FDV FDV"
         },
         {
-          "className": "text-blackwhite/50 tooltip-link",
+          "className": "font-inter font-normal text-2xs leading-4 text-foreground-muted tooltip-link",
           "disabled": false,
           "text": "Open Interest Open Interest"
         },
         {
-          "className": "text-blackwhite/50 tooltip-link",
+          "className": "font-inter font-normal text-2xs leading-4 text-foreground-muted tooltip-link",
           "disabled": false,
-          "text": "4hr Funding / Countdown 4hr Funding / Countdown"
+          "text": "8hr Funding / Countdown 8hr Funding / Countdown"
         },
         {
           "className": "flex cursor-help",
           "disabled": false,
-          "text": "0.005% / 03:02:11 0.005% / 03:02:11"
+          "text": "0.01% / 07:30:10 0.01% / 07:30:10"
         },
         {
-          "className": "absolute bottom-0 left-0 right-0 h-2 md:h-1 cursor-ns-resize bg-transparent hover:bg-azure/50 transition-colors duration-200 group",
+          "className": "h-1 cursor-ns-resize bg-background-muted-trade hover:bg-foreground-muted-more-more hover:border-foreground-muted-more-more transition-colors duration-200 group ",
           "disabled": false,
           "text": ""
         },
         {
-          "className": "absolute bottom-0 left-1/2 transform -translate-x-1/2 w-8 h-2 md:h-1 bg-azure group-hover:bg-azure/50 transition-colors duration-200 rounded-full",
+          "className": "h-8 max-h-8 px-2.5 py-1.5 text-xs bg-transparent hover:bg-tab-background-hover text-tab-foreground rounded-md font-inter inline-flex items-center justify-center",
           "disabled": false,
-          "text": ""
+          "text": "Positions 3 Positions 3"
         },
         {
-          "className": "disabled:opacity-50 items-start px-2.5 py-1 rounded-md text-xs whitespace-nowrap bg-transparent hover:bg-azure/12 active:bg-azure/20 text-blackwhite/80 hover:te",
-          "disabled": false,
-          "text": "Positions (1) Positions (1)"
-        },
-        {
-          "className": "disabled:opacity-50 items-start px-2.5 py-1 rounded-md text-xs whitespace-nowrap bg-darkblue-300 text-azure pointer-events-none disabled:text-azure/50",
+          "className": "h-8 max-h-8 px-2.5 py-1.5 text-xs bg-transparent text-tab-foreground-active rounded-md font-inter inline-flex items-center justify-center outline-none focus:out",
           "disabled": false,
           "text": "Open Orders Open Orders"
         },
         {
-          "className": "disabled:opacity-50 items-start px-2.5 py-1 rounded-md text-xs whitespace-nowrap bg-transparent hover:bg-azure/12 active:bg-azure/20 text-blackwhite/80 hover:te",
+          "className": "h-8 max-h-8 px-2.5 py-1.5 text-xs bg-transparent hover:bg-tab-background-hover text-tab-foreground rounded-md font-inter inline-flex items-center justify-center",
+          "disabled": false,
+          "text": "Trades History Trades History"
+        },
+        {
+          "className": "h-8 max-h-8 px-2.5 py-1.5 text-xs bg-transparent hover:bg-tab-background-hover text-tab-foreground rounded-md font-inter inline-flex items-center justify-center",
           "disabled": false,
           "text": "Order History Order History"
         },
         {
-          "className": "disabled:opacity-50 items-start px-2.5 py-1 rounded-md text-xs whitespace-nowrap bg-transparent hover:bg-azure/12 active:bg-azure/20 text-blackwhite/80 hover:te",
+          "className": "h-8 max-h-8 px-2.5 py-1.5 text-xs bg-transparent hover:bg-tab-background-hover text-tab-foreground rounded-md font-inter inline-flex items-center justify-center",
           "disabled": false,
-          "text": "Trades Trades"
+          "text": "Funding History Funding History"
         },
         {
-          "className": "disabled:opacity-50 items-start px-2.5 py-1 rounded-md text-xs whitespace-nowrap bg-transparent hover:bg-azure/12 active:bg-azure/20 text-blackwhite/80 hover:te",
+          "className": "h-8 max-h-8 px-2.5 py-1.5 text-xs bg-transparent hover:bg-tab-background-hover text-tab-foreground rounded-md font-inter inline-flex items-center justify-center",
           "disabled": false,
-          "text": "Funding Funding"
+          "text": "Realized PNL Realized PNL"
         },
         {
-          "className": "disabled:opacity-50 items-start px-2.5 py-1 rounded-md text-xs whitespace-nowrap bg-transparent hover:bg-azure/12 active:bg-azure/20 text-blackwhite/80 hover:te",
-          "disabled": false,
-          "text": "Realized PnL Realized PnL"
-        },
-        {
-          "className": "disabled:opacity-50 items-start px-2.5 py-1 rounded-md text-xs whitespace-nowrap bg-transparent hover:bg-azure/12 active:bg-azure/20 text-blackwhite/80 hover:te",
-          "disabled": false,
-          "text": "Rewards Rewards"
-        },
-        {
-          "className": "menu-button flex items-center justify-between gap-1 p-0.5 pl-2.5 text-xs text-blackwhite outline-none rounded-md hover:bg-azure/12 disabled:pointer-events-none ",
+          "className": "min-h-8 h-8 p-2 text-2xs flex items-center justify-between gap-1 rounded-md border border-input-border hover:border-alpha-brand-brand-40 text-input-foreground b",
           "disabled": false,
           "text": "Instrument: All Instrument: All"
         },
         {
-          "className": "leading-4 col-span-1 text-ellipsis text-nowrap overflow-hidden max-w-full justify-self-end tooltip-link",
+          "className": "",
           "disabled": false,
-          "text": "Max Slippage Max Slippage"
+          "text": "Maximum Slippage Maximum Slippage"
         },
         {
-          "className": "min-h-8 h-8 px-3 py-1 bg-azure/5 hover:bg-azure/12 focus:bg-azure/12 active:bg-azure/20 text-xs rounded-md flex items-center justify-center disabled:opacity-50 ",
+          "className": "group pointer-events-none w-full",
+          "disabled": true,
+          "text": "Time (UTC+8) Time (UTC+8)"
+        },
+        {
+          "className": "min-w-8 min-h-8 h-8 max-h-8 p-2 hover:bg-button-secondary-background-hover border border-button-secondary-border text-button-secondary-foreground disabled:text-",
           "disabled": false,
           "text": "20X 20X"
         },
         {
-          "className": "min-h-8 h-8 px-3 py-1 bg-azure/5 hover:bg-azure/12 focus:bg-azure/12 active:bg-azure/20 text-blackwhite text-xs rounded-md flex items-center justify-center disa",
+          "className": "min-w-8 min-h-8 h-8 max-h-8 p-2 hover:bg-button-secondary-background-hover border border-button-secondary-border text-button-secondary-foreground disabled:text-",
           "disabled": false,
           "text": "Cross Cross"
         },
         {
-          "className": "p-0 text-center flex-1 bg-transparent text-blackwhite/80 hover:text-blackwhite truncate border-b-2 border-transparent",
+          "className": "h-8 max-h-8 px-2.5 py-1.5 text-xs bg-transparent hover:bg-tab-background-hover text-tab-foreground rounded-md font-inter inline-flex items-center justify-center",
           "disabled": false,
           "text": "Market Market"
         },
         {
-          "className": "p-0 text-center flex-1 bg-transparent hover:text-blackwhite truncate text-blackwhite border-b-2 border-azure pointer-events-none",
+          "className": "h-8 max-h-8 px-2.5 py-1.5 text-xs bg-transparent text-tab-foreground-active rounded-md font-inter inline-flex items-center justify-center outline-none focus:out",
           "disabled": false,
           "text": "Limit Limit"
         },
         {
-          "className": "menu-button flex items-center gap-1 text-xs outline-none disabled:pointer-events-none flex-1 sm:flex-none p-0 bg-transparent hover:bg-transparent hover:text-bla",
+          "className": "min-w-8 min-h-8 h-8 p-2 gap-1 rounded-md border-input-border hover:border-alpha-brand-brand-40 outline-none focus:outline-none disabled:pointer-events-none disa",
           "disabled": false,
           "text": "Pro Pro"
         },
         {
-          "className": "flex flex-1 items-center justify-center rounded-md flex-col group-disabled:pointer-events-none px-2 py-0.5 bg-transparent border border-green text-green fill-gr",
-          "disabled": true,
-          "text": "Buy $0.03455 Buy $0.03455"
-        },
-        {
-          "className": "flex flex-1 items-center justify-center rounded-md flex-col group-disabled:pointer-events-none px-2 py-0.5 text-blackwhite/80 fill-blackwhite/80 border border-t",
+          "className": "min-w-10 min-h-10 h-10 max-h-10 p-2 bg-button-primary-affirmative-background focus:bg-button-primary-affirmative-background-hover active:bg-button-primary-affir",
           "disabled": false,
-          "text": "Sell $0.03444 Sell $0.03444"
+          "text": "Buy $0.2309 Buy $0.2309"
         },
         {
-          "className": "text-azure enabled:hover:text-blackwhite disabled:text-blackwhite/50",
+          "className": "min-w-10 min-h-10 h-10 max-h-10 p-2 disabled:bg-button-primary-destructive-background-disabled border disabled:text-button-primary-destructive-foreground-disabl",
+          "disabled": false,
+          "text": "Sell $0.2306 Sell $0.2306"
+        },
+        {
+          "className": "link disabled:text-foreground-muted-more",
           "disabled": false,
           "text": "Mid Mid"
         },
         {
-          "className": "flex items-center justify-end text-blackwhite/80 enabled:hover:text-blackwhite hover:text-blackwhite gap-1 disabled:text-blackwhite/50",
+          "className": "flex items-center justify-end text-alpha-foreground-foreground-80 enabled:hover:text-foreground-foreground hover:text-foreground-foreground gap-1 disabled:text-",
           "disabled": false,
-          "text": "STABLE STABLE STABLE"
+          "text": "SNX SNX SNX"
         },
         {
-          "className": "group flex gap-2 disabled:opacity-50 enabled:hover:text-blackwhite",
+          "className": "group inline-block relative outline-none focus-visible:outline-none shrink-0 cursor-pointer",
+          "disabled": false,
+          "text": ""
+        },
+        {
+          "className": "group inline-block relative outline-none focus-visible:outline-none shrink-0 cursor-pointer",
+          "disabled": false,
+          "text": ""
+        },
+        {
+          "className": "min-w-8 min-h-8 h-8 max-h-8 p-2 bg-button-primary-affirmative-background focus:bg-button-primary-affirmative-background-hover active:bg-button-primary-affirmati",
           "disabled": true,
-          "text": "Reduce Only Reduce Only Reduce Only - No Short STABLE Position"
+          "text": "Enter Size Enter Size"
         },
         {
-          "className": "inline-block relative",
-          "disabled": true,
-          "text": ""
-        },
-        {
-          "className": "group flex gap-2 disabled:opacity-50 enabled:hover:text-blackwhite",
+          "className": "flex items-center gap-1 cursor-pointer group text-link-default hover:text-link-default-hover text-2xs",
           "disabled": false,
-          "text": "Take Profit / Stop Loss Take Profit / Stop Loss Take Profit / Stop Loss"
-        },
-        {
-          "className": "inline-block relative",
-          "disabled": false,
-          "text": ""
-        },
-        {
-          "className": "min-h-8 h-8 px-3 py-1 text-blackwhite-400 text-xs rounded-md flex items-center justify-center disabled:opacity-50 outline-none focus:outline-none bg-green hover",
-          "disabled": false,
-          "text": "Buy STABLE Buy STABLE"
-        },
-        {
-          "className": "flex items-center gap-1 cursor-pointer text-azure group",
-          "disabled": false,
-          "text": "Max: 0.3% Max: 0.3%"
+          "text": "Est: 0.09% / Max: 0.3% Est: 0.09% / Max: 0.3%"
         },
         {
           "className": "",
           "disabled": false,
-          "text": "https://www.coingecko.com/en/coins/stable-2"
-        },
-        {
-          "className": "flex relative h-2 w-2 cursor-help",
-          "disabled": false,
-          "text": ""
-        },
-        {
-          "className": "",
-          "disabled": false,
-          "text": "Join our Discord community"
-        },
-        {
-          "className": "",
-          "disabled": false,
-          "text": "Follow us on Twitter"
-        },
-        {
-          "className": "",
-          "disabled": false,
-          "text": "View our documentation on GitBook"
-        },
-        {
-          "className": "link text-center ml-5",
-          "disabled": false,
-          "text": "Terms of Service Terms of Service View our Terms of Service"
-        },
-        {
-          "className": "link text-center",
-          "disabled": false,
-          "text": "Privacy Policy Privacy Policy View our Privacy Policy"
-        },
-        {
-          "className": "link text-center",
-          "disabled": false,
-          "text": "Restricted Person Restricted Person View Restricted Persons information"
-        },
-        {
-          "className": "flex items-center gap-x-1 link text-center help-button-class",
-          "disabled": false,
-          "text": "Help & Support Help & Support"
+          "text": "https://www.coingecko.com/en/coins/havven"
         }
       ],
-      "rows": [],
-      "title": "0.03450 | STABLE-PERP | Variational Omni",
-      "url": "https://omni.variational.io/perpetual/STABLE"
+      "rows": [
+        {
+          "actionCount": 1,
+          "text": "Instrument Side Qty Status Type Trigger Maximum Slippage Close Only ID Time (UTC+8) Instrument Side Qty Status Type Trigger Maximum Slippage Close Only ID Time (UTC+8)"
+        }
+      ],
+      "title": "0.2307 | SNX-PERP | Variational Omni",
+      "url": "https://omni.variational.io/perpetual/SNX"
     },
     "orderId": null,
     "side": "buy",
-    "symbol": "STABLE"
+    "symbol": "SNX"
   },
-  "timestamp": "2026-07-04T08:57:48.434Z"
+  "timestamp": "2026-07-11T16:29:50.341Z"
 }

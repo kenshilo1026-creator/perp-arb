@@ -1614,6 +1614,53 @@ class SingleClipExecutorTests(unittest.IsolatedAsyncioTestCase):
             ["maker_submit_1", "wait_maker-1", "cancel_maker-1", "maker_submit_2", "wait_maker-2", "taker_market"],
         )
 
+    async def test_execute_single_clip_does_not_assume_fill_when_cancel_button_is_missing(self) -> None:
+        calls: list[str] = []
+
+        class MakerAdapter:
+            async def place_limit_order(self, **kwargs):
+                calls.append("maker_submit")
+                return {"ok": True, "order_id": "maker-1", "raw": {"status": "NEW"}}
+
+            async def wait_for_order_fill(self, **kwargs):
+                calls.append("maker_wait")
+                raise RuntimeError("maker fill timeout")
+
+            async def cancel_order(self, **kwargs):
+                calls.append("maker_cancel")
+                raise RuntimeError(
+                    "variational cancel_order failed for SNX: "
+                    "Could not identify cancel button for Variational order."
+                )
+
+        class TakerAdapter:
+            async def place_market_order(self, **kwargs):
+                calls.append("taker_market")
+                return {"ok": True, "order_id": "taker-1"}
+
+        with mock.patch("asyncio.sleep", new=mock.AsyncMock()):
+            with self.assertRaisesRegex(RuntimeError, "cancel failed"):
+                await execute_single_clip(
+                    symbol="SNX",
+                    clip_usd=690.0,
+                    quantity=Decimal("3000"),
+                    maker_venue="variational",
+                    taker_venue="hyperliquid",
+                    short_venue="hyperliquid",
+                    long_venue="variational",
+                    maker_adapter=MakerAdapter(),
+                    taker_adapter=TakerAdapter(),
+                    max_hedge_retries=1,
+                    state_machine=ExecutionStateMachine(),
+                    require_maker_fill_confirmation=True,
+                    maker_fill_timeout_seconds=5.0,
+                    max_maker_reprice_attempts=1,
+                )
+
+        self.assertNotIn("taker_market", calls)
+        self.assertEqual(calls[:2], ["maker_submit", "maker_wait"])
+        self.assertEqual(calls.count("maker_cancel"), 6)
+
     async def test_execute_single_clip_cancels_variational_order_when_submit_phase_timeout_carries_order_id(self) -> None:
         calls: list[str] = []
 

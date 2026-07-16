@@ -1,23 +1,31 @@
 {
   "type": "ORDER_RESULT",
-  "requestId": "be97f9fc-b0e6-491c-a7a8-e89031b0262d",
+  "requestId": "dabbd6c9-14db-454c-9278-4a058ba255f4",
   "ok": false,
   "orderId": null,
-  "error": "[after reload] Submit button stayed disabled after amount input.",
+  "error": "Ticker mismatch: requested IMX but current page is ASPECTA.",
   "details": {
     "automationVersion": "variational-order-automation-2026-06-05-2",
-    "amount": "1000",
-    "clickedMidAfterDisabledSubmit": false,
-    "clickedSubmitText": "Buy PROVE Buy PROVE",
+    "currentSymbol": "ASPECTA",
     "diagnostics": {
       "buttons": [
         {
-          "className": "absolute right-2 hover:text-darkblue/80",
+          "className": "absolute right-2 size-4 text-button-primary-foreground",
           "disabled": false,
           "text": ""
         },
         {
-          "className": "disabled:opacity-50 items-center p-4 pt-5 text-blackwhite border-b-4 transition-all border-azure pointer-events-none dis",
+          "className": "overflow-hidden shrink-0 w-[26px] min-[1300px]:w-auto min-[1300px]:max-w-none",
+          "disabled": false,
+          "text": ""
+        },
+        {
+          "className": "",
+          "disabled": false,
+          "text": "Trade Trade"
+        },
+        {
+          "className": "h-8 max-h-8 px-2.5 py-1.5 text-xs bg-transparent text-tab-foreground-active rounded-md font-inter inline-flex items-cent",
           "disabled": false,
           "text": "Trade Trade"
         },
@@ -27,7 +35,7 @@
           "text": "Portfolio Portfolio"
         },
         {
-          "className": "disabled:opacity-50 items-center p-4 pt-5 border-b-4 transition-all border-transparent text-blackwhite/80 hover:border-a",
+          "className": "h-8 max-h-8 px-2.5 py-1.5 text-xs bg-transparent hover:bg-tab-background-hover text-tab-foreground rounded-md font-inter",
           "disabled": false,
           "text": "Portfolio Portfolio"
         },
@@ -37,17 +45,12 @@
           "text": "Markets Markets"
         },
         {
-          "className": "disabled:opacity-50 items-center p-4 pt-5 border-b-4 transition-all border-transparent text-blackwhite/80 hover:border-a",
+          "className": "h-8 max-h-8 px-2.5 py-1.5 text-xs bg-transparent hover:bg-tab-background-hover text-tab-foreground rounded-md font-inter",
           "disabled": false,
           "text": "Markets Markets"
         },
         {
-          "className": "",
-          "disabled": false,
-          "text": "Rewards Rewards"
-        },
-        {
-          "className": "disabled:opacity-50 items-center p-4 pt-5 border-b-4 transition-all border-transparent text-blackwhite/80 hover:border-a",
+          "className": "h-8 max-h-8 px-2.5 py-1.5 text-xs bg-transparent hover:bg-tab-background-hover text-tab-foreground rounded-md font-inter",
           "disabled": false,
           "text": "Rewards Rewards"
         },
@@ -57,7 +60,7 @@
           "text": "Points Points"
         },
         {
-          "className": "disabled:opacity-50 items-center p-4 pt-5 border-b-4 transition-all border-transparent text-blackwhite/80 hover:border-a",
+          "className": "h-8 max-h-8 px-2.5 py-1.5 text-xs bg-transparent hover:bg-tab-background-hover text-tab-foreground rounded-md font-inter",
           "disabled": false,
           "text": "Points Points"
         },
@@ -67,7 +70,7 @@
           "text": "Leaderboard Leaderboard"
         },
         {
-          "className": "disabled:opacity-50 items-center p-4 pt-5 border-b-4 transition-all border-transparent text-blackwhite/80 hover:border-a",
+          "className": "h-8 max-h-8 px-2.5 py-1.5 text-xs bg-transparent hover:bg-tab-background-hover text-tab-foreground rounded-md font-inter",
           "disabled": false,
           "text": "Leaderboard Leaderboard"
         },
@@ -77,274 +80,189 @@
           "text": "Competition Competition"
         },
         {
-          "className": "disabled:opacity-50 items-center p-4 pt-5 border-b-4 transition-all border-transparent text-blackwhite/80 hover:border-a",
+          "className": "h-8 max-h-8 px-2.5 py-1.5 text-xs bg-transparent hover:bg-tab-background-hover text-tab-foreground rounded-md font-inter",
           "disabled": false,
           "text": "Competition Competition"
         },
         {
-          "className": "flex items-center gap-1 text-xs border-transparent hover:border-azure/50 border-0 border-b-4 text-blackwhite/80 text-now",
+          "className": "h-8 max-h-8 px-2.5 py-1.5 text-xs bg-transparent hover:bg-tab-background-hover text-tab-foreground rounded-md font-inter",
           "disabled": false,
-          "text": "More... More..."
+          "text": "More More"
         },
         {
-          "className": "min-h-8 h-8 px-3 py-1 bg-azure hover:bg-azure-200 focus:bg-azure-200 active:bg-azure-300 text-blackwhite-400 text-xs rou",
+          "className": "text-xs",
           "disabled": false,
-          "text": "Transfer Transfer"
+          "text": "Portfolio $10,468.44 Portfolio $10,468.44"
         },
         {
-          "className": "min-h-6 px-2 py-1 bg-none hover:bg-azure/12 focus:bg-azure/12 active:bg-azure/20 text-xs rounded-md flex items-center ju",
+          "className": "min-h-8 h-8 max-h-8 p-2 bg-button-primary-background hover:bg-button-primary-background-hover focus:bg-button-primary-ba",
           "disabled": false,
-          "text": "0x96Ba...38B3 0x96Ba...38B3 0x96Ba..."
+          "text": "Deposit Deposit"
         },
         {
-          "className": "min-h-8 bg-none hover:bg-azure/12 focus:bg-azure/12 active:bg-azure/20 text-xs rounded-md items-center justify-center di",
+          "className": "min-w-8 min-h-8 h-8 max-h-8 p-2 hover:bg-button-secondary-background-hover border border-button-secondary-border text-bu",
+          "disabled": false,
+          "text": "0x96...8B3 0x96...8B3"
+        },
+        {
+          "className": "min-w-8 min-h-8 max-h-8 p-2 hover:bg-button-secondary-background-hover border border-button-secondary-border text-button",
           "disabled": false,
           "text": ""
         },
         {
-          "className": "min-h-6 bg-none hover:bg-azure/12 focus:bg-azure/12 active:bg-azure/20 text-xs rounded-md flex items-center justify-cent",
+          "className": "min-w-8 min-h-8 max-h-8 p-2 hover:bg-button-secondary-background-hover border border-button-secondary-border text-button",
           "disabled": false,
           "text": ""
         },
         {
-          "className": "token-pill flex items-center gap-1 px-2 py-0.5 text-white outline-none rounded-md text-xl hover:bg-azure/12 cursor-point",
+          "className": "min-w-8 min-h-8 max-h-8 p-2 hover:bg-button-secondary-background-hover border border-button-secondary-border text-button",
           "disabled": false,
-          "text": "PROVE / PROVE /"
+          "text": ""
         },
         {
-          "className": "text-blackwhite/50 tooltip-link",
+          "className": "min-w-10 min-h-10 h-10 max-h-10 p-2 hover:bg-button-secondary-background-hover border border-button-secondary-border tex",
+          "disabled": false,
+          "text": "ASPECTA ASPECTA"
+        },
+        {
+          "className": "font-inter font-normal text-2xs leading-4 text-foreground-muted tooltip-link",
           "disabled": false,
           "text": "Mark Price Mark Price"
         },
         {
-          "className": "text-blackwhite/50 tooltip-link",
+          "className": "font-inter font-normal text-2xs leading-4 text-foreground-muted tooltip-link",
           "disabled": false,
           "text": "FDV FDV"
         },
         {
-          "className": "text-blackwhite/50 tooltip-link",
+          "className": "font-inter font-normal text-2xs leading-4 text-foreground-muted tooltip-link",
           "disabled": false,
           "text": "Open Interest Open Interest"
         },
         {
-          "className": "text-blackwhite/50 tooltip-link",
+          "className": "font-inter font-normal text-2xs leading-4 text-foreground-muted tooltip-link",
           "disabled": false,
           "text": "4hr Funding / Countdown 4hr Funding / Countdown"
         },
         {
           "className": "flex cursor-help",
           "disabled": false,
-          "text": "-0.0236% / 01:24:46 -0.0236% / 01:24:46"
+          "text": "0.005% / 02:23:45 0.005% / 02:23:45"
         },
         {
-          "className": "absolute bottom-0 left-0 right-0 h-2 md:h-1 cursor-ns-resize bg-transparent hover:bg-azure/50 transition-colors duration",
+          "className": "h-1 cursor-ns-resize bg-background-muted-trade hover:bg-foreground-muted-more-more hover:border-foreground-muted-more-mo",
           "disabled": false,
           "text": ""
         },
         {
-          "className": "absolute bottom-0 left-1/2 transform -translate-x-1/2 w-8 h-2 md:h-1 bg-azure group-hover:bg-azure/50 transition-colors ",
+          "className": "h-8 max-h-8 px-2.5 py-1.5 text-xs bg-transparent hover:bg-tab-background-hover text-tab-foreground rounded-md font-inter",
           "disabled": false,
-          "text": ""
+          "text": "Positions 2 Positions 2"
         },
         {
-          "className": "disabled:opacity-50 items-start px-2.5 py-1 rounded-md text-xs whitespace-nowrap bg-darkblue-300 text-azure pointer-even",
-          "disabled": false,
-          "text": "Positions (1) Positions (1)"
-        },
-        {
-          "className": "disabled:opacity-50 items-start px-2.5 py-1 rounded-md text-xs whitespace-nowrap bg-transparent hover:bg-azure/12 active",
+          "className": "h-8 max-h-8 px-2.5 py-1.5 text-xs bg-transparent text-tab-foreground-active rounded-md font-inter inline-flex items-cent",
           "disabled": false,
           "text": "Open Orders Open Orders"
         },
         {
-          "className": "disabled:opacity-50 items-start px-2.5 py-1 rounded-md text-xs whitespace-nowrap bg-transparent hover:bg-azure/12 active",
+          "className": "h-8 max-h-8 px-2.5 py-1.5 text-xs bg-transparent hover:bg-tab-background-hover text-tab-foreground rounded-md font-inter",
+          "disabled": false,
+          "text": "Trades History Trades History"
+        },
+        {
+          "className": "h-8 max-h-8 px-2.5 py-1.5 text-xs bg-transparent hover:bg-tab-background-hover text-tab-foreground rounded-md font-inter",
           "disabled": false,
           "text": "Order History Order History"
         },
         {
-          "className": "disabled:opacity-50 items-start px-2.5 py-1 rounded-md text-xs whitespace-nowrap bg-transparent hover:bg-azure/12 active",
+          "className": "h-8 max-h-8 px-2.5 py-1.5 text-xs bg-transparent hover:bg-tab-background-hover text-tab-foreground rounded-md font-inter",
           "disabled": false,
-          "text": "Trades Trades"
+          "text": "Funding History Funding History"
         },
         {
-          "className": "disabled:opacity-50 items-start px-2.5 py-1 rounded-md text-xs whitespace-nowrap bg-transparent hover:bg-azure/12 active",
+          "className": "h-8 max-h-8 px-2.5 py-1.5 text-xs bg-transparent hover:bg-tab-background-hover text-tab-foreground rounded-md font-inter",
           "disabled": false,
-          "text": "Funding Funding"
+          "text": "Realized PNL Realized PNL"
         },
         {
-          "className": "disabled:opacity-50 items-start px-2.5 py-1 rounded-md text-xs whitespace-nowrap bg-transparent hover:bg-azure/12 active",
+          "className": "min-h-8 h-8 p-2 text-2xs flex items-center justify-between gap-1 rounded-md border border-input-border hover:border-alph",
           "disabled": false,
-          "text": "Realized PnL Realized PnL"
-        },
-        {
-          "className": "disabled:opacity-50 items-start px-2.5 py-1 rounded-md text-xs whitespace-nowrap bg-transparent hover:bg-azure/12 active",
-          "disabled": false,
-          "text": "Rewards Rewards"
-        },
-        {
-          "className": "leading-4 col-span-1 text-ellipsis text-nowrap overflow-hidden max-w-full group",
-          "disabled": false,
-          "text": "Instrument Instrument"
-        },
-        {
-          "className": "leading-4 col-span-1 text-ellipsis text-nowrap overflow-hidden max-w-full group justify-self-end",
-          "disabled": false,
-          "text": "Quantity Quantity"
-        },
-        {
-          "className": "leading-4 col-span-1 text-ellipsis text-nowrap overflow-hidden max-w-full justify-self-end tooltip-link",
-          "disabled": false,
-          "text": "Mark Mark"
-        },
-        {
-          "className": "leading-4 col-span-1 text-ellipsis text-nowrap overflow-hidden max-w-full group justify-self-end",
-          "disabled": false,
-          "text": "Value Value"
-        },
-        {
-          "className": "leading-4 col-span-1 text-ellipsis text-nowrap overflow-hidden max-w-full justify-self-end",
-          "disabled": false,
-          "text": "Liq. Price Liq. Price"
-        },
-        {
-          "className": "leading-4 col-span-1 text-ellipsis text-nowrap overflow-hidden max-w-full justify-self-end",
-          "disabled": false,
-          "text": "Funding Funding"
-        },
-        {
-          "className": "leading-4 col-span-1 text-ellipsis text-nowrap overflow-hidden max-w-full group justify-self-end",
-          "disabled": false,
-          "text": "UPnL UPnL"
-        },
-        {
-          "className": "tooltip-link",
-          "disabled": false,
-          "text": "UPnL UPnL"
-        },
-        {
-          "className": "leading-4 col-span-1 text-ellipsis text-nowrap overflow-hidden max-w-full group justify-self-end",
-          "disabled": false,
-          "text": "RPnL RPnL"
-        },
-        {
-          "className": "tooltip-link",
-          "disabled": false,
-          "text": "RPnL RPnL"
-        },
-        {
-          "className": "h-8 grid gap-2 tr items-center border-b border-blackwhite/5 hover:bg-azure/12 grid-cols-positions-rpnl pl-0",
-          "disabled": false,
-          "text": "PROVE-PERP -8,000 $0.1940 $1,552.00 $0.1900 $1.48466 $0.52 -$31.83 (-41.87%) -$27.65 TP/SL Reverse Close PROVE-PERP -8,0"
-        },
-        {
-          "className": "flex gap-x-2 items-center link-instrument",
-          "disabled": false,
-          "text": "PROVE-PERP PROVE-PERP"
-        },
-        {
-          "className": "hover:cursor-help tooltip-link",
-          "disabled": false,
-          "text": "$1.48466 $1.48466"
-        },
-        {
-          "className": "focus:outline-none",
-          "disabled": false,
-          "text": ""
-        },
-        {
-          "className": "min-h-6 h-6 px-2 py-1 bg-none border border-azure text-azure hover:bg-azure/12 focus:bg-azure/12 active:bg-azure/20 text",
-          "disabled": false,
-          "text": "TP/SL TP/SL"
-        },
-        {
-          "className": "min-h-6 h-6 px-2 py-1 bg-none border border-azure text-azure hover:bg-azure/12 focus:bg-azure/12 active:bg-azure/20 text",
-          "disabled": false,
-          "text": "Reverse Reverse"
-        },
-        {
-          "className": "min-h-6 h-6 px-2 py-1 bg-none border border-azure text-azure hover:bg-azure/12 focus:bg-azure/12 active:bg-azure/20 text",
-          "disabled": false,
-          "text": "Close Close"
+          "text": "Instrument: All Instrument: All"
         },
         {
           "className": "",
           "disabled": false,
-          "text": ""
+          "text": "Maximum Slippage Maximum Slippage"
         },
         {
-          "className": "min-h-8 h-8 px-3 py-1 bg-azure/5 hover:bg-azure/12 focus:bg-azure/12 active:bg-azure/20 text-xs rounded-md flex items-ce",
+          "className": "group pointer-events-none w-full",
+          "disabled": true,
+          "text": "Time (UTC+8) Time (UTC+8)"
+        },
+        {
+          "className": "min-w-8 min-h-8 h-8 max-h-8 p-2 hover:bg-button-secondary-background-hover border border-button-secondary-border text-bu",
           "disabled": false,
           "text": "20X 20X"
         },
         {
-          "className": "min-h-8 h-8 px-3 py-1 bg-azure/5 hover:bg-azure/12 focus:bg-azure/12 active:bg-azure/20 text-blackwhite text-xs rounded-",
+          "className": "min-w-8 min-h-8 h-8 max-h-8 p-2 hover:bg-button-secondary-background-hover border border-button-secondary-border text-bu",
           "disabled": false,
           "text": "Cross Cross"
         },
         {
-          "className": "p-0 text-center flex-1 bg-transparent text-blackwhite/80 hover:text-blackwhite truncate border-b-2 border-transparent",
+          "className": "h-8 max-h-8 px-2.5 py-1.5 text-xs bg-transparent hover:bg-tab-background-hover text-tab-foreground rounded-md font-inter",
           "disabled": false,
           "text": "Market Market"
         },
         {
-          "className": "p-0 text-center flex-1 bg-transparent hover:text-blackwhite truncate text-blackwhite border-b-2 border-azure pointer-eve",
+          "className": "h-8 max-h-8 px-2.5 py-1.5 text-xs bg-transparent text-tab-foreground-active rounded-md font-inter inline-flex items-cent",
           "disabled": false,
           "text": "Limit Limit"
         },
         {
-          "className": "menu-button flex items-center gap-1 text-xs outline-none disabled:pointer-events-none flex-1 sm:flex-none p-0 bg-transpa",
+          "className": "min-w-8 min-h-8 h-8 p-2 gap-1 rounded-md border-input-border hover:border-alpha-brand-brand-40 outline-none focus:outlin",
           "disabled": false,
           "text": "Pro Pro"
         },
         {
-          "className": "flex flex-1 items-center justify-center rounded-md flex-col group-disabled:pointer-events-none px-2 py-0.5 bg-transparen",
-          "disabled": true,
-          "text": "Buy $0.1943 Buy $0.1943"
-        },
-        {
-          "className": "flex flex-1 items-center justify-center rounded-md flex-col group-disabled:pointer-events-none px-2 py-0.5 text-blackwhi",
+          "className": "min-w-10 min-h-10 h-10 max-h-10 p-2 bg-button-primary-affirmative-background focus:bg-button-primary-affirmative-backgro",
           "disabled": false,
-          "text": "Sell $0.1937 Sell $0.1937"
+          "text": "Buy $0.01447 Buy $0.01447"
         },
         {
-          "className": "text-azure enabled:hover:text-blackwhite disabled:text-blackwhite/50",
+          "className": "min-w-10 min-h-10 h-10 max-h-10 p-2 disabled:bg-button-primary-destructive-background-disabled border disabled:text-butt",
+          "disabled": false,
+          "text": "Sell $0.01440 Sell $0.01440"
+        },
+        {
+          "className": "link disabled:text-foreground-muted-more",
           "disabled": false,
           "text": "Mid Mid"
         },
         {
-          "className": "flex items-center justify-end text-blackwhite/80 enabled:hover:text-blackwhite hover:text-blackwhite gap-1 disabled:text",
+          "className": "flex items-center justify-end text-alpha-foreground-foreground-80 enabled:hover:text-foreground-foreground hover:text-fo",
           "disabled": false,
-          "text": "PROVE PROVE"
+          "text": "ASPECTA ASPECTA"
         },
         {
-          "className": "group flex gap-2 disabled:opacity-50 enabled:hover:text-blackwhite",
-          "disabled": false,
-          "text": "Reduce Only Reduce Only"
-        },
-        {
-          "className": "inline-block relative",
-          "disabled": false,
-          "text": ""
-        },
-        {
-          "className": "group flex gap-2 disabled:opacity-50 enabled:hover:text-blackwhite",
-          "disabled": false,
-          "text": "Take Profit / Stop Loss Take Profit / Stop Loss"
-        },
-        {
-          "className": "inline-block relative",
-          "disabled": false,
-          "text": ""
-        },
-        {
-          "className": "min-h-8 h-8 px-3 py-1 text-blackwhite-400 text-xs rounded-md flex items-center justify-center disabled:opacity-50 outlin",
+          "className": "group inline-block relative outline-none focus-visible:outline-none shrink-0 cursor-not-allowed",
           "disabled": true,
-          "text": "Buy PROVE Buy PROVE"
+          "text": ""
         },
         {
-          "className": "flex items-center gap-1 cursor-pointer text-azure group",
+          "className": "group inline-block relative outline-none focus-visible:outline-none shrink-0 cursor-pointer",
           "disabled": false,
-          "text": "Max: 0.5% Max: 0.5%"
+          "text": ""
+        },
+        {
+          "className": "min-w-8 min-h-8 h-8 max-h-8 p-2 bg-button-primary-affirmative-background focus:bg-button-primary-affirmative-background-",
+          "disabled": true,
+          "text": "Enter Size Enter Size"
+        },
+        {
+          "className": "flex items-center gap-1 cursor-pointer group text-link-default hover:text-link-default-hover text-2xs",
+          "disabled": false,
+          "text": "Est: 0.21% / Max: 0.5% Est: 0.21% / Max: 0.5%"
         },
         {
           "className": "",
@@ -352,87 +270,53 @@
           "text": ""
         },
         {
-          "className": "flex relative h-2 w-2 cursor-help",
+          "className": "",
           "disabled": false,
           "text": ""
-        },
-        {
-          "className": "",
-          "disabled": false,
-          "text": "Join our Discord community"
-        },
-        {
-          "className": "",
-          "disabled": false,
-          "text": "Follow us on Twitter"
-        },
-        {
-          "className": "",
-          "disabled": false,
-          "text": "View our documentation on GitBook"
-        },
-        {
-          "className": "link text-center ml-5",
-          "disabled": false,
-          "text": "Terms of Service Terms of Service View our Terms of Service"
-        },
-        {
-          "className": "link text-center",
-          "disabled": false,
-          "text": "Privacy Policy Privacy Policy View our Privacy Policy"
-        },
-        {
-          "className": "link text-center",
-          "disabled": false,
-          "text": "Restricted Person Restricted Person View Restricted Persons information"
-        },
-        {
-          "className": "flex items-center gap-x-1 link text-center help-button-class",
-          "disabled": false,
-          "text": "Help & Support Help & Support"
         }
       ],
       "inputs": [
         {
-          "className": "outline-none bg-transparent text-right transition-all text-blackwhite placeholder:text-blackwhite/50 disabled:placeholde",
+          "className": "text-input-foreground bg-transparent outline-none text-right",
           "context": "limit-price-input 0 limit-price-input",
           "dataTestId": "limit-price-input",
           "inputMode": "decimal",
           "placeholder": "0",
           "type": "text",
-          "value": "0.1941"
+          "value": "0.01443"
         },
         {
-          "className": "outline-none bg-transparent text-right transition-all text-blackwhite placeholder:text-blackwhite/50 disabled:placeholde",
+          "className": "text-input-foreground bg-transparent outline-none text-right",
           "context": "quantity-input 0 quantity-input",
           "dataTestId": "quantity-input",
           "inputMode": "decimal",
           "placeholder": "0",
           "type": "text",
-          "value": "1,000"
+          "value": ""
         },
         {
-          "className": "slider svelte-1ydbnzd",
+          "className": "slider svelte-1nsunmv",
           "context": "sizing-slider sizing-slider",
           "dataTestId": "sizing-slider",
           "inputMode": "",
           "placeholder": "",
           "type": "range",
-          "value": "0.1"
+          "value": "0"
         },
         {
-          "className": "outline-none bg-transparent transition-all placeholder:text-blackwhite/50 disabled:placeholder:text-blackwhite/50 disabl",
+          "className": "text-input-foreground bg-transparent outline-none text-right",
           "context": "sizing-percentage-input 0 sizing-percentage-input",
           "dataTestId": "sizing-percentage-input",
           "inputMode": "decimal",
           "placeholder": "0",
           "type": "text",
-          "value": "0.1"
+          "value": ""
         }
       ],
-      "title": "0.1940 | PROVE-PERP | Variational Omni",
-      "url": "https://omni.variational.io/perpetual/PROVE"
-    }
+      "title": "0.01444 | ASPECTA-PERP | Variational Omni",
+      "url": "https://omni.variational.io/perpetual/ASPECTA"
+    },
+    "requestedSymbol": "IMX"
   },
-  "timestamp": "2026-07-02T06:35:14.453Z"
+  "timestamp": "2026-07-16T09:36:14.732Z"
 }

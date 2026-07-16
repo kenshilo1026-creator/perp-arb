@@ -287,6 +287,45 @@ class VariationalBrowserExecutionAdapter:
             )
         return {"ok": True, "raw": result}
 
+    async def has_open_order(
+        self,
+        *,
+        order_result: dict[str, object],
+        symbol: str,
+        side: str,
+        amount: str,
+    ) -> bool:
+        """Return True if a matching open order still exists on Variational.
+
+        Non-destructive: reuses the CANCEL_ORDER command with checkOnly=True so the
+        extension reports presence without clicking cancel. Used by the reprice loop
+        to decide whether a resting maker order is still there or must be re-placed.
+        """
+        symbol = self._map_symbol(symbol)
+        request_id = str(uuid.uuid4())
+        order_id = self._extract_order_id(order_result)
+        async with ClientSession() as session:
+            async with session.ws_connect(self.broker_url, heartbeat=20) as ws:
+                await ws.send_json({"type": "REGISTER", "role": self.client_role})
+                await self._await_register_ack(ws)
+                await ws.send_json({
+                    "type": "CANCEL_ORDER",
+                    "requestId": request_id,
+                    "orderId": order_id,
+                    "symbol": symbol,
+                    "side": side,
+                    "amount": amount,
+                    "checkOnly": True,
+                })
+                msg = await asyncio.wait_for(ws.receive(), timeout=self.timeout_seconds)
+        if msg.type != WSMsgType.TEXT:
+            raise RuntimeError(f"variational has_open_order unexpected message type: {msg.type}")
+        result = msg.json()
+        if not result.get("ok"):
+            raise RuntimeError(f"variational has_open_order failed for {symbol}: {result.get('error')}")
+        details = result.get("details") or {}
+        return bool(result.get("exists", details.get("exists", False)))
+
     async def get_limit_price_preview(self, *, symbol: str) -> str:
         mapped = self._map_symbol(symbol)
         request_id = str(uuid.uuid4())

@@ -577,6 +577,39 @@ async def execute_single_clip_with_sides(
                         attempt_record["price_change_pct"] = format_decimal(change)
                         if change < Decimal(str(maker_reprice_min_change_pct)):
                             attempt_record["reprice_skipped"] = True
+                            # Only keep re-waiting on the existing order if it is still
+                            # resting. If the adapter can check and the order is gone
+                            # (cancelled/expired), re-place instead of waiting on a phantom.
+                            order_still_exists = True
+                            has_check = getattr(maker_adapter, "has_open_order", None)
+                            if callable(has_check):
+                                try:
+                                    order_still_exists = await has_check(
+                                        order_result=placed_result,
+                                        symbol=symbol,
+                                        side=maker_side,
+                                        amount=str(quantity),
+                                    )
+                                except Exception as check_exc:
+                                    print(
+                                        f"[reprice] order-existence check failed ({check_exc}); "
+                                        "assuming order still exists",
+                                        flush=True,
+                                    )
+                                    order_still_exists = True
+                            attempt_record["order_still_exists"] = order_still_exists
+                            if not order_still_exists:
+                                print(
+                                    "[reprice] existing maker order not found — re-placing "
+                                    f"{maker_venue} {maker_side} {symbol} at {fresh_price}",
+                                    flush=True,
+                                )
+                                if isinstance(placed_result, dict):
+                                    mark_maker_closed(placed_result)
+                                maker_kwargs["price"] = fresh_price
+                                reuse_existing_maker_result = False
+                                maker_attempt += 1
+                                continue
                             print(
                                 "[reprice] refreshed price barely moved "
                                 f"old={current_price} new={fresh_price} "

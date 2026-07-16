@@ -359,6 +359,7 @@ class VariationalCommandBroker:
             "symbol": payload.get("symbol"),
             "side": payload.get("side"),
             "amount": payload.get("amount"),
+            "checkOnly": payload.get("checkOnly"),
             "timestamp": utc_now(),
         })
         try:

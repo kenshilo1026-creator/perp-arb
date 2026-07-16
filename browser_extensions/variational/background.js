@@ -1,5 +1,5 @@
 const DEBUGGER_VERSION = "1.3";
-const ORDER_AUTOMATION_VERSION = "variational-order-automation-2026-06-05-2";
+const ORDER_AUTOMATION_VERSION = "variational-order-automation-2026-07-16-1";
 const MAX_QUEUE_SIZE = 1000;
 const AUTO_RELOAD_COOLDOWN_MS = 5000;
 const MAX_ORDER_RELOAD_RETRIES = 2;
@@ -381,6 +381,11 @@ function isSubmitDisabledAfterAmountError(error) {
   return msg.includes("submit button stayed disabled after amount input");
 }
 
+function isQuotedPriceUnavailableError(error) {
+  const msg = String(error || "").toLowerCase();
+  return msg.includes("quoted price unavailable");
+}
+
 function reloadTabAndWaitForComplete(tabId, timeoutMs = 15000) {
   return new Promise((resolve, reject) => {
     let settled = false;
@@ -435,15 +440,20 @@ async function runOrderInjectionWithReload(payload) {
   let injectionResult = await runVariationalOrderInjection(payload);
   let result = injectionResult?.result || {};
 
-  // Don't reload for submitOnly — the form was already prepared; a reload would wipe it
-  for (let reloadAttempt = 0; !payload.submitOnly && result && !result.ok && reloadAttempt < MAX_ORDER_RELOAD_RETRIES; reloadAttempt += 1) {
-    const shouldReload = isNotFoundError(result.error) || isSubmitDisabledAfterAmountError(result.error);
+  for (let reloadAttempt = 0; result && !result.ok && reloadAttempt < MAX_ORDER_RELOAD_RETRIES; reloadAttempt += 1) {
+    const quotedPriceUnavailable = isQuotedPriceUnavailableError(result.error);
+    // For submitOnly, only reload when Variational explicitly reports that no
+    // quoted price is available. Other failures may still rely on prepared state.
+    const shouldReload = quotedPriceUnavailable
+      || (!payload.submitOnly && (isNotFoundError(result.error) || isSubmitDisabledAfterAmountError(result.error)));
     if (!shouldReload) {
       break;
     }
-    const reason = isSubmitDisabledAfterAmountError(result.error)
-      ? "submit disabled after amount input"
-      : "not found";
+    const reason = quotedPriceUnavailable
+      ? "quoted price unavailable"
+      : (isSubmitDisabledAfterAmountError(result.error)
+          ? "submit disabled after amount input"
+          : "not found");
     console.log(`[variational] ${reason} — reloading page and retrying`);
     await reloadTabAndWaitForComplete(state.attachedTabId);
     await sleep(2000);
@@ -699,9 +709,22 @@ function executeVariationalCancelOrder(command) {
   }
 
   function click(el) {
-    el.dispatchEvent(new MouseEvent("mouseover", { bubbles: true }));
-    el.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
-    el.dispatchEvent(new MouseEvent("mouseup", { bubbles: true }));
+    try { el.scrollIntoView({ block: "center", inline: "center" }); } catch (_e) {}
+    try { el.focus({ preventScroll: true }); } catch (_e) {}
+    const rect = el.getBoundingClientRect();
+    const cx = rect.left + rect.width / 2;
+    const cy = rect.top + rect.height / 2;
+    const base = { bubbles: true, cancelable: true, view: window, clientX: cx, clientY: cy, button: 0, buttons: 1 };
+    const pointer = { ...base, pointerId: 1, pointerType: "mouse", isPrimary: true };
+    // Full realistic gesture: some Variational controls (submit button, tabs, cancel)
+    // respond to pointer events, not just a bare element.click().
+    try { el.dispatchEvent(new PointerEvent("pointerover", pointer)); } catch (_e) {}
+    el.dispatchEvent(new MouseEvent("mouseover", base));
+    try { el.dispatchEvent(new PointerEvent("pointerenter", pointer)); } catch (_e) {}
+    try { el.dispatchEvent(new PointerEvent("pointerdown", pointer)); } catch (_e) {}
+    el.dispatchEvent(new MouseEvent("mousedown", base));
+    try { el.dispatchEvent(new PointerEvent("pointerup", { ...pointer, buttons: 0 })); } catch (_e) {}
+    el.dispatchEvent(new MouseEvent("mouseup", { ...base, buttons: 0 }));
     el.click();
   }
 
@@ -896,6 +919,42 @@ function executeVariationalCancelOrder(command) {
     return candidates.length === 1 && !normalizedSymbol ? candidates[0] : null;
   }
 
+  // Returns a matching open-order row if the target order is still present, else null.
+  // Uses the same match passes as findCancelOrderButton so "present" is consistent.
+  function findMatchingOrderRow(orderId, requestedSymbol, side, amount) {
+    const normalizedSymbol = normalizeVariationalSymbol(requestedSymbol);
+    const normalizedSide = normalizeSideText(side);
+    const normalizedAmount = normalizeAmountText(amount);
+    const rows = collectOrderRows();
+    if (orderId) {
+      const byId = rows.find((row) => textOf(getOrderRow(row)).includes(String(orderId)));
+      if (byId) {
+        return byId;
+      }
+    }
+    const passes = [
+      { requireSide: true, requireAmount: true },
+      { requireSide: true, requireAmount: false },
+      { requireSide: false, requireAmount: false }
+    ];
+    for (const pass of passes) {
+      const matched = rows.filter((row) =>
+        rowTextMatches({
+          rowText: textOf(row),
+          normalizedSymbol,
+          normalizedSide,
+          normalizedAmount,
+          requireSide: pass.requireSide,
+          requireAmount: pass.requireAmount
+        })
+      );
+      if (matched.length >= 1) {
+        return matched[0];
+      }
+    }
+    return null;
+  }
+
   function findCancelConfirmButton() {
     const confirmPatterns = [
       /\bconfirm\s+cancel\b/i,
@@ -940,6 +999,18 @@ function executeVariationalCancelOrder(command) {
     ensureOpenOrdersTabVisible();
     await sleep(1500);
 
+    // checkOnly: report whether a matching open order still exists WITHOUT cancelling.
+    if (command.checkOnly) {
+      const row = findMatchingOrderRow(orderId, symbol, side, amount);
+      return {
+        ok: true,
+        exists: Boolean(row),
+        status: row ? "present" : "absent",
+        orderId: orderId || null,
+        details: { automationVersion, exists: Boolean(row), symbol, side, amount: amount || null, checkOnly: true }
+      };
+    }
+
     let cancelButton = findCancelOrderButton(orderId, symbol, side, amount);
     if (!cancelButton) {
       await sleep(3000);
@@ -948,6 +1019,24 @@ function executeVariationalCancelOrder(command) {
       cancelButton = findCancelOrderButton(orderId, symbol, side, amount);
     }
     if (!cancelButton) {
+      // The order may already be gone (filled or cancelled). If no matching open
+      // order row exists, the cancel goal is already met — return idempotent
+      // success instead of erroring. (Open Orders tab was made visible above.)
+      const stillPresent = findMatchingOrderRow(orderId, symbol, side, amount);
+      if (!stillPresent) {
+        return {
+          ok: true,
+          orderId: orderId || null,
+          status: "already_absent",
+          details: {
+            automationVersion,
+            symbol,
+            side,
+            amount: amount || null,
+            note: "No matching open order found — treated as already cancelled/filled."
+          }
+        };
+      }
       return {
         ok: false,
         error: "Could not identify cancel button for Variational order.",
@@ -1010,9 +1099,22 @@ function executeVariationalLimitPricePreview(command) {
   }
 
   function click(el) {
-    el.dispatchEvent(new MouseEvent("mouseover", { bubbles: true }));
-    el.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
-    el.dispatchEvent(new MouseEvent("mouseup", { bubbles: true }));
+    try { el.scrollIntoView({ block: "center", inline: "center" }); } catch (_e) {}
+    try { el.focus({ preventScroll: true }); } catch (_e) {}
+    const rect = el.getBoundingClientRect();
+    const cx = rect.left + rect.width / 2;
+    const cy = rect.top + rect.height / 2;
+    const base = { bubbles: true, cancelable: true, view: window, clientX: cx, clientY: cy, button: 0, buttons: 1 };
+    const pointer = { ...base, pointerId: 1, pointerType: "mouse", isPrimary: true };
+    // Full realistic gesture: some Variational controls (submit button, tabs, cancel)
+    // respond to pointer events, not just a bare element.click().
+    try { el.dispatchEvent(new PointerEvent("pointerover", pointer)); } catch (_e) {}
+    el.dispatchEvent(new MouseEvent("mouseover", base));
+    try { el.dispatchEvent(new PointerEvent("pointerenter", pointer)); } catch (_e) {}
+    try { el.dispatchEvent(new PointerEvent("pointerdown", pointer)); } catch (_e) {}
+    el.dispatchEvent(new MouseEvent("mousedown", base));
+    try { el.dispatchEvent(new PointerEvent("pointerup", { ...pointer, buttons: 0 })); } catch (_e) {}
+    el.dispatchEvent(new MouseEvent("mouseup", { ...base, buttons: 0 }));
     el.click();
   }
 
@@ -1223,9 +1325,22 @@ function executeVariationalOrder(command) {
   }
 
   function click(el) {
-    el.dispatchEvent(new MouseEvent("mouseover", { bubbles: true }));
-    el.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
-    el.dispatchEvent(new MouseEvent("mouseup", { bubbles: true }));
+    try { el.scrollIntoView({ block: "center", inline: "center" }); } catch (_e) {}
+    try { el.focus({ preventScroll: true }); } catch (_e) {}
+    const rect = el.getBoundingClientRect();
+    const cx = rect.left + rect.width / 2;
+    const cy = rect.top + rect.height / 2;
+    const base = { bubbles: true, cancelable: true, view: window, clientX: cx, clientY: cy, button: 0, buttons: 1 };
+    const pointer = { ...base, pointerId: 1, pointerType: "mouse", isPrimary: true };
+    // Full realistic gesture: some Variational controls (e.g. the order submit
+    // button) respond to pointer events, not just a bare element.click().
+    try { el.dispatchEvent(new PointerEvent("pointerover", pointer)); } catch (_e) {}
+    el.dispatchEvent(new MouseEvent("mouseover", base));
+    try { el.dispatchEvent(new PointerEvent("pointerenter", pointer)); } catch (_e) {}
+    try { el.dispatchEvent(new PointerEvent("pointerdown", pointer)); } catch (_e) {}
+    el.dispatchEvent(new MouseEvent("mousedown", base));
+    try { el.dispatchEvent(new PointerEvent("pointerup", { ...pointer, buttons: 0 })); } catch (_e) {}
+    el.dispatchEvent(new MouseEvent("mouseup", { ...base, buttons: 0 }));
     el.click();
   }
 
@@ -1462,6 +1577,12 @@ function executeVariationalOrder(command) {
     ].some((item) => normalized.includes(item));
   }
 
+  function findQuotedPriceUnavailableButton() {
+    return Array.from(document.querySelectorAll('button[data-testid="submit-button"]'))
+      .filter(visible)
+      .find((el) => /\bquoted\s+price\s+unavailable\b/i.test(textOf(el))) || null;
+  }
+
   function findSubmitButton(side) {
     const explicitSubmitButtons = Array.from(document.querySelectorAll('button[data-testid="submit-button"]'))
       .filter(visible)
@@ -1496,16 +1617,20 @@ function executeVariationalOrder(command) {
     const deadline = Date.now() + timeoutMs;
     let disabledSubmitButton = null;
     while (Date.now() <= deadline) {
+      const unavailableButton = findQuotedPriceUnavailableButton();
+      if (unavailableButton) {
+        return { button: null, disabledButton: unavailableButton, unavailableButton };
+      }
       const submitButton = findSubmitButton(side);
       if (submitButton) {
-        return { button: submitButton, disabledButton: disabledSubmitButton };
+        return { button: submitButton, disabledButton: disabledSubmitButton, unavailableButton: null };
       }
       disabledSubmitButton = Array.from(document.querySelectorAll('button[data-testid="submit-button"]'))
         .filter(visible)
         .filter((el) => !isRejectedTradeButtonText(textOf(el)))[0] || disabledSubmitButton;
       await sleep(100);
     }
-    return { button: null, disabledButton: disabledSubmitButton };
+    return { button: null, disabledButton: disabledSubmitButton, unavailableButton: null };
   }
 
   function findAmountInput(orderType, excludedInput = null) {
@@ -1661,8 +1786,11 @@ function executeVariationalOrder(command) {
       amountInput.focus();
       setInputValue(amountInput, amount);
       await sleep(300);
-      const { button: submitButton, disabledButton } = await waitForEnabledSubmitButton(side, Number(command.submitEnableTimeoutMs || 5000));
+      const { button: submitButton, disabledButton, unavailableButton } = await waitForEnabledSubmitButton(side, Number(command.submitEnableTimeoutMs || 5000));
       if (!submitButton) {
+        if (unavailableButton) {
+          return { ok: false, error: "Quoted Price unavailable.", details: { automationVersion, amount, clickedSubmitText: textOf(unavailableButton), diagnostics: collectOrderDomDiagnostics() } };
+        }
         if (disabledButton) {
           return { ok: false, error: "Submit button stayed disabled (submitOnly).", details: { automationVersion, amount, clickedSubmitText: textOf(disabledButton), diagnostics: collectOrderDomDiagnostics() } };
         }
@@ -1763,15 +1891,51 @@ function executeVariationalOrder(command) {
     setInputValue(amountInput, amount);
     await sleep(150);
 
-    const { button: submitButton, disabledButton } = await waitForEnabledSubmitButton(
+    // Variational only ENABLES the submit button when the limit price is committed
+    // through its own "Mid" control — a programmatic value injection into the price
+    // input isn't recognized by the ticket's validation. After the price + size are
+    // entered, click Mid once more so the submit button becomes enabled.
+    if (orderType === "LIMIT") {
+      const midButton = findLimitMidButton();
+      if (midButton) {
+        click(midButton);
+        await sleep(300);
+      }
+    }
+
+    const { button: submitButton, disabledButton, unavailableButton } = await waitForEnabledSubmitButton(
       side,
       Number(command.submitEnableTimeoutMs || 5000)
     );
+    if (unavailableButton) {
+      return {
+        ok: false,
+        error: "Quoted Price unavailable.",
+        details: {
+          automationVersion,
+          amount,
+          clickedSubmitText: textOf(unavailableButton),
+          diagnostics: collectOrderDomDiagnostics()
+        }
+      };
+    }
     let finalSubmitButton = submitButton;
     let finalDisabledButton = disabledButton;
     let clickedMidAfterDisabledSubmit = false;
     if (!finalSubmitButton && finalDisabledButton && orderType === "LIMIT") {
       const retryResult = await retryLimitMidAfterDisabledSubmit(side);
+      if (retryResult.unavailableButton) {
+        return {
+          ok: false,
+          error: "Quoted Price unavailable.",
+          details: {
+            automationVersion,
+            amount,
+            clickedSubmitText: textOf(retryResult.unavailableButton),
+            diagnostics: collectOrderDomDiagnostics()
+          }
+        };
+      }
       if (retryResult.error) {
         return {
           ok: false,

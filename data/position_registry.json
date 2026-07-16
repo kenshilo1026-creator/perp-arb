@@ -551,6 +551,30 @@
       "strategy_id": "spot-perp-BTW-1783874904794",
       "symbol": "BTW",
       "venue": "mexc_spot"
+    },
+    {
+      "last_margin_topup_ts_ms": null,
+      "leg_id": "manual-IMX-1784191144916:hyperliquid:perp:short",
+      "margin_topups": 0,
+      "market_type": "perp",
+      "quantity": "2000",
+      "side": "SHORT",
+      "status": "open",
+      "strategy_id": "manual-IMX-1784191144916",
+      "symbol": "IMX",
+      "venue": "hyperliquid"
+    },
+    {
+      "last_margin_topup_ts_ms": null,
+      "leg_id": "manual-IMX-1784191144916:variational:perp:long",
+      "margin_topups": 0,
+      "market_type": "perp",
+      "quantity": "4000",
+      "side": "LONG",
+      "status": "open",
+      "strategy_id": "manual-IMX-1784191144916",
+      "symbol": "IMX",
+      "venue": "variational"
     }
   ]
 }

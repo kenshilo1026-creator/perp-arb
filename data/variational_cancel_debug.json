@@ -1,14 +1,19 @@
 {
   "type": "CANCEL_RESULT",
-  "requestId": "5c30c006-59dc-4133-8e8e-ccd8252d3bb4",
+  "requestId": "4e191cc4-554e-4be5-8a58-b6967cdca7e0",
   "ok": false,
   "orderId": null,
   "error": "Could not identify cancel button for Variational order.",
   "details": {
     "automationVersion": "variational-order-automation-2026-06-05-2",
-    "amount": "3000",
+    "amount": "2000",
     "diagnostics": {
       "buttons": [
+        {
+          "className": "absolute right-2 size-4 text-button-primary-foreground",
+          "disabled": false,
+          "text": ""
+        },
         {
           "className": "overflow-hidden shrink-0 w-[26px] min-[1300px]:w-auto min-[1300px]:max-w-none",
           "disabled": false,
@@ -87,7 +92,7 @@
         {
           "className": "text-xs",
           "disabled": false,
-          "text": "Portfolio $10,525.31 Portfolio $10,525.31"
+          "text": "Portfolio $10,467.54 Portfolio $10,467.54"
         },
         {
           "className": "min-h-8 h-8 max-h-8 p-2 bg-button-primary-background hover:bg-button-primary-background-hover focus:bg-button-primary-background-hover active:bg-button-primary-",
@@ -117,7 +122,7 @@
         {
           "className": "min-w-10 min-h-10 h-10 max-h-10 p-2 hover:bg-button-secondary-background-hover border border-button-secondary-border text-button-secondary-foreground disabled:t",
           "disabled": false,
-          "text": "SNX SNX"
+          "text": "IMX IMX"
         },
         {
           "className": "font-inter font-normal text-2xs leading-4 text-foreground-muted tooltip-link",
@@ -137,12 +142,12 @@
         {
           "className": "font-inter font-normal text-2xs leading-4 text-foreground-muted tooltip-link",
           "disabled": false,
-          "text": "8hr Funding / Countdown 8hr Funding / Countdown"
+          "text": "4hr Funding / Countdown 4hr Funding / Countdown"
         },
         {
           "className": "flex cursor-help",
           "disabled": false,
-          "text": "0.01% / 07:30:10 0.01% / 07:30:10"
+          "text": "-0.0716% / 02:09:01 -0.0716% / 02:09:01"
         },
         {
           "className": "h-1 cursor-ns-resize bg-background-muted-trade hover:bg-foreground-muted-more-more hover:border-foreground-muted-more-more transition-colors duration-200 group ",
@@ -152,7 +157,7 @@
         {
           "className": "h-8 max-h-8 px-2.5 py-1.5 text-xs bg-transparent hover:bg-tab-background-hover text-tab-foreground rounded-md font-inter inline-flex items-center justify-center",
           "disabled": false,
-          "text": "Positions 3 Positions 3"
+          "text": "Positions 2 Positions 2"
         },
         {
           "className": "h-8 max-h-8 px-2.5 py-1.5 text-xs bg-transparent text-tab-foreground-active rounded-md font-inter inline-flex items-center justify-center outline-none focus:out",
@@ -222,12 +227,12 @@
         {
           "className": "min-w-10 min-h-10 h-10 max-h-10 p-2 bg-button-primary-affirmative-background focus:bg-button-primary-affirmative-background-hover active:bg-button-primary-affir",
           "disabled": false,
-          "text": "Buy $0.2309 Buy $0.2309"
+          "text": "Buy $0.1282 Buy $0.1282"
         },
         {
           "className": "min-w-10 min-h-10 h-10 max-h-10 p-2 disabled:bg-button-primary-destructive-background-disabled border disabled:text-button-primary-destructive-foreground-disabl",
           "disabled": false,
-          "text": "Sell $0.2306 Sell $0.2306"
+          "text": "Sell $0.1279 Sell $0.1279"
         },
         {
           "className": "link disabled:text-foreground-muted-more",
@@ -237,11 +242,11 @@
         {
           "className": "flex items-center justify-end text-alpha-foreground-foreground-80 enabled:hover:text-foreground-foreground hover:text-foreground-foreground gap-1 disabled:text-",
           "disabled": false,
-          "text": "SNX SNX SNX"
+          "text": "IMX IMX IMX"
         },
         {
-          "className": "group inline-block relative outline-none focus-visible:outline-none shrink-0 cursor-pointer",
-          "disabled": false,
+          "className": "group inline-block relative outline-none focus-visible:outline-none shrink-0 cursor-not-allowed",
+          "disabled": true,
           "text": ""
         },
         {
@@ -251,18 +256,18 @@
         },
         {
           "className": "min-w-8 min-h-8 h-8 max-h-8 p-2 bg-button-primary-affirmative-background focus:bg-button-primary-affirmative-background-hover active:bg-button-primary-affirmati",
-          "disabled": true,
-          "text": "Enter Size Enter Size"
+          "disabled": false,
+          "text": "Buy IMX Buy IMX"
         },
         {
           "className": "flex items-center gap-1 cursor-pointer group text-link-default hover:text-link-default-hover text-2xs",
           "disabled": false,
-          "text": "Est: 0.09% / Max: 0.3% Est: 0.09% / Max: 0.3%"
+          "text": "Est: 0.16% / Max: 0.5% Est: 0.16% / Max: 0.5%"
         },
         {
           "className": "",
           "disabled": false,
-          "text": "https://www.coingecko.com/en/coins/havven"
+          "text": "https://www.coingecko.com/en/coins/immutable-x"
         }
       ],
       "rows": [
@@ -271,12 +276,12 @@
           "text": "Instrument Side Qty Status Type Trigger Maximum Slippage Close Only ID Time (UTC+8) Instrument Side Qty Status Type Trigger Maximum Slippage Close Only ID Time (UTC+8)"
         }
       ],
-      "title": "0.2307 | SNX-PERP | Variational Omni",
-      "url": "https://omni.variational.io/perpetual/SNX"
+      "title": "0.1280 | IMX-PERP | Variational Omni",
+      "url": "https://omni.variational.io/perpetual/IMX"
     },
     "orderId": null,
     "side": "buy",
-    "symbol": "SNX"
+    "symbol": "IMX"
   },
-  "timestamp": "2026-07-11T16:29:50.341Z"
+  "timestamp": "2026-07-16T09:50:59.205Z"
 }

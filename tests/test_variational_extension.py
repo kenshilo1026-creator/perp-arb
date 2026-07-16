@@ -78,6 +78,16 @@ class VariationalExtensionCommandClientTests(unittest.TestCase):
         self.assertIn("[after reload]", background)
         self.assertIn("submit disabled after amount input", background.lower())
 
+    def test_background_reloads_when_quoted_price_is_unavailable(self) -> None:
+        background = (EXT_DIR / "background.js").read_text(encoding="utf-8")
+
+        self.assertIn("isQuotedPriceUnavailableError", background)
+        self.assertIn("findQuotedPriceUnavailableButton", background)
+        self.assertIn('button[data-testid="submit-button"]', background)
+        self.assertIn("Quoted Price unavailable.", background)
+        self.assertIn("quotedPriceUnavailable", background)
+        self.assertIn("reloadTabAndWaitForComplete", background)
+
     def test_background_retries_injection_when_page_frame_is_removed(self) -> None:
         background = (EXT_DIR / "background.js").read_text(encoding="utf-8")
 

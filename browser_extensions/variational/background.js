@@ -303,6 +303,58 @@ async function runVariationalOrderInjection(payload) {
   throw lastError;
 }
 
+async function dispatchDebuggerMouseClick(tabId, point) {
+  const x = Number(point?.x);
+  const y = Number(point?.y);
+  if (!Number.isFinite(x) || !Number.isFinite(y)) {
+    throw new Error(`Invalid CDP click point: ${JSON.stringify(point)}`);
+  }
+  await sendDebuggerCommand(tabId, "Input.dispatchMouseEvent", {
+    type: "mouseMoved",
+    x,
+    y,
+    button: "none",
+    buttons: 0,
+    pointerType: "mouse"
+  });
+  await sendDebuggerCommand(tabId, "Input.dispatchMouseEvent", {
+    type: "mousePressed",
+    x,
+    y,
+    button: "left",
+    buttons: 1,
+    clickCount: 1,
+    pointerType: "mouse"
+  });
+  await sendDebuggerCommand(tabId, "Input.dispatchMouseEvent", {
+    type: "mouseReleased",
+    x,
+    y,
+    button: "left",
+    buttons: 0,
+    clickCount: 1,
+    pointerType: "mouse"
+  });
+}
+
+async function applyCdpSubmitClickIfRequested(result, payload) {
+  const details = result?.details || {};
+  const clickPoint = details.submitClickPoint;
+  if (!result?.ok || !details.needsCdpSubmitClick || !clickPoint) {
+    return result;
+  }
+  await dispatchDebuggerMouseClick(state.attachedTabId, clickPoint);
+  await sleep(Number(payload.timeoutMs || 1500));
+  return {
+    ...result,
+    details: {
+      ...details,
+      clickedViaCdp: true,
+      needsCdpSubmitClick: false
+    }
+  };
+}
+
 async function runVariationalCancelInjection(payload) {
   let lastError = null;
   for (let attempt = 0; attempt < 2; attempt += 1) {
@@ -438,7 +490,7 @@ function reloadTabAndWaitForComplete(tabId, timeoutMs = 15000) {
 
 async function runOrderInjectionWithReload(payload) {
   let injectionResult = await runVariationalOrderInjection(payload);
-  let result = injectionResult?.result || {};
+  let result = await applyCdpSubmitClickIfRequested(injectionResult?.result || {}, payload);
 
   for (let reloadAttempt = 0; result && !result.ok && reloadAttempt < MAX_ORDER_RELOAD_RETRIES; reloadAttempt += 1) {
     const quotedPriceUnavailable = isQuotedPriceUnavailableError(result.error);
@@ -458,7 +510,7 @@ async function runOrderInjectionWithReload(payload) {
     await reloadTabAndWaitForComplete(state.attachedTabId);
     await sleep(2000);
     injectionResult = await runVariationalOrderInjection(payload);
-    result = injectionResult?.result || {};
+    result = await applyCdpSubmitClickIfRequested(injectionResult?.result || {}, payload);
     if (result && !result.ok) {
       result.error = `[after reload] ${result.error || "unknown error"}`;
     }
@@ -1344,6 +1396,18 @@ function executeVariationalOrder(command) {
     el.click();
   }
 
+  function cdpClickPoint(el) {
+    try { el.scrollIntoView({ block: "center", inline: "center" }); } catch (_e) {}
+    try { el.focus({ preventScroll: true }); } catch (_e) {}
+    const rect = el.getBoundingClientRect();
+    return {
+      x: rect.left + rect.width / 2,
+      y: rect.top + rect.height / 2,
+      width: rect.width,
+      height: rect.height
+    };
+  }
+
   function setInputValue(input, value) {
     const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value")?.set;
     if (setter) {
@@ -1796,9 +1860,21 @@ function executeVariationalOrder(command) {
         }
         return { ok: false, error: "Could not find submit/order button on Variational page.", details: { automationVersion, diagnostics: collectOrderDomDiagnostics() } };
       }
-      click(submitButton);
-      await sleep(Number(command.timeoutMs || 1500));
-      return { ok: true, details: { automationVersion, side, orderType, amount, submitOnly: true, reduceOnly, clickedSubmitText: textOf(submitButton) } };
+      const submitClickPoint = cdpClickPoint(submitButton);
+      return {
+        ok: true,
+        details: {
+          automationVersion,
+          side,
+          orderType,
+          amount,
+          submitOnly: true,
+          reduceOnly,
+          clickedSubmitText: textOf(submitButton),
+          needsCdpSubmitClick: true,
+          submitClickPoint
+        }
+      };
     }
 
     const selectedOrderType = await selectOrderType(orderType);
@@ -1972,8 +2048,7 @@ function executeVariationalOrder(command) {
         details: { automationVersion, diagnostics: collectOrderDomDiagnostics() }
       };
     }
-    click(finalSubmitButton);
-    await sleep(Number(command.timeoutMs || 1500));
+    const submitClickPoint = cdpClickPoint(finalSubmitButton);
 
     const usedLimitPrice = orderType === "LIMIT"
       ? (readLimitPriceValue(excludedAmountInput || findLimitPriceInput()) || null)
@@ -1991,7 +2066,9 @@ function executeVariationalOrder(command) {
         usedLimitPrice,
         clickedMidAfterDisabledSubmit,
         market: command.market || null,
-        clickedSubmitText: textOf(finalSubmitButton)
+        clickedSubmitText: textOf(finalSubmitButton),
+        needsCdpSubmitClick: true,
+        submitClickPoint
       }
     };
   })();

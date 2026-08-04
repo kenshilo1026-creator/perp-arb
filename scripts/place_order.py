@@ -47,6 +47,10 @@ load_environment()
 VARIATIONAL_MAKER_REPRICE_MIN_CHANGE_PCT = 0.0005
 
 
+class PromptInputUnavailableError(RuntimeError):
+    pass
+
+
 def compute_token_batch_count(total_size: Decimal, clip_size: Decimal) -> int:
     if total_size <= 0 or clip_size <= 0:
         raise RuntimeError("total_size and clip_size must be positive")
@@ -54,7 +58,12 @@ def compute_token_batch_count(total_size: Decimal, clip_size: Decimal) -> int:
 
 
 def prompt_text(label: str) -> str:
-    value = input(f"{label}: ").strip().lstrip("﻿")
+    try:
+        value = input(f"{label}: ").strip().lstrip("﻿")
+    except EOFError as exc:
+        raise PromptInputUnavailableError(
+            f"cannot read {label}: stdin is closed; provide the value using CLI arguments"
+        ) from exc
     if not value:
         raise RuntimeError(f"{label} cannot be empty")
     return value
@@ -924,6 +933,12 @@ async def run_close_execution_once(*, cli_ticker: str | None = None) -> None:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Place a perpetual arb order")
+    parser.add_argument(
+        "--mode",
+        choices=("open", "close"),
+        default=None,
+        help="execution mode; prompts interactively when omitted",
+    )
     parser.add_argument("--ticker", type=str, default=None, help="token symbol, e.g. BTC")
     parser.add_argument("--short_venue", type=str, default=None, help="venue to go short on")
     parser.add_argument("--long_venue", type=str, default=None, help="venue to go long on")
@@ -933,7 +948,8 @@ def parse_args() -> argparse.Namespace:
 
 
 async def run_place_order(args: argparse.Namespace) -> None:
-    mode = normalize_execution_mode(prompt_text("mode [open/close/開倉/平倉]"))
+    mode_value = getattr(args, "mode", None) or prompt_text("mode [open/close/開倉/平倉]")
+    mode = normalize_execution_mode(mode_value)
     if mode == "open":
         await run_open_execution_once(
             cli_ticker=args.ticker,
@@ -954,6 +970,10 @@ def main() -> None:
         # asyncio.run() already cancelled the running task and gave it a chance
         # to run cleanup_active_makers (shielded). Print a clean exit message.
         print("\n[place_order] interrupted — open orders were cancelled if possible", flush=True)
+    except PromptInputUnavailableError as exc:
+        raise SystemExit(
+            f"[place_order] {exc}. Example: python scripts/place_order.py --mode close --ticker IMX"
+        ) from exc
 
 
 if __name__ == "__main__":

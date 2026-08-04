@@ -94,7 +94,16 @@ class VariationalExtensionCommandClientTests(unittest.TestCase):
         self.assertIn("runVariationalOrderInjection", background)
         self.assertIn("isTransientFrameRemovalError", background)
         self.assertIn("Frame with ID", background)
-        self.assertIn("await sleep(1000)", background)
+        self.assertIn("waitForTabComplete", background)
+        self.assertIn("recover-after-frame-removal", background)
+        self.assertIn("recover-full-submit-after-frame-removal", background)
+        self.assertIn("recoveredAfterFrameRemoval", background)
+        self.assertIn("submitVerifiedOpenOrder: true", background)
+        self.assertIn("execution status is unknown", background)
+        self.assertIn("isTransientOrderInjectionError", background)
+        self.assertIn("waitForVariationalOrderPageReady", background)
+        self.assertIn("collectVariationalOrderPageReadiness", background)
+        self.assertIn("order injection returned no result", background)
 
     def test_background_supports_market_and_limit_order_modes(self) -> None:
         background = (EXT_DIR / "background.js").read_text(encoding="utf-8")

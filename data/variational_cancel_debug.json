@@ -1,6 +1,6 @@
 {
   "type": "CANCEL_RESULT",
-  "requestId": "4e191cc4-554e-4be5-8a58-b6967cdca7e0",
+  "requestId": "a7f4b54d-e069-470c-a9e7-f722d290e092",
   "ok": false,
   "orderId": null,
   "error": "Could not identify cancel button for Variational order.",
@@ -92,7 +92,7 @@
         {
           "className": "text-xs",
           "disabled": false,
-          "text": "Portfolio $10,467.54 Portfolio $10,467.54"
+          "text": "Portfolio $10,356.71 Portfolio $10,356.71"
         },
         {
           "className": "min-h-8 h-8 max-h-8 p-2 bg-button-primary-background hover:bg-button-primary-background-hover focus:bg-button-primary-background-hover active:bg-button-primary-",
@@ -147,7 +147,7 @@
         {
           "className": "flex cursor-help",
           "disabled": false,
-          "text": "-0.0716% / 02:09:01 -0.0716% / 02:09:01"
+          "text": "-0.0207% / 03:56:59 -0.0207% / 03:56:59"
         },
         {
           "className": "h-1 cursor-ns-resize bg-background-muted-trade hover:bg-foreground-muted-more-more hover:border-foreground-muted-more-more transition-colors duration-200 group ",
@@ -157,7 +157,7 @@
         {
           "className": "h-8 max-h-8 px-2.5 py-1.5 text-xs bg-transparent hover:bg-tab-background-hover text-tab-foreground rounded-md font-inter inline-flex items-center justify-center",
           "disabled": false,
-          "text": "Positions 2 Positions 2"
+          "text": "Positions (2) Positions (2)"
         },
         {
           "className": "h-8 max-h-8 px-2.5 py-1.5 text-xs bg-transparent text-tab-foreground-active rounded-md font-inter inline-flex items-center justify-center outline-none focus:out",
@@ -225,14 +225,14 @@
           "text": "Pro Pro"
         },
         {
-          "className": "min-w-10 min-h-10 h-10 max-h-10 p-2 bg-button-primary-affirmative-background focus:bg-button-primary-affirmative-background-hover active:bg-button-primary-affir",
+          "className": "min-w-10 min-h-10 h-10 max-h-10 p-2 border disabled:text-button-primary-affirmative-background-disabled rounded-md font-inter items-center justify-center outlin",
           "disabled": false,
-          "text": "Buy $0.1282 Buy $0.1282"
+          "text": "Buy $0.1244 Buy $0.1244"
         },
         {
-          "className": "min-w-10 min-h-10 h-10 max-h-10 p-2 disabled:bg-button-primary-destructive-background-disabled border disabled:text-button-primary-destructive-foreground-disabl",
+          "className": "min-w-10 min-h-10 h-10 max-h-10 p-2 border border-button-secondary-destructive-border disabled:text-button-secondary-destructive-foreground-disabled rounded-md ",
           "disabled": false,
-          "text": "Sell $0.1279 Sell $0.1279"
+          "text": "Sell $0.1241 Sell $0.1241"
         },
         {
           "className": "link disabled:text-foreground-muted-more",
@@ -245,8 +245,8 @@
           "text": "IMX IMX IMX"
         },
         {
-          "className": "group inline-block relative outline-none focus-visible:outline-none shrink-0 cursor-not-allowed",
-          "disabled": true,
+          "className": "group inline-block relative outline-none focus-visible:outline-none shrink-0 cursor-pointer",
+          "disabled": false,
           "text": ""
         },
         {
@@ -255,14 +255,14 @@
           "text": ""
         },
         {
-          "className": "min-w-8 min-h-8 h-8 max-h-8 p-2 bg-button-primary-affirmative-background focus:bg-button-primary-affirmative-background-hover active:bg-button-primary-affirmati",
+          "className": "min-w-8 min-h-8 h-8 max-h-8 p-2 bg-button-primary-destructive-background focus:bg-button-primary-destructive-background-hover active:bg-button-primary-destructi",
           "disabled": false,
-          "text": "Buy IMX Buy IMX"
+          "text": "Sell IMX Sell IMX"
         },
         {
           "className": "flex items-center gap-1 cursor-pointer group text-link-default hover:text-link-default-hover text-2xs",
           "disabled": false,
-          "text": "Est: 0.16% / Max: 0.5% Est: 0.16% / Max: 0.5%"
+          "text": "Est: 0.16% / Max: 0.3% Est: 0.16% / Max: 0.3%"
         },
         {
           "className": "",
@@ -276,12 +276,12 @@
           "text": "Instrument Side Qty Status Type Trigger Maximum Slippage Close Only ID Time (UTC+8) Instrument Side Qty Status Type Trigger Maximum Slippage Close Only ID Time (UTC+8)"
         }
       ],
-      "title": "0.1280 | IMX-PERP | Variational Omni",
+      "title": "0.1243 | IMX-PERP | Variational Omni",
       "url": "https://omni.variational.io/perpetual/IMX"
     },
     "orderId": null,
-    "side": "buy",
+    "side": "sell",
     "symbol": "IMX"
   },
-  "timestamp": "2026-07-16T09:50:59.205Z"
+  "timestamp": "2026-07-24T16:03:00.086Z"
 }

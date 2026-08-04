@@ -1,5 +1,5 @@
 const DEBUGGER_VERSION = "1.3";
-const ORDER_AUTOMATION_VERSION = "variational-order-automation-2026-07-16-1";
+const ORDER_AUTOMATION_VERSION = "variational-order-automation-2026-07-26-10";
 const MAX_QUEUE_SIZE = 1000;
 const AUTO_RELOAD_COOLDOWN_MS = 5000;
 const MAX_ORDER_RELOAD_RETRIES = 2;
@@ -282,25 +282,90 @@ function isTransientFrameRemovalError(error) {
     || message.includes("Extension context invalidated");
 }
 
+function isTransientOrderInjectionError(error) {
+  const message = String(error?.message || error || "").toLowerCase();
+  return isTransientFrameRemovalError(error)
+    || message.includes("order injection returned no result");
+}
+
 async function runVariationalOrderInjection(payload) {
   let lastError = null;
-  for (let attempt = 0; attempt < 2; attempt += 1) {
+  for (let attempt = 0; attempt < 3; attempt += 1) {
     try {
       const [injectionResult] = await chrome.scripting.executeScript({
         target: { tabId: state.attachedTabId },
+        world: "MAIN",
         func: executeVariationalOrder,
         args: [{ ...payload, automationVersion: ORDER_AUTOMATION_VERSION }]
       });
       return injectionResult;
     } catch (error) {
       lastError = error;
-      if (attempt >= 1 || !isTransientFrameRemovalError(error)) {
+      if (!isTransientFrameRemovalError(error)) {
         throw error;
       }
-      await sleep(1000);
+      await waitForTabComplete(state.attachedTabId);
+      await waitForVariationalOrderPageReady(payload);
+
+      const submittingLimitOrder = !payload.previewOnly
+        && !payload.prepareOnly
+        && String(payload.orderType || "").toUpperCase() === "LIMIT";
+      if (submittingLimitOrder) {
+        try {
+          const recoveredCheck = await checkVariationalOpenOrderAfterSubmit(
+            {},
+            payload,
+            {},
+            `recover-after-frame-removal-${attempt + 1}`
+          );
+          if (recoveredCheck.exists) {
+            return {
+              result: {
+                ok: true,
+                orderId: recoveredCheck.payload.orderId || null,
+                details: {
+                  automationVersion: ORDER_AUTOMATION_VERSION,
+                  recoveredAfterFrameRemoval: true,
+                  submitVerifiedOpenOrder: true,
+                  needsCdpSubmitClick: false,
+                  openOrderCheck: recoveredCheck.payload,
+                }
+              }
+            };
+          }
+        } catch (checkError) {
+          lastError = checkError;
+          if (!isTransientFrameRemovalError(checkError)) {
+            throw checkError;
+          }
+          await waitForTabComplete(state.attachedTabId);
+          await waitForVariationalOrderPageReady(payload);
+        }
+      }
+
+      if (attempt >= 2) {
+        throw lastError;
+      }
     }
   }
   throw lastError;
+}
+
+async function dispatchDebuggerEnterKey(tabId) {
+  await sendDebuggerCommand(tabId, "Input.dispatchKeyEvent", {
+    type: "rawKeyDown",
+    key: "Enter",
+    code: "Enter",
+    windowsVirtualKeyCode: 13,
+    nativeVirtualKeyCode: 13
+  });
+  await sendDebuggerCommand(tabId, "Input.dispatchKeyEvent", {
+    type: "keyUp",
+    key: "Enter",
+    code: "Enter",
+    windowsVirtualKeyCode: 13,
+    nativeVirtualKeyCode: 13
+  });
 }
 
 async function dispatchDebuggerMouseClick(tabId, point) {
@@ -337,27 +402,183 @@ async function dispatchDebuggerMouseClick(tabId, point) {
   });
 }
 
+async function focusSubmitButtonInMainWorld(tabId, selector, point = null) {
+  if (!selector) {
+    return null;
+  }
+  return await sendDebuggerCommand(tabId, "Runtime.evaluate", {
+    expression: `
+      (() => {
+        const selector = ${JSON.stringify(selector)};
+        const point = ${JSON.stringify(point)};
+        let button = null;
+        if (point && Number.isFinite(Number(point.x)) && Number.isFinite(Number(point.y))) {
+          const pointEl = document.elementFromPoint(Number(point.x), Number(point.y));
+          button = pointEl?.closest?.(selector) || null;
+        }
+        button = button || document.querySelector(selector);
+        if (!button) return { ok: false, error: "submit selector not found", selector };
+        button.scrollIntoView({ block: "center", inline: "center" });
+        button.focus({ preventScroll: true });
+        return {
+          ok: true,
+          text: (button.innerText || button.textContent || "").trim(),
+          selector,
+          activeElementText: (document.activeElement?.innerText || document.activeElement?.textContent || "").trim(),
+          disabled: Boolean(button.disabled) || button.getAttribute("aria-disabled") === "true"
+        };
+      })()
+    `,
+    awaitPromise: true,
+    returnByValue: true,
+  });
+}
+
+async function checkVariationalOpenOrderAfterSubmit(result, payload, details, suffix) {
+  const checkResult = await runVariationalCancelInjection({
+    requestId: `${payload.requestId || "submit"}:${suffix}`,
+    orderId: result.orderId || null,
+    symbol: payload.symbol || details.market || null,
+    side: payload.side || details.side || null,
+    amount: payload.amount || details.amount || null,
+    checkOnly: true,
+  });
+  const checkPayload = checkResult?.result || {};
+  return {
+    payload: checkPayload,
+    exists: Boolean(checkPayload.exists || checkPayload.details?.exists),
+  };
+}
+
+async function runVariationalSubmitFollowupInjection(payload) {
+  const [injectionResult] = await chrome.scripting.executeScript({
+    target: { tabId: state.attachedTabId },
+    world: "MAIN",
+    func: executeVariationalSubmitFollowup,
+    args: [{ ...payload, automationVersion: ORDER_AUTOMATION_VERSION }]
+  });
+  return injectionResult?.result || {};
+}
+
 async function applyCdpSubmitClickIfRequested(result, payload) {
   const details = result?.details || {};
   const clickPoint = details.submitClickPoint;
   if (!result?.ok || !details.needsCdpSubmitClick || !clickPoint) {
     return result;
   }
-  await dispatchDebuggerMouseClick(state.attachedTabId, clickPoint);
-  await sleep(Number(payload.timeoutMs || 1500));
+  if (String(payload.orderType || details.orderType || "").toUpperCase() === "LIMIT") {
+    await sleep(Number(payload.timeoutMs || 1500));
+    const followupAfterSubmit = await runVariationalSubmitFollowupInjection({
+      symbol: payload.symbol || details.market || null,
+      side: payload.side || details.side || null,
+      amount: payload.amount || details.amount || null,
+    });
+    if (followupAfterSubmit.clicked) {
+      await sleep(Number(payload.timeoutMs || 1500));
+    }
+    const finalCheck = await checkVariationalOpenOrderAfterSubmit(result, payload, details, "verify-open-order-after-submit-activation");
+    if (!finalCheck.exists) {
+      return {
+        ok: false,
+        error: "Variational limit submit click did not create a matching open order.",
+        details: {
+          ...details,
+          needsCdpSubmitClick: false,
+          submitVerifiedOpenOrder: false,
+          submitFollowupAfterSubmit: followupAfterSubmit,
+          openOrderCheck: finalCheck.payload,
+        }
+      };
+    }
+    details.submitVerifiedOpenOrder = true;
+    details.submitFollowupAfterSubmit = followupAfterSubmit;
+    details.openOrderCheck = finalCheck.payload;
+  } else {
+    await sleep(Number(payload.timeoutMs || 1500));
+  }
   return {
     ...result,
     details: {
       ...details,
-      clickedViaCdp: true,
       needsCdpSubmitClick: false
     }
   };
 }
 
+async function runOrderInjectionAttempt(payload) {
+  const injectionResult = await runVariationalOrderInjection(payload);
+  const result = injectionResult?.result;
+  if (!result || typeof result !== "object" || !("ok" in result)) {
+    throw new Error("Variational order injection returned no result.");
+  }
+  return await applyCdpSubmitClickIfRequested(result, payload);
+}
+
+async function runOrderInjectionAttemptWithFrameRecovery(payload) {
+  const submittingOrder = !payload.previewOnly && !payload.prepareOnly;
+  const submittingLimitOrder = submittingOrder
+    && String(payload.orderType || "").toUpperCase() === "LIMIT";
+  let lastError = null;
+
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      return await runOrderInjectionAttempt(payload);
+    } catch (error) {
+      lastError = error;
+      if (!isTransientOrderInjectionError(error)) {
+        throw error;
+      }
+
+      await waitForTabComplete(state.attachedTabId);
+      await waitForVariationalOrderPageReady(payload);
+
+      if (submittingLimitOrder) {
+        try {
+          const recoveredCheck = await checkVariationalOpenOrderAfterSubmit(
+            {},
+            payload,
+            {},
+            `recover-full-submit-after-frame-removal-${attempt + 1}`
+          );
+          if (recoveredCheck.exists) {
+            return {
+              ok: true,
+              orderId: recoveredCheck.payload.orderId || null,
+              details: {
+                automationVersion: ORDER_AUTOMATION_VERSION,
+                recoveredAfterFrameRemoval: true,
+                submitVerifiedOpenOrder: true,
+                needsCdpSubmitClick: false,
+                openOrderCheck: recoveredCheck.payload,
+              }
+            };
+          }
+        } catch (checkError) {
+          lastError = checkError;
+          if (!isTransientOrderInjectionError(checkError)) {
+            throw checkError;
+          }
+          await waitForTabComplete(state.attachedTabId);
+          await waitForVariationalOrderPageReady(payload);
+        }
+      } else if (submittingOrder) {
+        throw new Error(
+          "Variational page frame changed during market submit; execution status is unknown, so the order was not retried."
+        );
+      }
+
+      if (attempt >= 2) {
+        throw lastError;
+      }
+    }
+  }
+
+  throw lastError;
+}
+
 async function runVariationalCancelInjection(payload) {
   let lastError = null;
-  for (let attempt = 0; attempt < 2; attempt += 1) {
+  for (let attempt = 0; attempt < 3; attempt += 1) {
     try {
       const [injectionResult] = await chrome.scripting.executeScript({
         target: { tabId: state.attachedTabId },
@@ -367,10 +588,11 @@ async function runVariationalCancelInjection(payload) {
       return injectionResult;
     } catch (error) {
       lastError = error;
-      if (attempt >= 1 || !isTransientFrameRemovalError(error)) {
+      if (attempt >= 2 || !isTransientFrameRemovalError(error)) {
         throw error;
       }
-      await sleep(1000);
+      await waitForTabComplete(state.attachedTabId);
+      await sleep(1500);
     }
   }
   throw lastError;
@@ -438,6 +660,157 @@ function isQuotedPriceUnavailableError(error) {
   return msg.includes("quoted price unavailable");
 }
 
+function isPostSubmitVerificationError(error) {
+  const msg = String(error || "").toLowerCase();
+  return msg.includes("limit submit click did not create a matching open order");
+}
+
+function collectVariationalOrderPageReadiness(command) {
+  function visible(el) {
+    if (!el) {
+      return false;
+    }
+    const style = window.getComputedStyle(el);
+    const rect = el.getBoundingClientRect();
+    return style.visibility !== "hidden"
+      && style.display !== "none"
+      && rect.width > 0
+      && rect.height > 0;
+  }
+
+  function normalizeSymbol(value) {
+    return String(value || "")
+      .trim()
+      .toUpperCase()
+      .replace(/[-_\s]?PERP$/i, "")
+      .replace(/USDT$/i, "");
+  }
+
+  let currentSymbol = "";
+  try {
+    const url = new URL(window.location.href);
+    const parts = url.pathname.split("/").filter(Boolean);
+    const perpetualIndex = parts.findIndex((part) => part.toLowerCase() === "perpetual");
+    currentSymbol = normalizeSymbol(parts[perpetualIndex + 1] || "");
+  } catch (_error) {
+    currentSymbol = "";
+  }
+
+  const expectedSymbol = normalizeSymbol(command.symbol || command.market);
+  const quantityInput = document.querySelector('input[data-testid="quantity-input"]');
+  const askText = String(document.querySelector('[data-testid="ask-price-display"]')?.textContent || "").trim();
+  const bidText = String(document.querySelector('[data-testid="bid-price-display"]')?.textContent || "").trim();
+  const quoteText = `${askText} ${bidText}`.trim();
+  const quoteReady = /\$?\s*[0-9][0-9,]*(?:\.[0-9]+)?/.test(quoteText);
+  const loadingButtons = Array.from(document.querySelectorAll("button"))
+    .filter(visible)
+    .filter((button) => /\bloading\b/i.test(String(button.textContent || "")));
+  const tickerReady = Boolean(expectedSymbol)
+    && Boolean(currentSymbol)
+    && expectedSymbol === currentSymbol;
+
+  return {
+    ready: tickerReady
+      && visible(quantityInput)
+      && quoteReady
+      && loadingButtons.length === 0,
+    expectedSymbol,
+    currentSymbol,
+    quantityInputVisible: visible(quantityInput),
+    quoteReady,
+    quoteText,
+    loadingButtonCount: loadingButtons.length,
+    url: window.location.href,
+  };
+}
+
+async function waitForVariationalOrderPageReady(payload, timeoutMs = 20000) {
+  const deadline = Date.now() + timeoutMs;
+  let lastReadiness = null;
+  let lastError = null;
+
+  while (Date.now() <= deadline) {
+    try {
+      const [injectionResult] = await chrome.scripting.executeScript({
+        target: { tabId: state.attachedTabId },
+        world: "MAIN",
+        func: collectVariationalOrderPageReadiness,
+        args: [payload]
+      });
+      lastReadiness = injectionResult?.result || null;
+      if (lastReadiness?.ready) {
+        return lastReadiness;
+      }
+    } catch (error) {
+      lastError = error;
+      if (!isTransientFrameRemovalError(error)) {
+        throw error;
+      }
+    }
+    await sleep(500);
+  }
+
+  const details = lastReadiness ? ` details=${JSON.stringify(lastReadiness)}` : "";
+  const cause = lastError ? ` cause=${String(lastError.message || lastError)}` : "";
+  throw new Error(
+    `Variational order injection returned no result because the order page did not become ready.${details}${cause}`
+  );
+}
+
+function waitForTabComplete(tabId, timeoutMs = 15000) {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    let timeoutId = null;
+
+    const cleanup = () => {
+      if (timeoutId) {
+        clearTimeout(timeoutId);
+      }
+      chrome.tabs.onUpdated.removeListener(onUpdated);
+    };
+
+    const finish = () => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      cleanup();
+      resolve();
+    };
+
+    const fail = (error) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      cleanup();
+      reject(error);
+    };
+
+    const onUpdated = (updatedTabId, changeInfo) => {
+      if (updatedTabId === tabId && changeInfo.status === "complete") {
+        finish();
+      }
+    };
+
+    chrome.tabs.onUpdated.addListener(onUpdated);
+    timeoutId = setTimeout(() => {
+      fail(new Error(`Timed out waiting for tab ${tabId} to become ready`));
+    }, timeoutMs);
+
+    chrome.tabs.get(tabId, (tab) => {
+      const err = chrome.runtime.lastError;
+      if (err) {
+        fail(new Error(err.message));
+        return;
+      }
+      if (tab?.status === "complete") {
+        finish();
+      }
+    });
+  });
+}
+
 function reloadTabAndWaitForComplete(tabId, timeoutMs = 15000) {
   return new Promise((resolve, reject) => {
     let settled = false;
@@ -489,28 +862,33 @@ function reloadTabAndWaitForComplete(tabId, timeoutMs = 15000) {
 }
 
 async function runOrderInjectionWithReload(payload) {
-  let injectionResult = await runVariationalOrderInjection(payload);
-  let result = await applyCdpSubmitClickIfRequested(injectionResult?.result || {}, payload);
+  let result = await runOrderInjectionAttemptWithFrameRecovery(payload);
+  const submittingOrder = !payload.previewOnly && !payload.prepareOnly;
 
   for (let reloadAttempt = 0; result && !result.ok && reloadAttempt < MAX_ORDER_RELOAD_RETRIES; reloadAttempt += 1) {
     const quotedPriceUnavailable = isQuotedPriceUnavailableError(result.error);
+    const postSubmitVerificationFailed = isPostSubmitVerificationError(result.error);
+    if (submittingOrder && (!quotedPriceUnavailable || postSubmitVerificationFailed)) {
+      break;
+    }
     // For submitOnly, only reload when Variational explicitly reports that no
     // quoted price is available. Other failures may still rely on prepared state.
-    const shouldReload = quotedPriceUnavailable
-      || (!payload.submitOnly && (isNotFoundError(result.error) || isSubmitDisabledAfterAmountError(result.error)));
+    const shouldReload = !postSubmitVerificationFailed && (
+      quotedPriceUnavailable
+      || (!payload.submitOnly && (isNotFoundError(result.error) || isSubmitDisabledAfterAmountError(result.error)))
+    );
     if (!shouldReload) {
       break;
     }
     const reason = quotedPriceUnavailable
-      ? "quoted price unavailable"
+      ? (submittingOrder ? "quoted price unavailable before submit" : "quoted price unavailable")
       : (isSubmitDisabledAfterAmountError(result.error)
           ? "submit disabled after amount input"
           : "not found");
     console.log(`[variational] ${reason} — reloading page and retrying`);
     await reloadTabAndWaitForComplete(state.attachedTabId);
     await sleep(2000);
-    injectionResult = await runVariationalOrderInjection(payload);
-    result = await applyCdpSubmitClickIfRequested(injectionResult?.result || {}, payload);
+    result = await runOrderInjectionAttemptWithFrameRecovery(payload);
     if (result && !result.ok) {
       result.error = `[after reload] ${result.error || "unknown error"}`;
     }
@@ -1358,6 +1736,119 @@ function executeVariationalLimitPricePreview(command) {
   })();
 }
 
+function executeVariationalSubmitFollowup(command) {
+  const automationVersion = command.automationVersion || "unknown";
+  const clickableSelector = "button,[role='button'],a,[tabindex],div[class*='cursor-pointer'],div[class*='hover:bg']";
+
+  function visible(el) {
+    if (!el) {
+      return false;
+    }
+    const style = window.getComputedStyle(el);
+    const rect = el.getBoundingClientRect();
+    return style.visibility !== "hidden" && style.display !== "none" && rect.width > 0 && rect.height > 0;
+  }
+
+  function textOf(el) {
+    return `${el.innerText || ""} ${el.textContent || ""} ${el.getAttribute("aria-label") || ""} ${el.getAttribute("title") || ""}`.trim();
+  }
+
+  function click(el) {
+    try { el.scrollIntoView({ block: "center", inline: "center" }); } catch (_e) {}
+    try { el.focus({ preventScroll: true }); } catch (_e) {}
+    const rect = el.getBoundingClientRect();
+    const cx = rect.left + rect.width / 2;
+    const cy = rect.top + rect.height / 2;
+    const base = { bubbles: true, cancelable: true, view: window, clientX: cx, clientY: cy, button: 0, buttons: 1 };
+    const pointer = { ...base, pointerId: 1, pointerType: "mouse", isPrimary: true };
+    try { el.dispatchEvent(new PointerEvent("pointerover", pointer)); } catch (_e) {}
+    el.dispatchEvent(new MouseEvent("mouseover", base));
+    try { el.dispatchEvent(new PointerEvent("pointerdown", pointer)); } catch (_e) {}
+    el.dispatchEvent(new MouseEvent("mousedown", base));
+    try { el.dispatchEvent(new PointerEvent("pointerup", { ...pointer, buttons: 0 })); } catch (_e) {}
+    el.dispatchEvent(new MouseEvent("mouseup", { ...base, buttons: 0 }));
+    el.click();
+  }
+
+  function normalizeSymbol(value) {
+    return String(value || "")
+      .trim()
+      .toUpperCase()
+      .replace(/[-_\s]?PERP$/i, "")
+      .replace(/USDT$/i, "");
+  }
+
+  function modalCandidates() {
+    const explicit = Array.from(document.querySelectorAll('[role="dialog"],[aria-modal="true"]'))
+      .filter(visible);
+    const fixed = Array.from(document.querySelectorAll("div,section"))
+      .filter(visible)
+      .filter((el) => {
+        const style = window.getComputedStyle(el);
+        const rect = el.getBoundingClientRect();
+        return (style.position === "fixed" || style.position === "absolute")
+          && rect.width >= 240
+          && rect.height >= 120
+          && rect.left < window.innerWidth
+          && rect.top < window.innerHeight;
+      })
+      .filter((el) => /confirm|review|order|margin|submit|buy|sell/i.test(textOf(el)));
+    return [...explicit, ...fixed];
+  }
+
+  function isRejected(text) {
+    const normalized = text.toLowerCase().replace(/\s+/g, " ").trim();
+    return /\bcancel\b/.test(normalized)
+      || /\bclose\b/.test(normalized)
+      || /\bedit\b/.test(normalized)
+      || /\bback\b/.test(normalized)
+      || /\bhistory\b/.test(normalized);
+  }
+
+  const symbol = normalizeSymbol(command.symbol || command.market);
+  const side = String(command.side || "").trim().toUpperCase();
+  const sideWord = side === "BUY" ? "buy" : "sell";
+  const containers = modalCandidates();
+  const buttons = containers.flatMap((container) =>
+    Array.from(container.querySelectorAll(clickableSelector))
+      .filter(visible)
+      .filter((el) => !el.disabled && el.getAttribute("aria-disabled") !== "true")
+      .map((el) => ({ el, text: textOf(el).replace(/\s+/g, " ").trim(), containerText: textOf(container).replace(/\s+/g, " ").trim().slice(0, 240) }))
+  );
+  const candidates = buttons.filter((item) => {
+    const lower = item.text.toLowerCase();
+    if (isRejected(item.text)) {
+      return false;
+    }
+    return /\bconfirm\b/.test(lower)
+      || /\bsubmit\b/.test(lower)
+      || /\bplace\b/.test(lower)
+      || /\border\b/.test(lower)
+      || (sideWord && lower.includes(sideWord) && (!symbol || lower.includes(symbol.toLowerCase())));
+  });
+  const chosen = candidates[0] || null;
+  if (chosen) {
+    click(chosen.el);
+    return {
+      ok: true,
+      clicked: true,
+      automationVersion,
+      clickedText: chosen.text,
+      containerText: chosen.containerText,
+      modalCount: containers.length,
+      candidateTexts: candidates.slice(0, 10).map((item) => item.text)
+    };
+  }
+  return {
+    ok: true,
+    clicked: false,
+    automationVersion,
+    modalCount: containers.length,
+    buttonTexts: buttons.slice(0, 20).map((item) => item.text),
+    containerTexts: containers.slice(0, 5).map((el) => textOf(el).replace(/\s+/g, " ").trim().slice(0, 240))
+  };
+}
+
 function executeVariationalOrder(command) {
   const automationVersion = command.automationVersion || "unknown";
   const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -1400,11 +1891,17 @@ function executeVariationalOrder(command) {
     try { el.scrollIntoView({ block: "center", inline: "center" }); } catch (_e) {}
     try { el.focus({ preventScroll: true }); } catch (_e) {}
     const rect = el.getBoundingClientRect();
+    const x = rect.left + rect.width / 2;
+    const y = rect.top + rect.height / 2;
+    const pointEl = document.elementFromPoint(x, y);
     return {
-      x: rect.left + rect.width / 2,
-      y: rect.top + rect.height / 2,
+      x,
+      y,
       width: rect.width,
-      height: rect.height
+      height: rect.height,
+      elementFromPointText: pointEl ? textOf(pointEl).replace(/\s+/g, " ").trim().slice(0, 120) : null,
+      elementFromPointTag: pointEl ? pointEl.tagName : null,
+      elementFromPointClassName: pointEl ? String(pointEl.className || "").slice(0, 120) : null
     };
   }
 
@@ -1605,6 +2102,25 @@ function executeVariationalOrder(command) {
     };
   }
 
+  async function retryLimitMidAfterUnavailableSubmit(side) {
+    const priceResult = await setLimitPriceOrClickMid("");
+    if (!priceResult.ok) {
+      return {
+        button: null,
+        disabledButton: null,
+        unavailableButton: null,
+        clickedMidAfterQuotedPriceUnavailable: false,
+        error: priceResult.error,
+      };
+    }
+    await sleep(750);
+    const retryMidAfterUnavailableSubmit = await waitForEnabledSubmitButton(side, 7000);
+    return {
+      ...retryMidAfterUnavailableSubmit,
+      clickedMidAfterQuotedPriceUnavailable: true,
+    };
+  }
+
   async function selectOrderType(orderType) {
     const button = findOrderTypeButton(orderType);
     if (!button) {
@@ -1628,6 +2144,9 @@ function executeVariationalOrder(command) {
 
   function isRejectedTradeButtonText(text) {
     const normalized = text.toLowerCase().replace(/\s+/g, " ").trim();
+    if (/^(buy|sell)\s+\$?[0-9][0-9,]*(?:\.[0-9]+)?(?:\s+\1\s+\$?[0-9][0-9,]*(?:\.[0-9]+)?)?$/.test(normalized)) {
+      return true;
+    }
     return [
       "order history",
       "trade history",
@@ -1647,6 +2166,22 @@ function executeVariationalOrder(command) {
       .find((el) => /\bquoted\s+price\s+unavailable\b/i.test(textOf(el))) || null;
   }
 
+  function submitButtonLooksLikeOrderAction(el, side) {
+    const normalized = textOf(el).toLowerCase().replace(/\s+/g, " ").trim();
+    const currentSymbol = currentVariationalSymbol().toLowerCase();
+    const sideWord = side === "BUY" ? "buy" : "sell";
+    if (!normalized.includes(sideWord) && !(side === "BUY" ? /\blong\b/.test(normalized) : /\bshort\b/.test(normalized))) {
+      return false;
+    }
+    return (
+      (currentSymbol && normalized.includes(currentSymbol))
+      || /\bplace\b/.test(normalized)
+      || /\bsubmit\b/.test(normalized)
+      || /\bconfirm\b/.test(normalized)
+      || /\border\b/.test(normalized)
+    );
+  }
+
   function findSubmitButton(side) {
     const explicitSubmitButtons = Array.from(document.querySelectorAll('button[data-testid="submit-button"]'))
       .filter(visible)
@@ -1655,7 +2190,8 @@ function executeVariationalOrder(command) {
     const sidePatterns = side === "BUY"
       ? [/\bplace\s+buy\b/i, /\bbuy\b/i, /\blong\b/i]
       : [/\bplace\s+sell\b/i, /\bsell\b/i, /\bshort\b/i];
-    const explicitSideMatch = explicitSubmitButtons.find((el) => sidePatterns.some((pattern) => pattern.test(textOf(el))));
+    const explicitSideMatch = explicitSubmitButtons.find((el) => submitButtonLooksLikeOrderAction(el, side))
+      || explicitSubmitButtons.find((el) => sidePatterns.some((pattern) => pattern.test(textOf(el))));
     if (explicitSideMatch) {
       return explicitSideMatch;
     }
@@ -1680,10 +2216,11 @@ function executeVariationalOrder(command) {
   async function waitForEnabledSubmitButton(side, timeoutMs) {
     const deadline = Date.now() + timeoutMs;
     let disabledSubmitButton = null;
+    let unavailableSubmitButton = null;
     while (Date.now() <= deadline) {
       const unavailableButton = findQuotedPriceUnavailableButton();
       if (unavailableButton) {
-        return { button: null, disabledButton: unavailableButton, unavailableButton };
+        unavailableSubmitButton = unavailableButton;
       }
       const submitButton = findSubmitButton(side);
       if (submitButton) {
@@ -1694,7 +2231,11 @@ function executeVariationalOrder(command) {
         .filter((el) => !isRejectedTradeButtonText(textOf(el)))[0] || disabledSubmitButton;
       await sleep(100);
     }
-    return { button: null, disabledButton: disabledSubmitButton, unavailableButton: null };
+    return {
+      button: null,
+      disabledButton: disabledSubmitButton || unavailableSubmitButton,
+      unavailableButton: unavailableSubmitButton
+    };
   }
 
   function findAmountInput(orderType, excludedInput = null) {
@@ -1861,6 +2402,7 @@ function executeVariationalOrder(command) {
         return { ok: false, error: "Could not find submit/order button on Variational page.", details: { automationVersion, diagnostics: collectOrderDomDiagnostics() } };
       }
       const submitClickPoint = cdpClickPoint(submitButton);
+      click(submitButton);
       return {
         ok: true,
         details: {
@@ -1872,6 +2414,8 @@ function executeVariationalOrder(command) {
           reduceOnly,
           clickedSubmitText: textOf(submitButton),
           needsCdpSubmitClick: true,
+          clickedViaPageGesture: true,
+          submitSelector: 'button[data-testid="submit-button"]',
           submitClickPoint
         }
       };
@@ -1983,35 +2527,13 @@ function executeVariationalOrder(command) {
       side,
       Number(command.submitEnableTimeoutMs || 5000)
     );
-    if (unavailableButton) {
-      return {
-        ok: false,
-        error: "Quoted Price unavailable.",
-        details: {
-          automationVersion,
-          amount,
-          clickedSubmitText: textOf(unavailableButton),
-          diagnostics: collectOrderDomDiagnostics()
-        }
-      };
-    }
     let finalSubmitButton = submitButton;
     let finalDisabledButton = disabledButton;
+    let finalUnavailableButton = unavailableButton;
     let clickedMidAfterDisabledSubmit = false;
-    if (!finalSubmitButton && finalDisabledButton && orderType === "LIMIT") {
-      const retryResult = await retryLimitMidAfterDisabledSubmit(side);
-      if (retryResult.unavailableButton) {
-        return {
-          ok: false,
-          error: "Quoted Price unavailable.",
-          details: {
-            automationVersion,
-            amount,
-            clickedSubmitText: textOf(retryResult.unavailableButton),
-            diagnostics: collectOrderDomDiagnostics()
-          }
-        };
-      }
+    let clickedMidAfterQuotedPriceUnavailable = false;
+    if (!finalSubmitButton && finalUnavailableButton && orderType === "LIMIT") {
+      const retryResult = await retryLimitMidAfterUnavailableSubmit(side);
       if (retryResult.error) {
         return {
           ok: false,
@@ -2019,13 +2541,85 @@ function executeVariationalOrder(command) {
           details: {
             automationVersion,
             amount,
-            clickedSubmitText: textOf(finalDisabledButton),
+            clickedMidAfterQuotedPriceUnavailable,
+            clickedSubmitText: textOf(finalUnavailableButton),
             diagnostics: collectOrderDomDiagnostics()
           }
         };
       }
       finalSubmitButton = retryResult.button;
       finalDisabledButton = retryResult.disabledButton || finalDisabledButton;
+      finalUnavailableButton = retryResult.unavailableButton;
+      clickedMidAfterQuotedPriceUnavailable = Boolean(retryResult.clickedMidAfterQuotedPriceUnavailable);
+    }
+    if (!finalSubmitButton && finalUnavailableButton) {
+      return {
+        ok: false,
+        error: "Quoted Price unavailable.",
+        details: {
+          automationVersion,
+          amount,
+          clickedMidAfterQuotedPriceUnavailable,
+          clickedSubmitText: textOf(finalUnavailableButton),
+          diagnostics: collectOrderDomDiagnostics()
+        }
+      };
+    }
+    if (!finalSubmitButton && finalDisabledButton && orderType === "LIMIT") {
+      const retryResult = await retryLimitMidAfterDisabledSubmit(side);
+      if (retryResult.unavailableButton) {
+        const unavailableRetryResult = await retryLimitMidAfterUnavailableSubmit(side);
+        clickedMidAfterQuotedPriceUnavailable = Boolean(unavailableRetryResult.clickedMidAfterQuotedPriceUnavailable);
+        if (unavailableRetryResult.error) {
+          return {
+            ok: false,
+            error: unavailableRetryResult.error,
+            details: {
+              automationVersion,
+              amount,
+              clickedMidAfterDisabledSubmit,
+              clickedMidAfterQuotedPriceUnavailable,
+              clickedSubmitText: textOf(retryResult.unavailableButton),
+              diagnostics: collectOrderDomDiagnostics()
+            }
+          };
+        }
+        finalSubmitButton = unavailableRetryResult.button;
+        finalDisabledButton = unavailableRetryResult.disabledButton || finalDisabledButton;
+        finalUnavailableButton = unavailableRetryResult.unavailableButton;
+      }
+      if (!finalSubmitButton && finalUnavailableButton) {
+        return {
+          ok: false,
+          error: "Quoted Price unavailable.",
+          details: {
+            automationVersion,
+            amount,
+            clickedMidAfterDisabledSubmit,
+            clickedMidAfterQuotedPriceUnavailable,
+            clickedSubmitText: textOf(finalUnavailableButton),
+            diagnostics: collectOrderDomDiagnostics()
+          }
+        };
+      }
+      if (!finalSubmitButton && retryResult.error) {
+        return {
+          ok: false,
+          error: retryResult.error,
+          details: {
+            automationVersion,
+            amount,
+            clickedMidAfterDisabledSubmit,
+            clickedMidAfterQuotedPriceUnavailable,
+            clickedSubmitText: textOf(finalDisabledButton),
+            diagnostics: collectOrderDomDiagnostics()
+          }
+        };
+      }
+      if (!finalSubmitButton) {
+        finalSubmitButton = retryResult.button;
+        finalDisabledButton = retryResult.disabledButton || finalDisabledButton;
+      }
       clickedMidAfterDisabledSubmit = Boolean(retryResult.clickedMidAfterDisabledSubmit);
     }
     if (!finalSubmitButton) {
@@ -2037,6 +2631,7 @@ function executeVariationalOrder(command) {
             automationVersion,
             amount,
             clickedMidAfterDisabledSubmit,
+            clickedMidAfterQuotedPriceUnavailable,
             clickedSubmitText: textOf(finalDisabledButton),
             diagnostics: collectOrderDomDiagnostics()
           }
@@ -2049,6 +2644,7 @@ function executeVariationalOrder(command) {
       };
     }
     const submitClickPoint = cdpClickPoint(finalSubmitButton);
+    click(finalSubmitButton);
 
     const usedLimitPrice = orderType === "LIMIT"
       ? (readLimitPriceValue(excludedAmountInput || findLimitPriceInput()) || null)
@@ -2065,9 +2661,12 @@ function executeVariationalOrder(command) {
         explicitLimitPrice: explicitLimitPrice || null,
         usedLimitPrice,
         clickedMidAfterDisabledSubmit,
+        clickedMidAfterQuotedPriceUnavailable,
         market: command.market || null,
         clickedSubmitText: textOf(finalSubmitButton),
         needsCdpSubmitClick: true,
+        clickedViaPageGesture: true,
+        submitSelector: 'button[data-testid="submit-button"]',
         submitClickPoint
       }
     };

@@ -271,6 +271,78 @@ class VariationalCommandBroker:
             if not self.quiet:
                 print(f"[VARIATIONAL_BROKER] portfolio received count={len(self._positions)} symbols={list(self._positions.keys())}", flush=True)
 
+    def _signed_position_quantity(self, symbol: Any) -> Decimal:
+        normalized = normalize_variational_symbol(symbol)
+        position = self._positions.get(normalized)
+        if not position:
+            return Decimal("0")
+        try:
+            quantity = Decimal(str(position.get("quantity") or "0"))
+        except Exception:
+            return Decimal("0")
+        return quantity if position.get("side") == "LONG" else -quantity
+
+    async def _confirm_fill_from_position_delta(self) -> bool:
+        """Confirm one pending order from a live portfolio quantity change.
+
+        Variational's trade-event stream is not reliable enough to be the only
+        fill source. The embedded broker waits for an initial portfolio before
+        trading, so the signed position at dispatch is a safe second baseline.
+        """
+        for request_id, pending in list(self._pending_requests.items()):
+            order = pending.get("order") or {}
+            symbol = normalize_variational_symbol(order.get("symbol") or order.get("market"))
+            side = normalize_variational_side(order.get("side"))
+            if not symbol or side not in {"BUY", "SELL"}:
+                continue
+            baseline = pending.get("baselinePositionQty", Decimal("0"))
+            current = self._signed_position_quantity(symbol)
+            delta = current - baseline
+            if (side == "BUY" and delta <= 0) or (side == "SELL" and delta >= 0):
+                continue
+            try:
+                requested = Decimal(str(order.get("amount") or "0"))
+            except Exception:
+                requested = Decimal("0")
+            filled_quantity = abs(delta)
+            if requested > 0:
+                filled_quantity = min(filled_quantity, requested)
+            if filled_quantity <= 0:
+                continue
+            fill = {
+                "symbol": symbol,
+                "side": side,
+                "orderId": pending.get("orderId"),
+                "filledBaseAmount": format(filled_quantity.normalize(), "f"),
+                "filledQuoteAmount": None,
+                "source": "portfolio_position_delta",
+                "baselinePositionQty": format(baseline.normalize(), "f"),
+                "currentPositionQty": format(current.normalize(), "f"),
+            }
+            await self._accept_pending_fill(request_id, pending, fill)
+            return True
+        return False
+
+    async def _accept_pending_fill(
+        self,
+        request_id: str,
+        pending: dict[str, Any],
+        fill: dict[str, Any],
+    ) -> None:
+        if not pending.get("submitted"):
+            pending["earlyFill"] = fill
+            if not self.quiet:
+                order = pending.get("order") or {}
+                print(
+                    f"[VARIATIONAL_BROKER] early fill cached {order.get('symbol', '?')} "
+                    f"{order.get('side', '?')} source={fill.get('source', 'trade_event')}",
+                    flush=True,
+                )
+            return
+        self._pending_requests.pop(request_id, None)
+        self._cancel_pending_timeout(pending)
+        await self._send_filled_order_result(request_id, pending, fill)
+
     async def wait_for_portfolio(self, *, timeout_seconds: float = 15.0) -> None:
         await asyncio.wait_for(self._portfolio_received.wait(), timeout=timeout_seconds)
 
@@ -279,9 +351,14 @@ class VariationalCommandBroker:
         self._last_fill_event = compact_debug_payload(payload)
         decoded = parse_forwarded_ws_payload(payload)
         url = payload.get("url", "") if isinstance(payload, dict) else ""
-        if isinstance(decoded, dict) and "/portfolio" in str(url):
-            self._update_positions_from_portfolio(decoded.get("positions") or [])
-            return
+        if (
+            isinstance(decoded, dict)
+            and "/portfolio" in str(url)
+            and isinstance(decoded.get("positions"), list)
+        ):
+            self._update_positions_from_portfolio(decoded["positions"])
+            if await self._confirm_fill_from_position_delta():
+                return
         fill = extract_variational_fill_event(payload)
         if fill is None:
             self._last_fill_reject_reason = "not_fill_event"
@@ -301,35 +378,7 @@ class VariationalCommandBroker:
                     f"fill_symbol={fill.get('symbol')} fill_side={fill.get('side')}"
                 )
                 continue
-            if not pending.get("submitted"):
-                pending["earlyFill"] = fill
-                symbol = pending.get("order", {}).get("symbol", "?")
-                side = pending.get("order", {}).get("side", "?")
-                if not self.quiet:
-                    print(f"[VARIATIONAL_BROKER] early fill cached {symbol} {side}", flush=True)
-                continue
-            self._pending_requests.pop(request_id, None)
-            self._cancel_pending_timeout(pending)
-            symbol = pending.get("order", {}).get("symbol", "?")
-            side = pending.get("order", {}).get("side", "?")
-            if not self.quiet:
-                print(f"[VARIATIONAL_BROKER] fill confirmed {symbol} {side}", flush=True)
-            await self._send(
-                pending["requester"],
-                {
-                    "type": "ORDER_RESULT",
-                    "requestId": request_id,
-                    "ok": True,
-                    "filled": True,
-                    "status": "FILLED",
-                    "orderId": fill.get("orderId") or pending.get("orderId"),
-                    "details": {
-                        "fill": fill,
-                        "submitted": pending.get("submittedResult"),
-                    },
-                    "timestamp": utc_now(),
-                },
-            )
+            await self._accept_pending_fill(request_id, pending, fill)
             return
         self._last_fill_reject_reason = "no_pending_match"
 
@@ -523,6 +572,9 @@ class VariationalCommandBroker:
             "submitted": False,
             "orderId": None,
             "timeoutTask": None,
+            "baselinePositionQty": self._signed_position_quantity(
+                payload.get("symbol") or payload.get("market")
+            ),
         }
         ext_msg: dict[str, Any] = {
             "type": "PLACE_ORDER",
@@ -562,19 +614,6 @@ class VariationalCommandBroker:
         pending["submitted"] = True
         pending["orderId"] = payload.get("orderId")
         pending["submittedResult"] = payload
-        await self._send(
-            pending["requester"],
-            {
-                "type": "ORDER_ACCEPTED",
-                "requestId": request_id,
-                "ok": True,
-                "orderId": pending.get("orderId"),
-                "details": {
-                    "submitted": payload,
-                },
-                "timestamp": utc_now(),
-            },
-        )
         early_fill = pending.get("earlyFill")
         if isinstance(early_fill, dict):
             self._pending_requests.pop(request_id, None)

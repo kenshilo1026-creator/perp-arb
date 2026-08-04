@@ -406,6 +406,7 @@ async def execute_spot_perp_open(params: OpenParams, *, live: bool, on_progress,
             host=VARIATIONAL_BROKER_HOST, port=VARIATIONAL_BROKER_PORT,
         ) as server:
             await server.wait_for_extension(timeout_seconds=VARIATIONAL_EXTENSION_TIMEOUT_SECONDS)
+            await server.wait_for_portfolio(timeout_seconds=15.0)
             return await _run(broker_url=server.ws_url)
     return await _run()
 

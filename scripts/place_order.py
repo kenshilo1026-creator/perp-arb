@@ -82,7 +82,7 @@ def prompt_int(label: str) -> int:
     return number
 
 
-MAKER_REPRICE_ATTEMPTS = -1  # -1 = infinite: cancel + reprice every 60s until filled
+MAKER_REPRICE_ATTEMPTS = -1  # Non-Variational makers: reprice until filled; Variational is forced to 0.
 
 VARIATIONAL_BROKER_HOST = "127.0.0.1"
 VARIATIONAL_BROKER_PORT = 8768
@@ -90,6 +90,35 @@ VARIATIONAL_FILL_PORT = 8766
 VARIATIONAL_EXTENSION_TIMEOUT_SECONDS = 30.0
 VARIATIONAL_ORDER_TIMEOUT_SECONDS = 30.0
 MAKER_FILL_TIMEOUT_SECONDS = 60.0
+
+
+def maker_reprice_attempts_for_venue(venue: str) -> int:
+    """Variational is fail-closed: never submit a replacement after fill ambiguity."""
+    return 0 if venue.strip().lower() == "variational" else MAKER_REPRICE_ATTEMPTS
+
+
+def assert_variational_pair_balanced(
+    *,
+    short_leg: dict,
+    long_leg: dict,
+    short_venue: str,
+    long_venue: str,
+    reference_quantity: str | Decimal,
+) -> None:
+    if "variational" not in {short_venue.strip().lower(), long_venue.strip().lower()}:
+        return
+    short_quantity = Decimal(str(short_leg["quantity"]))
+    long_quantity = Decimal(str(long_leg["quantity"]))
+    reference = Decimal(str(reference_quantity))
+    tolerance = max(reference * Decimal("0.001"), Decimal("0.00000001"))
+    imbalance = abs(short_quantity - long_quantity)
+    if imbalance > tolerance:
+        raise RuntimeError(
+            "FAIL-CLOSED live position mismatch after Variational execution: "
+            f"{short_venue} SHORT={short_quantity} vs "
+            f"{long_venue} LONG={long_quantity}; imbalance={imbalance} "
+            f"tolerance={tolerance}. Stopping before the next batch."
+        )
 
 
 @dataclass(frozen=True)
@@ -309,6 +338,16 @@ async def record_open_execution_from_live_positions(
         expected_side="LONG",
         fallback_quantity=fallback_quantity,
     )
+    assert_variational_pair_balanced(
+        short_leg=short_leg,
+        long_leg=long_leg,
+        short_venue=short_venue,
+        long_venue=long_venue,
+        reference_quantity=(
+            fallback_quantity
+            or min(Decimal(str(short_leg["quantity"])), Decimal(str(long_leg["quantity"])))
+        ),
+    )
     strategy_id = f"manual-{symbol.upper()}-{int(time.time() * 1000)}"
     return record_successful_live_legs(
         path=registry_path,
@@ -435,7 +474,7 @@ async def execute_close_position_plan(
         maker_price=None if plan.maker_venue == "variational" else plan.maker_price,
         require_maker_fill_confirmation=True,
         maker_fill_timeout_seconds=MAKER_FILL_TIMEOUT_SECONDS,
-        max_maker_reprice_attempts=MAKER_REPRICE_ATTEMPTS,
+        max_maker_reprice_attempts=maker_reprice_attempts_for_venue(plan.maker_venue),
         maker_reprice_min_change_pct=(
             VARIATIONAL_MAKER_REPRICE_MIN_CHANGE_PCT
             if plan.maker_venue == "variational"
@@ -578,7 +617,7 @@ async def execute_open_clip(
             taker_orderbook=taker_book,
             require_maker_fill_confirmation=True,
             maker_fill_timeout_seconds=MAKER_FILL_TIMEOUT_SECONDS,
-            max_maker_reprice_attempts=MAKER_REPRICE_ATTEMPTS,
+            max_maker_reprice_attempts=maker_reprice_attempts_for_venue(maker_venue),
             maker_reprice_min_change_pct=(
                 VARIATIONAL_MAKER_REPRICE_MIN_CHANGE_PCT
                 if maker_venue == "variational"

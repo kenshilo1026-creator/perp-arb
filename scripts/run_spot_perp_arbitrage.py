@@ -37,8 +37,9 @@ from hydra_basis.formatting import fmt_pct
 from hydra_basis.risk_management.recording import record_successful_live_legs
 from scripts.place_order import (
     MAKER_FILL_TIMEOUT_SECONDS,
-    MAKER_REPRICE_ATTEMPTS,
     VARIATIONAL_MAKER_REPRICE_MIN_CHANGE_PCT,
+    assert_variational_pair_balanced,
+    maker_reprice_attempts_for_venue,
     _executed_quantity_from_result,
     _registry_fallback_leg,
     build_adapter_for_venue,
@@ -450,7 +451,7 @@ async def execute_spot_perp_plan(
             taker_orderbook=plan.taker_orderbook,
             require_maker_fill_confirmation=True,
             maker_fill_timeout_seconds=MAKER_FILL_TIMEOUT_SECONDS,
-            max_maker_reprice_attempts=MAKER_REPRICE_ATTEMPTS,
+            max_maker_reprice_attempts=maker_reprice_attempts_for_venue(plan.maker_venue),
             maker_reprice_min_change_pct=(
                 VARIATIONAL_MAKER_REPRICE_MIN_CHANGE_PCT
                 if plan.maker_venue == "variational"
@@ -490,6 +491,13 @@ async def execute_spot_perp_plan(
             market_type="perp",
             expected_side="SHORT",
             fallback_quantity=fallback_quantity,
+        )
+        assert_variational_pair_balanced(
+            short_leg=perp_leg,
+            long_leg=spot_leg,
+            short_venue=plan.short_venue,
+            long_venue=MEXC_SPOT_VENUE,
+            reference_quantity=(fallback_quantity or plan.quantity),
         )
         strategy_id = f"spot-perp-{plan.symbol}-{int(time.time() * 1000)}"
         recorded_strategy_id = record_successful_live_legs(
@@ -674,6 +682,7 @@ async def run_spot_perp_arbitrage() -> None:
                 f"timeout={args.variational_extension_timeout:.1f}s"
             )
             await server.wait_for_extension(timeout_seconds=args.variational_extension_timeout)
+            await server.wait_for_portfolio(timeout_seconds=15.0)
             await execute_batches(broker_url=server.ws_url)
     else:
         await execute_batches()

@@ -355,6 +355,8 @@ class VariationalBrokerTests(unittest.IsolatedAsyncioTestCase):
                                 }
                             )
                         )
+                        accepted = json.loads(await strategy.recv())
+                        self.assertEqual(accepted["type"], "ORDER_ACCEPTED")
                         with self.assertRaises(asyncio.TimeoutError):
                             await asyncio.wait_for(strategy.recv(), timeout=0.05)
 
@@ -427,6 +429,8 @@ class VariationalBrokerTests(unittest.IsolatedAsyncioTestCase):
                             }
                         )
                     )
+                    accepted = json.loads(await strategy.recv())
+                    self.assertEqual(accepted["type"], "ORDER_ACCEPTED")
                     result = json.loads(await strategy.recv())
 
             self.assertFalse(result["ok"])
@@ -591,6 +595,8 @@ class VariationalBrokerTests(unittest.IsolatedAsyncioTestCase):
                                 }
                             )
                         )
+                        accepted = json.loads(await strategy.recv())
+                        self.assertEqual(accepted["type"], "ORDER_ACCEPTED")
                         result = json.loads(await strategy.recv())
 
             self.assertTrue(result["ok"])
@@ -641,6 +647,8 @@ class VariationalBrokerTests(unittest.IsolatedAsyncioTestCase):
                                 }
                             )
                         )
+                        accepted = json.loads(await strategy.recv())
+                        self.assertEqual(accepted["type"], "ORDER_ACCEPTED")
                         await fill_feed.send(
                             json.dumps(
                                 {
@@ -707,6 +715,8 @@ class VariationalBrokerTests(unittest.IsolatedAsyncioTestCase):
                                 }
                             )
                         )
+                        accepted = json.loads(await strategy.recv())
+                        self.assertEqual(accepted["type"], "ORDER_ACCEPTED")
                         await fill_feed.send(
                             json.dumps(
                                 {
@@ -838,6 +848,8 @@ class VariationalBrokerTests(unittest.IsolatedAsyncioTestCase):
                                 }
                             )
                         )
+                        accepted = json.loads(await strategy.recv())
+                        self.assertEqual(accepted["type"], "ORDER_ACCEPTED")
                         result = json.loads(await strategy.recv())
 
             self.assertFalse(result["ok"])

@@ -91,7 +91,7 @@ def prompt_int(label: str) -> int:
     return number
 
 
-MAKER_REPRICE_ATTEMPTS = -1  # Non-Variational makers: reprice until filled; Variational is forced to 0.
+MAKER_REPRICE_ATTEMPTS = -1  # Recheck price until filled; cancel before every replacement.
 
 VARIATIONAL_BROKER_HOST = "127.0.0.1"
 VARIATIONAL_BROKER_PORT = 8768
@@ -102,8 +102,8 @@ MAKER_FILL_TIMEOUT_SECONDS = 60.0
 
 
 def maker_reprice_attempts_for_venue(venue: str) -> int:
-    """Variational is fail-closed: never submit a replacement after fill ambiguity."""
-    return 0 if venue.strip().lower() == "variational" else MAKER_REPRICE_ATTEMPTS
+    """Return the configured reprice policy for the venue."""
+    return MAKER_REPRICE_ATTEMPTS
 
 
 def assert_variational_pair_balanced(

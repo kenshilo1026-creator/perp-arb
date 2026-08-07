@@ -1489,6 +1489,30 @@ function executeVariationalCancelOrder(command) {
       await sleep(300);
     }
 
+    const verifyDeadline = Date.now() + Number(command.cancelVerifyTimeoutMs || 5000);
+    let remainingOrder = findMatchingOrderRow(orderId, symbol, side, amount);
+    while (remainingOrder && Date.now() < verifyDeadline) {
+      await sleep(500);
+      ensureOpenOrdersTabVisible();
+      remainingOrder = findMatchingOrderRow(orderId, symbol, side, amount);
+    }
+    if (remainingOrder) {
+      return {
+        ok: false,
+        error: "Variational order remained open after cancel click.",
+        details: {
+          automationVersion,
+          orderId: orderId || null,
+          symbol,
+          side,
+          amount: amount || null,
+          clickedCancelText: textOf(cancelButton),
+          clickedConfirmText: confirmButton ? textOf(confirmButton) : null,
+          diagnostics: collectCancelDiagnostics()
+        }
+      };
+    }
+
     return {
       ok: true,
       orderId: orderId || null,

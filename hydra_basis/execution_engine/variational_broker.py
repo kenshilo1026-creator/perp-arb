@@ -614,6 +614,23 @@ class VariationalCommandBroker:
         pending["submitted"] = True
         pending["orderId"] = payload.get("orderId")
         pending["submittedResult"] = payload
+        submitted_details = payload.get("details")
+        accepted_details: dict[str, Any] = {"submitted": payload}
+        if isinstance(submitted_details, dict):
+            used_limit_price = submitted_details.get("usedLimitPrice")
+            if used_limit_price not in (None, ""):
+                accepted_details["usedLimitPrice"] = used_limit_price
+        await self._send(
+            pending["requester"],
+            {
+                "type": "ORDER_ACCEPTED",
+                "requestId": request_id,
+                "ok": True,
+                "orderId": pending.get("orderId"),
+                "details": accepted_details,
+                "timestamp": utc_now(),
+            },
+        )
         early_fill = pending.get("earlyFill")
         if isinstance(early_fill, dict):
             self._pending_requests.pop(request_id, None)

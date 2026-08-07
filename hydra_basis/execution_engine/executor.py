@@ -43,6 +43,26 @@ def format_decimal(value: Decimal) -> str:
     return format(value.normalize(), "f")
 
 
+def extract_used_limit_price(order_result: object) -> str | None:
+    """Read the submitted limit price from direct or broker-wrapped details."""
+    if not isinstance(order_result, dict):
+        return None
+    details = order_result.get("details")
+    if not isinstance(details, dict):
+        return None
+    direct = details.get("usedLimitPrice")
+    if direct not in (None, ""):
+        return str(direct)
+    submitted = details.get("submitted")
+    if not isinstance(submitted, dict):
+        return None
+    submitted_details = submitted.get("details")
+    if not isinstance(submitted_details, dict):
+        return None
+    nested = submitted_details.get("usedLimitPrice")
+    return str(nested) if nested not in (None, "") else None
+
+
 def filled_notional_usd(*, clip_usd: float, requested_quantity: Decimal, executed_quantity: Decimal) -> Decimal:
     if requested_quantity <= 0:
         raise RuntimeError("requested quantity must be positive")
@@ -524,7 +544,7 @@ async def execute_single_clip_with_sides(
                 # If the order was placed without an explicit price (e.g. variational Mid click),
                 # capture the actual price used so reprice comparisons have a baseline.
                 if maker_kwargs.get("price") is None:
-                    used_price = (maker_result.get("details") or {}).get("usedLimitPrice")
+                    used_price = extract_used_limit_price(maker_result)
                     if used_price:
                         maker_kwargs["price"] = str(used_price)
             attempt_record["maker_result"] = maker_result
@@ -552,11 +572,18 @@ async def execute_single_clip_with_sides(
             if isinstance(exception_order_result, dict):
                 attempt_record.setdefault("maker_result", exception_order_result)
                 maker_result = exception_order_result
+                if maker_kwargs.get("price") is None:
+                    used_price = extract_used_limit_price(exception_order_result)
+                    if used_price:
+                        maker_kwargs["price"] = used_price
                 order_id = (
                     exception_order_result.get("order_id")
                     or exception_order_result.get("orderId")
                 )
-                if order_id not in (None, ""):
+                # Variational frequently has no usable order id. It can still
+                # cancel safely by symbol + side + amount, so every dispatched
+                # Variational error must be treated as a potentially live order.
+                if maker_venue.strip().lower() == "variational" or order_id not in (None, ""):
                     register_active_maker(exception_order_result)
             attempt_record["maker_fill_error"] = str(exc)
             maker_attempts.append(attempt_record)
@@ -570,59 +597,74 @@ async def execute_single_clip_with_sides(
             if maker_price_refresher is not None:
                 try:
                     fresh_price = await maker_price_refresher()
-                    current_price = maker_kwargs.get("price")
-                    if maker_reprice_min_change_pct > 0 and current_price not in (None, ""):
-                        change = price_change_pct(Decimal(str(current_price)), Decimal(str(fresh_price)))
-                        attempt_record["fresh_price"] = fresh_price
-                        attempt_record["price_change_pct"] = format_decimal(change)
-                        if change < Decimal(str(maker_reprice_min_change_pct)):
-                            attempt_record["reprice_skipped"] = True
-                            # Only keep re-waiting on the existing order if it is still
-                            # resting. If the adapter can check and the order is gone
-                            # (cancelled/expired), re-place instead of waiting on a phantom.
-                            order_still_exists = True
-                            has_check = getattr(maker_adapter, "has_open_order", None)
-                            if callable(has_check):
-                                try:
-                                    order_still_exists = await has_check(
-                                        order_result=placed_result,
-                                        symbol=symbol,
-                                        side=maker_side,
-                                        amount=str(quantity),
-                                    )
-                                except Exception as check_exc:
-                                    print(
-                                        f"[reprice] order-existence check failed ({check_exc}); "
-                                        "assuming order still exists",
-                                        flush=True,
-                                    )
-                                    order_still_exists = True
-                            attempt_record["order_still_exists"] = order_still_exists
-                            if not order_still_exists:
+                except Exception as refresh_exc:
+                    await raise_after_maker_cleanup(
+                        RuntimeError(
+                            "failed to refresh maker price; refusing replacement: "
+                            f"{refresh_exc}"
+                        )
+                    )
+                current_price = maker_kwargs.get("price")
+                if maker_reprice_min_change_pct > 0:
+                    if current_price in (None, ""):
+                        await raise_after_maker_cleanup(
+                            RuntimeError(
+                                "submitted maker price unavailable; refusing replacement"
+                            )
+                        )
+                    try:
+                        change = price_change_pct(
+                            Decimal(str(current_price)), Decimal(str(fresh_price))
+                        )
+                    except Exception as price_exc:
+                        await raise_after_maker_cleanup(
+                            RuntimeError(
+                                "invalid maker price for reprice decision; "
+                                f"refusing replacement: {price_exc}"
+                            )
+                        )
+                    attempt_record["fresh_price"] = fresh_price
+                    attempt_record["price_change_pct"] = format_decimal(change)
+                    if change < Decimal(str(maker_reprice_min_change_pct)):
+                        attempt_record["reprice_skipped"] = True
+                        # Only keep waiting when the original order is confirmed
+                        # present. An absent order may have filled, so never replace it.
+                        order_still_exists = True
+                        has_check = getattr(maker_adapter, "has_open_order", None)
+                        if callable(has_check):
+                            try:
+                                order_still_exists = await has_check(
+                                    order_result=placed_result,
+                                    symbol=symbol,
+                                    side=maker_side,
+                                    amount=str(quantity),
+                                )
+                            except Exception as check_exc:
                                 print(
-                                    "[reprice] existing maker order not found — re-placing "
-                                    f"{maker_venue} {maker_side} {symbol} at {fresh_price}",
+                                    f"[reprice] order-existence check failed ({check_exc}); "
+                                    "assuming order still exists",
                                     flush=True,
                                 )
-                                if isinstance(placed_result, dict):
-                                    mark_maker_closed(placed_result)
-                                maker_kwargs["price"] = fresh_price
-                                reuse_existing_maker_result = False
-                                maker_attempt += 1
-                                continue
-                            print(
-                                "[reprice] refreshed price barely moved "
-                                f"old={current_price} new={fresh_price} "
-                                f"change={format_decimal(change)} — keep existing order",
-                                flush=True,
+                                order_still_exists = True
+                        attempt_record["order_still_exists"] = order_still_exists
+                        if not order_still_exists:
+                            await raise_after_maker_cleanup(
+                                RuntimeError(
+                                    "maker order disappeared without fill confirmation; "
+                                    "refusing replacement to avoid a duplicate fill"
+                                )
                             )
-                            maker_kwargs["price"] = fresh_price
-                            reuse_existing_maker_result = True
-                            if maker_keep_existing_check_delay_seconds > 0:
-                                await asyncio.sleep(maker_keep_existing_check_delay_seconds)
-                            continue
-                except Exception as refresh_exc:
-                    print(f"[reprice] failed to refresh maker price before cancel: {refresh_exc}", flush=True)
+                        print(
+                            "[reprice] refreshed price barely moved "
+                            f"old={current_price} new={fresh_price} "
+                            f"change={format_decimal(change)} — keep existing order",
+                            flush=True,
+                        )
+                        maker_kwargs["price"] = fresh_price
+                        reuse_existing_maker_result = True
+                        if maker_keep_existing_check_delay_seconds > 0:
+                            await asyncio.sleep(maker_keep_existing_check_delay_seconds)
+                        continue
             print(f"[reprice] attempt {maker_attempt + 1} timed out — cancelling {maker_venue} {maker_side} {symbol}", flush=True)
             try:
                 cancel_result = await cancel_maker_order_with_retries(

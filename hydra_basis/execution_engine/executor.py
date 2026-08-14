@@ -63,6 +63,117 @@ def extract_used_limit_price(order_result: object) -> str | None:
     return str(nested) if nested not in (None, "") else None
 
 
+def extract_baseline_position(order_result: object) -> tuple[Decimal, int] | None:
+    if not isinstance(order_result, dict):
+        return None
+    details = order_result.get("details")
+    if not isinstance(details, dict):
+        return None
+    quantity = details.get("baselinePositionQty")
+    if quantity in (None, ""):
+        return None
+    try:
+        return Decimal(str(quantity)), int(details.get("baselinePortfolioVersion") or 0)
+    except Exception:
+        return None
+
+
+def signed_position_quantity(position: object) -> Decimal:
+    if not isinstance(position, dict):
+        return Decimal("0")
+    quantity = Decimal(str(position.get("quantity") or "0"))
+    side = str(position.get("side") or "").upper()
+    return -abs(quantity) if side == "SHORT" else abs(quantity)
+
+
+async def reconcile_disappeared_variational_order(
+    maker_adapter,
+    *,
+    order_result: dict[str, object],
+    symbol: str,
+    side: str,
+    requested_quantity: Decimal,
+    attempts: int = 5,
+    retry_delay_seconds: float = 1.0,
+) -> dict[str, object]:
+    """Classify an absent order from live position movement before replacing it."""
+    baseline = extract_baseline_position(order_result)
+    if baseline is None:
+        return {"status": "ambiguous", "reason": "missing_position_baseline"}
+    baseline_quantity, baseline_version = baseline
+    snapshot_getter = getattr(maker_adapter, "get_open_position_snapshot", None)
+    position_getter = getattr(maker_adapter, "get_open_position", None)
+    if not callable(snapshot_getter) and not callable(position_getter):
+        return {"status": "ambiguous", "reason": "position_query_unavailable"}
+
+    last_quantity: Decimal | None = None
+    last_version = baseline_version
+    successful_queries = 0
+    for attempt in range(max(attempts, 1)):
+        try:
+            if callable(snapshot_getter):
+                snapshot = await snapshot_getter(symbol=symbol, market_type="perp")
+                position = snapshot.get("position") if isinstance(snapshot, dict) else None
+                version = int(snapshot.get("portfolio_version") or 0) if isinstance(snapshot, dict) else 0
+            else:
+                position = await position_getter(symbol=symbol, market_type="perp")
+                version = baseline_version
+            current_quantity = signed_position_quantity(position)
+            successful_queries += 1
+            last_quantity = current_quantity
+            last_version = max(last_version, version)
+            delta = current_quantity - baseline_quantity
+            filled_quantity = delta if side.strip().upper() == "BUY" else -delta
+            if filled_quantity > 0:
+                filled_quantity = min(filled_quantity, requested_quantity)
+                return {
+                    "status": "filled",
+                    "fill_result": {
+                        "ok": True,
+                        "filled": True,
+                        "status": "FILLED",
+                        "filled_quantity": format_decimal(filled_quantity),
+                        "source": "post_timeout_position_delta",
+                        "baseline_position_quantity": format_decimal(baseline_quantity),
+                        "current_position_quantity": format_decimal(current_quantity),
+                        "portfolio_version": version,
+                    },
+                }
+            if current_quantity != baseline_quantity:
+                return {
+                    "status": "ambiguous",
+                    "reason": "position_moved_opposite_order_direction",
+                    "baseline_position_quantity": format_decimal(baseline_quantity),
+                    "current_position_quantity": format_decimal(current_quantity),
+                }
+        except Exception as query_exc:
+            if attempt >= max(attempts, 1) - 1:
+                return {"status": "ambiguous", "reason": f"position_query_failed: {query_exc}"}
+        if attempt < max(attempts, 1) - 1 and retry_delay_seconds > 0:
+            await asyncio.sleep(retry_delay_seconds)
+
+    if (
+        successful_queries > 0
+        and last_quantity == baseline_quantity
+        and last_version > baseline_version
+    ):
+        return {
+            "status": "unchanged",
+            "baseline_position_quantity": format_decimal(baseline_quantity),
+            "current_position_quantity": format_decimal(last_quantity),
+            "baseline_portfolio_version": baseline_version,
+            "current_portfolio_version": last_version,
+        }
+    if successful_queries > 0 and last_quantity == baseline_quantity:
+        return {
+            "status": "ambiguous",
+            "reason": "no_fresh_portfolio_update_after_submit",
+            "baseline_portfolio_version": baseline_version,
+            "current_portfolio_version": last_version,
+        }
+    return {"status": "ambiguous", "reason": "position_reconciliation_inconclusive"}
+
+
 def filled_notional_usd(*, clip_usd: float, requested_quantity: Decimal, executed_quantity: Decimal) -> Decimal:
     if requested_quantity <= 0:
         raise RuntimeError("requested quantity must be positive")
@@ -213,6 +324,7 @@ def maker_fill_error_is_repriceable(error: Exception) -> bool:
         "timeout" in message
         or "timed out" in message
         or "fill confirmation unavailable" in message
+        or "limit submit click did not create a matching open order" in message
     )
 
 
@@ -589,6 +701,28 @@ async def execute_single_clip_with_sides(
             maker_attempts.append(attempt_record)
             if isinstance(exc, (asyncio.CancelledError, KeyboardInterrupt, SystemExit)):
                 await raise_after_maker_cleanup(exc)
+            if (
+                maker_venue.strip().lower() == "variational"
+                and isinstance(exception_order_result, dict)
+                and extract_baseline_position(exception_order_result) is not None
+            ):
+                immediate_reconciliation = await reconcile_disappeared_variational_order(
+                    maker_adapter,
+                    order_result=exception_order_result,
+                    symbol=symbol,
+                    side=maker_side,
+                    requested_quantity=Decimal(str(quantity)),
+                )
+                attempt_record["immediate_position_reconciliation"] = immediate_reconciliation
+                if immediate_reconciliation.get("status") == "filled":
+                    maker_fill_result = immediate_reconciliation["fill_result"]
+                    print(
+                        "[timeout-reconcile] Variational fill detected before price/cancel logic "
+                        f"symbol={symbol} side={maker_side} "
+                        f"qty={maker_fill_result.get('filled_quantity')}",
+                        flush=True,
+                    )
+                    break
             exhausted = max_maker_reprice_attempts >= 0 and maker_attempt >= max_maker_reprice_attempts
             if exhausted or not maker_fill_error_is_repriceable(exc):
                 await raise_after_maker_cleanup(exc)
@@ -648,10 +782,45 @@ async def execute_single_clip_with_sides(
                                 order_still_exists = True
                         attempt_record["order_still_exists"] = order_still_exists
                         if not order_still_exists:
+                            maker_cancel_result = {
+                                "ok": True,
+                                "raw": {"status": "already_absent"},
+                            }
+                            reconciliation = await reconcile_disappeared_variational_order(
+                                maker_adapter,
+                                order_result=placed_result,
+                                symbol=symbol,
+                                side=maker_side,
+                                requested_quantity=Decimal(str(quantity)),
+                            )
+                            attempt_record["position_reconciliation"] = reconciliation
+                            if reconciliation.get("status") == "filled":
+                                maker_fill_result = reconciliation["fill_result"]
+                                if isinstance(placed_result, dict):
+                                    mark_maker_closed(placed_result)
+                                print(
+                                    "[reprice] absent maker reconciled as filled from live position "
+                                    f"venue={maker_venue} symbol={symbol} "
+                                    f"qty={maker_fill_result.get('filled_quantity')}",
+                                    flush=True,
+                                )
+                                break
+                            if reconciliation.get("status") == "unchanged":
+                                if isinstance(placed_result, dict):
+                                    mark_maker_closed(placed_result)
+                                print(
+                                    "[reprice] maker absent and live position unchanged — "
+                                    f"safe to place replacement at {fresh_price}",
+                                    flush=True,
+                                )
+                                maker_kwargs["price"] = fresh_price
+                                reuse_existing_maker_result = False
+                                maker_attempt += 1
+                                continue
                             await raise_after_maker_cleanup(
                                 RuntimeError(
-                                    "maker order disappeared without fill confirmation; "
-                                    "refusing replacement to avoid a duplicate fill"
+                                    "maker order disappeared and live position reconciliation "
+                                    f"was inconclusive: {reconciliation}"
                                 )
                             )
                         print(
@@ -675,16 +844,53 @@ async def execute_single_clip_with_sides(
                     amount=str(quantity),
                 )
                 attempt_record["cancel_result"] = cancel_result
+                maker_cancel_result = cancel_result
                 if isinstance(placed_result, dict):
                     mark_maker_closed(placed_result)
-                print(f"[reprice] cancel ok — placing new order (attempt {maker_attempt + 2})", flush=True)
-                await asyncio.sleep(1.0)
             except Exception as cancel_exc:
                 await raise_after_maker_cleanup(
                     RuntimeError(
                         f"[reprice] cancel failed — stopping to avoid duplicate orders: {cancel_exc}"
                     )
                 )
+            cancel_raw = cancel_result.get("raw") if isinstance(cancel_result, dict) else None
+            cancel_status = str(
+                cancel_raw.get("status", "") if isinstance(cancel_raw, dict) else ""
+            ).lower()
+            baseline_available = extract_baseline_position(placed_result) is not None
+            if maker_venue.strip().lower() == "variational" and baseline_available:
+                reconciliation = await reconcile_disappeared_variational_order(
+                    maker_adapter,
+                    order_result=placed_result,
+                    symbol=symbol,
+                    side=maker_side,
+                    requested_quantity=Decimal(str(quantity)),
+                )
+                attempt_record["position_reconciliation"] = reconciliation
+                if reconciliation.get("status") == "filled":
+                    maker_fill_result = reconciliation["fill_result"]
+                    print(
+                        "[reprice] cancelled/absent maker had a position fill — "
+                        f"hedging qty={maker_fill_result.get('filled_quantity')}",
+                        flush=True,
+                    )
+                    break
+                if reconciliation.get("status") != "unchanged":
+                    await raise_after_maker_cleanup(
+                        RuntimeError(
+                            "maker cancel completed but live position reconciliation "
+                            f"was inconclusive: {reconciliation}"
+                        )
+                    )
+            elif cancel_status == "already_absent":
+                await raise_after_maker_cleanup(
+                    RuntimeError(
+                        "maker was already absent and no position baseline was available; "
+                        "refusing replacement"
+                    )
+                )
+            print(f"[reprice] cancel ok — placing new order (attempt {maker_attempt + 2})", flush=True)
+            await asyncio.sleep(1.0)
             if fresh_price is not None:
                 maker_kwargs["price"] = fresh_price
                 print(f"[reprice] repriced to {fresh_price} (attempt {maker_attempt + 2})", flush=True)
@@ -750,24 +956,24 @@ async def execute_single_clip_with_sides(
 
     partial_fill = executed_quantity < requested_quantity
     if partial_fill:
-        try:
-            maker_cancel_result = await cancel_maker_order_with_retries(
-                maker_adapter,
-                maker_result=maker_result,
-                symbol=symbol,
-                side=maker_side,
-                amount=str(quantity),
-            )
-            mark_maker_closed(maker_result)
-        except BaseException as exc:
-            await raise_after_maker_cleanup(exc)
-        updated_executed_quantity = resolve_executed_quantity(
-            requested_quantity=requested_quantity,
-            maker_result=maker_result,
-            maker_fill_result=maker_cancel_result,
+        if maker_cancel_result is None:
+            try:
+                maker_cancel_result = await cancel_maker_order_with_retries(
+                    maker_adapter,
+                    maker_result=maker_result,
+                    symbol=symbol,
+                    side=maker_side,
+                    amount=str(quantity),
+                )
+                mark_maker_closed(maker_result)
+            except BaseException as exc:
+                await raise_after_maker_cleanup(exc)
+        cancel_filled_quantity = extract_filled_quantity(
+            maker_cancel_result,
+            allow_terminal_quantity_fallback=True,
         )
-        if updated_executed_quantity > executed_quantity:
-            executed_quantity = updated_executed_quantity
+        if cancel_filled_quantity is not None and cancel_filled_quantity > executed_quantity:
+            executed_quantity = min(cancel_filled_quantity, requested_quantity)
             partial_fill = executed_quantity < requested_quantity
     elif require_maker_fill_confirmation or order_result_looks_filled(maker_result):
         mark_maker_closed(maker_result)

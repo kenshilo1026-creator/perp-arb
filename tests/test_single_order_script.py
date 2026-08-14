@@ -256,6 +256,80 @@ class VariationalBrokerTests(unittest.IsolatedAsyncioTestCase):
                 result = await order_task
                 self.assertTrue(result["ok"])
 
+    async def test_fill_timeout_starts_only_after_order_accepted(self) -> None:
+        async with VariationalCommandBrokerServer(host="127.0.0.1", port=0, quiet=True) as server:
+            async with websockets.connect(server.ws_url) as extension:
+                await extension.send(json.dumps({"type": "REGISTER", "role": "extension"}))
+                self.assertTrue(json.loads(await extension.recv())["ok"])
+
+                adapter = VariationalBrowserExecutionAdapter(
+                    broker_url=server.ws_url,
+                    timeout_seconds=0.3,
+                    fill_timeout_seconds=0.05,
+                )
+                order_task = asyncio.create_task(
+                    adapter.place_limit_order(
+                        symbol="NXPC",
+                        side="SELL",
+                        amount="1000",
+                        price="0.1828",
+                    )
+                )
+
+                forwarded = json.loads(await extension.recv())
+                await asyncio.sleep(0.1)
+                self.assertFalse(order_task.done())
+
+                await extension.send(json.dumps({
+                    "type": "ORDER_RESULT",
+                    "requestId": forwarded["requestId"],
+                    "ok": True,
+                    "orderId": "var-delayed-accepted",
+                    "details": {"usedLimitPrice": "0.1828"},
+                }))
+                await extension.send(json.dumps({
+                    "type": "ORDER_RESULT",
+                    "requestId": forwarded["requestId"],
+                    "ok": True,
+                    "filled": True,
+                    "status": "FILLED",
+                    "orderId": "var-delayed-accepted",
+                }))
+
+                result = await order_task
+                self.assertTrue(result["filled"])
+
+    async def test_acceptance_timeout_keeps_dispatched_cleanup_context(self) -> None:
+        async with VariationalCommandBrokerServer(host="127.0.0.1", port=0, quiet=True) as server:
+            async with websockets.connect(server.ws_url) as extension:
+                await extension.send(json.dumps({"type": "REGISTER", "role": "extension"}))
+                self.assertTrue(json.loads(await extension.recv())["ok"])
+
+                adapter = VariationalBrowserExecutionAdapter(
+                    broker_url=server.ws_url,
+                    timeout_seconds=0.05,
+                    fill_timeout_seconds=60.0,
+                )
+                order_task = asyncio.create_task(
+                    adapter.place_limit_order(
+                        symbol="NXPC",
+                        side="SELL",
+                        amount="1000",
+                        price="0.1828",
+                    )
+                )
+                await extension.recv()
+
+                with self.assertRaisesRegex(RuntimeError, "order acceptance timeout") as ctx:
+                    await order_task
+
+                dispatched = getattr(ctx.exception, "order_result", {})
+                self.assertEqual(dispatched["type"], "ORDER_DISPATCHED")
+                self.assertEqual(dispatched["details"]["symbol"], "NXPC")
+                self.assertEqual(dispatched["details"]["side"], "SELL")
+                self.assertEqual(dispatched["details"]["amount"], "1000")
+                self.assertEqual(dispatched["details"]["usedLimitPrice"], "0.1828")
+
     async def test_broker_relays_place_order_to_extension_and_result_to_strategy(self) -> None:
         async with VariationalCommandBrokerServer(host="127.0.0.1", port=0, quiet=True) as server:
             extension_messages: list[dict] = []
@@ -290,6 +364,10 @@ class VariationalBrokerTests(unittest.IsolatedAsyncioTestCase):
 
                     dispatched = json.loads(await strategy.recv())
                     self.assertEqual(dispatched["type"], "ORDER_DISPATCHED")
+                    self.assertEqual(dispatched["details"]["symbol"], "ETH-PERP")
+                    self.assertEqual(dispatched["details"]["side"], "BUY")
+                    self.assertEqual(dispatched["details"]["amount"], "1")
+                    self.assertEqual(dispatched["details"]["requestedLimitPrice"], None)
 
                     await extension.send(
                         json.dumps(

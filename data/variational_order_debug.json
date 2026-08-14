@@ -1,270 +1,58 @@
 {
   "type": "ORDER_RESULT",
-  "requestId": "e3bc15c1-52a6-4d2a-b3b6-02741862f5cb",
+  "requestId": "e2d16df9-cc3f-4e54-99e5-613edf1960e6",
   "ok": false,
   "orderId": null,
-  "error": "Automation returned no result from Variational page.",
+  "error": "Variational limit submit click did not create a matching open order.",
   "details": {
-    "automationVersion": "variational-order-automation-2026-07-25-9",
-    "diagnostics": {
-      "buttons": [
-        {
-          "className": "absolute right-2 size-4 text-button-primary-foreground",
-          "disabled": false,
-          "text": ""
-        },
-        {
-          "className": "overflow-hidden shrink-0 w-[26px] min-[1300px]:w-auto min-[1300px]:max-w-none",
-          "disabled": false,
-          "text": ""
-        },
-        {
-          "className": "",
-          "disabled": false,
-          "text": "Trade Trade"
-        },
-        {
-          "className": "h-8 max-h-8 px-2.5 py-1.5 text-xs bg-transparent text-tab-foreground-active rounded-md font-inter inline-flex items-center justify-center outline-none focus:out",
-          "disabled": false,
-          "text": "Trade Trade"
-        },
-        {
-          "className": "",
-          "disabled": false,
-          "text": "Portfolio Portfolio"
-        },
-        {
-          "className": "h-8 max-h-8 px-2.5 py-1.5 text-xs bg-transparent hover:bg-tab-background-hover text-tab-foreground rounded-md font-inter inline-flex items-center justify-center",
-          "disabled": false,
-          "text": "Portfolio Portfolio"
-        },
-        {
-          "className": "",
-          "disabled": false,
-          "text": "Markets Markets"
-        },
-        {
-          "className": "h-8 max-h-8 px-2.5 py-1.5 text-xs bg-transparent hover:bg-tab-background-hover text-tab-foreground rounded-md font-inter inline-flex items-center justify-center",
-          "disabled": false,
-          "text": "Markets Markets"
-        },
-        {
-          "className": "h-8 max-h-8 px-2.5 py-1.5 text-xs bg-transparent hover:bg-tab-background-hover text-tab-foreground rounded-md font-inter inline-flex items-center justify-center",
-          "disabled": false,
-          "text": "Rewards Rewards"
-        },
-        {
-          "className": "",
-          "disabled": false,
-          "text": "Points Points"
-        },
-        {
-          "className": "h-8 max-h-8 px-2.5 py-1.5 text-xs bg-transparent hover:bg-tab-background-hover text-tab-foreground rounded-md font-inter inline-flex items-center justify-center",
-          "disabled": false,
-          "text": "Points Points"
-        },
-        {
-          "className": "",
-          "disabled": false,
-          "text": "Leaderboard Leaderboard"
-        },
-        {
-          "className": "h-8 max-h-8 px-2.5 py-1.5 text-xs bg-transparent hover:bg-tab-background-hover text-tab-foreground rounded-md font-inter inline-flex items-center justify-center",
-          "disabled": false,
-          "text": "Leaderboard Leaderboard"
-        },
-        {
-          "className": "",
-          "disabled": false,
-          "text": "Competition Competition"
-        },
-        {
-          "className": "h-8 max-h-8 px-2.5 py-1.5 text-xs bg-transparent hover:bg-tab-background-hover text-tab-foreground rounded-md font-inter inline-flex items-center justify-center",
-          "disabled": false,
-          "text": "Competition Competition"
-        },
-        {
-          "className": "h-8 max-h-8 px-2.5 py-1.5 text-xs bg-transparent hover:bg-tab-background-hover text-tab-foreground rounded-md font-inter inline-flex items-center justify-center",
-          "disabled": false,
-          "text": "More More"
-        },
-        {
-          "className": "min-w-8 min-h-8 h-8 max-h-8 p-2 bg-button-primary-background hover:bg-button-primary-background-hover focus:bg-button-primary-background-hover active:bg-button-",
-          "disabled": true,
-          "text": ""
-        },
-        {
-          "className": "min-w-8 min-h-8 h-8 max-h-8 p-2 hover:bg-button-secondary-background-hover border border-button-secondary-border text-button-secondary-foreground disabled:text-",
-          "disabled": false,
-          "text": "0x96...8B3 0x96...8B3"
-        },
-        {
-          "className": "min-w-8 min-h-8 max-h-8 p-2 hover:bg-button-secondary-background-hover border border-button-secondary-border text-button-secondary-foreground disabled:text-butt",
-          "disabled": false,
-          "text": ""
-        },
-        {
-          "className": "min-w-8 min-h-8 max-h-8 p-2 hover:bg-button-secondary-background-hover border border-button-secondary-border text-button-secondary-foreground disabled:text-butt",
-          "disabled": false,
-          "text": ""
-        },
-        {
-          "className": "min-w-8 min-h-8 max-h-8 p-2 hover:bg-button-secondary-background-hover border border-button-secondary-border text-button-secondary-foreground disabled:text-butt",
-          "disabled": false,
-          "text": ""
-        },
-        {
-          "className": "min-w-10 min-h-10 h-10 max-h-10 p-2 hover:bg-button-secondary-background-hover border border-button-secondary-border disabled:text-button-secondary-foreground-d",
-          "disabled": false,
-          "text": ""
-        },
-        {
-          "className": "font-inter font-normal text-2xs leading-4 text-foreground-muted tooltip-link",
-          "disabled": false,
-          "text": "Mark Price Mark Price"
-        },
-        {
-          "className": "font-inter font-normal text-2xs leading-4 text-foreground-muted tooltip-link",
-          "disabled": false,
-          "text": "FDV FDV"
-        },
-        {
-          "className": "font-inter font-normal text-2xs leading-4 text-foreground-muted tooltip-link",
-          "disabled": false,
-          "text": "Open Interest Open Interest"
-        },
-        {
-          "className": "font-inter font-normal text-2xs leading-4 text-foreground-muted tooltip-link",
-          "disabled": false,
-          "text": "Funding / Countdown Funding / Countdown"
-        },
-        {
-          "className": "flex cursor-help",
-          "disabled": false,
-          "text": "/ 00:00:00 / 00:00:00"
-        },
-        {
-          "className": "h-1 cursor-ns-resize bg-background-muted-trade hover:bg-foreground-muted-more-more hover:border-foreground-muted-more-more transition-colors duration-200 group ",
-          "disabled": false,
-          "text": ""
-        },
-        {
-          "className": "h-8 max-h-8 px-2.5 py-1.5 text-xs bg-transparent text-tab-foreground-active rounded-md font-inter inline-flex items-center justify-center outline-none focus:out",
-          "disabled": false,
-          "text": "Positions Positions"
-        },
-        {
-          "className": "h-8 max-h-8 px-2.5 py-1.5 text-xs bg-transparent hover:bg-tab-background-hover text-tab-foreground rounded-md font-inter inline-flex items-center justify-center",
-          "disabled": false,
-          "text": "Open Orders Open Orders"
-        },
-        {
-          "className": "h-8 max-h-8 px-2.5 py-1.5 text-xs bg-transparent hover:bg-tab-background-hover text-tab-foreground rounded-md font-inter inline-flex items-center justify-center",
-          "disabled": false,
-          "text": "Trades History Trades History"
-        },
-        {
-          "className": "h-8 max-h-8 px-2.5 py-1.5 text-xs bg-transparent hover:bg-tab-background-hover text-tab-foreground rounded-md font-inter inline-flex items-center justify-center",
-          "disabled": false,
-          "text": "Order History Order History"
-        },
-        {
-          "className": "h-8 max-h-8 px-2.5 py-1.5 text-xs bg-transparent hover:bg-tab-background-hover text-tab-foreground rounded-md font-inter inline-flex items-center justify-center",
-          "disabled": false,
-          "text": "Funding History Funding History"
-        },
-        {
-          "className": "h-8 max-h-8 px-2.5 py-1.5 text-xs bg-transparent hover:bg-tab-background-hover text-tab-foreground rounded-md font-inter inline-flex items-center justify-center",
-          "disabled": false,
-          "text": "Realized PNL Realized PNL"
-        },
-        {
-          "className": "min-w-8 min-h-8 h-8 max-h-8 p-2 bg-button-primary-background hover:bg-button-primary-background-hover focus:bg-button-primary-background-hover active:bg-button-",
-          "disabled": false,
-          "text": "Loading... Loading..."
-        },
-        {
-          "className": "min-w-8 min-h-8 h-8 max-h-8 p-2 hover:bg-button-secondary-background-hover border border-button-secondary-border text-button-secondary-foreground disabled:text-",
-          "disabled": true,
-          "text": ""
-        },
-        {
-          "className": "min-w-8 min-h-8 h-8 max-h-8 p-2 hover:bg-button-secondary-background-hover border border-button-secondary-border text-button-secondary-foreground disabled:text-",
-          "disabled": false,
-          "text": "Cross Cross"
-        },
-        {
-          "className": "h-8 max-h-8 px-2.5 py-1.5 text-xs bg-transparent text-tab-foreground-active rounded-md font-inter inline-flex items-center justify-center outline-none focus:out",
-          "disabled": false,
-          "text": "Market Market"
-        },
-        {
-          "className": "h-8 max-h-8 px-2.5 py-1.5 text-xs bg-transparent hover:bg-tab-background-hover text-tab-foreground rounded-md font-inter inline-flex items-center justify-center",
-          "disabled": false,
-          "text": "Limit Limit"
-        },
-        {
-          "className": "min-w-8 min-h-8 h-8 p-2 gap-1 rounded-md border-input-border hover:border-alpha-brand-brand-40 outline-none focus:outline-none disabled:pointer-events-none disa",
-          "disabled": false,
-          "text": "Pro Pro"
-        },
-        {
-          "className": "min-w-10 min-h-10 h-10 max-h-10 p-2 border border-button-secondary-affirmative-border disabled:text-button-primary-affirmative-background-disabled rounded-md fo",
-          "disabled": false,
-          "text": "Buy Buy"
-        },
-        {
-          "className": "min-w-10 min-h-10 h-10 max-h-10 p-2 border disabled:text-button-secondary-destructive-foreground-disabled rounded-md font-inter items-center justify-center outl",
-          "disabled": false,
-          "text": "Sell Sell"
-        },
-        {
-          "className": "group inline-block relative outline-none focus-visible:outline-none shrink-0 cursor-not-allowed",
-          "disabled": true,
-          "text": ""
-        },
-        {
-          "className": "group inline-block relative outline-none focus-visible:outline-none shrink-0 cursor-pointer",
-          "disabled": false,
-          "text": ""
-        },
-        {
-          "className": "min-w-8 min-h-8 h-8 max-h-8 p-2 bg-button-primary-background hover:bg-button-primary-background-hover focus:bg-button-primary-background-hover active:bg-button-",
-          "disabled": false,
-          "text": "Loading... Loading..."
-        },
-        {
-          "className": "flex items-center gap-1 cursor-pointer group text-link-default hover:text-link-default-hover text-2xs",
-          "disabled": false,
-          "text": "Est: 0% / Max: 0.3% Est: 0% / Max: 0.3%"
-        }
+    "automationVersion": "variational-order-automation-2026-07-26-10",
+    "amount": "1000",
+    "clickedMidAfterDisabledSubmit": false,
+    "clickedMidAfterQuotedPriceUnavailable": false,
+    "clickedSubmitText": "Sell NXPC  Sell NXPC",
+    "clickedViaPageGesture": true,
+    "explicitLimitPrice": "0.1828",
+    "market": null,
+    "needsCdpSubmitClick": false,
+    "orderType": "LIMIT",
+    "reduceOnly": false,
+    "side": "SELL",
+    "submitClickPoint": {
+      "elementFromPointClassName": "min-w-8 min-h-8 h-8 max-h-8 p-2 bg-button-primary-destructive-background focus:bg-button-primary-destructive-background-",
+      "elementFromPointTag": "BUTTON",
+      "elementFromPointText": "Sell NXPC Sell NXPC",
+      "height": 32,
+      "width": 310,
+      "x": 1755,
+      "y": 427
+    },
+    "submitSelector": "button[data-testid=\"submit-button\"]",
+    "usedLimitPrice": "0.1828",
+    "submitVerifiedOpenOrder": false,
+    "submitFollowupAfterSubmit": {
+      "automationVersion": "variational-order-automation-2026-07-26-10",
+      "buttonTexts": [],
+      "clicked": false,
+      "containerTexts": [
+        "No open orders found. No open orders found."
       ],
-      "inputs": [
-        {
-          "className": "text-input-foreground bg-transparent outline-none text-right",
-          "inputMode": "decimal",
-          "placeholder": "0",
-          "type": "text",
-          "value": ""
-        },
-        {
-          "className": "slider svelte-1nsunmv",
-          "inputMode": "",
-          "placeholder": "",
-          "type": "range",
-          "value": "0"
-        },
-        {
-          "className": "text-input-foreground bg-transparent outline-none text-right",
-          "inputMode": "decimal",
-          "placeholder": "0",
-          "type": "text",
-          "value": ""
-        }
-      ],
-      "title": "Variational Omni",
-      "url": "https://omni.variational.io/perpetual/IMX"
+      "modalCount": 1,
+      "ok": true
+    },
+    "openOrderCheck": {
+      "details": {
+        "amount": "1000",
+        "automationVersion": "variational-order-automation-2026-07-26-10",
+        "checkOnly": true,
+        "exists": false,
+        "side": "sell",
+        "symbol": "NXPC"
+      },
+      "exists": false,
+      "ok": true,
+      "orderId": null,
+      "status": "absent"
     }
   },
-  "timestamp": "2026-07-25T17:19:48.001Z"
+  "timestamp": "2026-08-13T06:28:58.202Z"
 }

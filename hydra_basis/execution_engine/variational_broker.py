@@ -152,6 +152,7 @@ class VariationalCommandBroker:
         self._last_fill_reject_reason: str | None = None
         self._positions: dict[str, dict[str, Any]] = {}
         self._portfolio_received = asyncio.Event()
+        self._portfolio_version = 0
         self._pending_price_previews: dict[str, dict[str, Any]] = {}
         self._pending_cancels: dict[str, dict[str, Any]] = {}
         self._pending_prepares: dict[str, dict[str, Any]] = {}
@@ -246,6 +247,7 @@ class VariationalCommandBroker:
                 print(f"[VARIATIONAL_BROKER] fill event handling error: {exc!r}", flush=True)
 
     def _update_positions_from_portfolio(self, positions: list) -> None:
+        self._portfolio_version += 1
         self._positions.clear()
         for pos in positions:
             info = pos.get("position_info") or pos
@@ -463,20 +465,13 @@ class VariationalCommandBroker:
         request_id = str(payload.get("requestId") or uuid.uuid4())
         symbol = normalize_variational_symbol(payload.get("symbol") or "")
         position = self._positions.get(symbol)
-        if position is None:
-            await self._send(websocket, {
-                "type": "POSITION_RESULT",
-                "requestId": request_id,
-                "ok": False,
-                "error": f"no open position for {symbol}",
-            })
-        else:
-            await self._send(websocket, {
-                "type": "POSITION_RESULT",
-                "requestId": request_id,
-                "ok": True,
-                "position": position,
-            })
+        await self._send(websocket, {
+            "type": "POSITION_RESULT",
+            "requestId": request_id,
+            "ok": True,
+            "position": position,
+            "portfolioVersion": self._portfolio_version,
+        })
 
     async def _handle_price_preview(self, websocket, payload: dict[str, Any]) -> None:
         request_id = str(payload.get("requestId") or uuid.uuid4())
@@ -575,6 +570,7 @@ class VariationalCommandBroker:
             "baselinePositionQty": self._signed_position_quantity(
                 payload.get("symbol") or payload.get("market")
             ),
+            "baselinePortfolioVersion": self._portfolio_version,
         }
         ext_msg: dict[str, Any] = {
             "type": "PLACE_ORDER",
@@ -591,8 +587,30 @@ class VariationalCommandBroker:
         }
         if payload.get("submitOnly"):
             ext_msg["submitOnly"] = True
+        pending = self._pending_requests[request_id]
+        dispatch_details: dict[str, Any] = {
+            "potentiallySubmitted": True,
+            "symbol": payload.get("symbol") or payload.get("market"),
+            "side": side,
+            "amount": amount,
+            "orderType": payload.get("orderType"),
+            "requestedLimitPrice": payload.get("price"),
+            "baselinePositionQty": format(
+                Decimal(str(pending["baselinePositionQty"])).normalize(),
+                "f",
+            ),
+            "baselinePortfolioVersion": pending["baselinePortfolioVersion"],
+        }
+        if payload.get("price") not in (None, ""):
+            dispatch_details["usedLimitPrice"] = payload.get("price")
         await self._send(self._extension, ext_msg)
-        await self._send_order_result(websocket, request_id, ok=True, event_type="ORDER_DISPATCHED")
+        await self._send_order_result(
+            websocket,
+            request_id,
+            ok=True,
+            event_type="ORDER_DISPATCHED",
+            details=dispatch_details,
+        )
 
     async def _handle_order_result(self, payload: dict[str, Any]) -> None:
         request_id = str(payload.get("requestId", "")).strip()
@@ -602,6 +620,33 @@ class VariationalCommandBroker:
         if pending is None:
             return
         if not payload.get("ok", False):
+            details = payload.get("details")
+            details = dict(details) if isinstance(details, dict) else {}
+            post_submit_ambiguous = bool(
+                details.get("postSubmitAmbiguous")
+                or (
+                    details.get("clickedViaPageGesture")
+                    and details.get("submitVerifiedOpenOrder") is False
+                )
+            )
+            if post_submit_ambiguous:
+                # The submit click happened, but an immediately filled order will
+                # never appear in Open Orders. Preserve the dispatch baseline so
+                # the strategy can reconcile the live position before cancelling,
+                # replacing, or exiting.
+                pending["submitted"] = True
+                pending["orderId"] = payload.get("orderId")
+                pending["submittedResult"] = payload
+                details["postSubmitAmbiguous"] = True
+                details["baselinePositionQty"] = format(
+                    Decimal(str(pending.get("baselinePositionQty", "0"))).normalize(), "f"
+                )
+                details["baselinePortfolioVersion"] = pending.get(
+                    "baselinePortfolioVersion", 0
+                )
+                payload = {**payload, "details": details}
+                if await self._confirm_fill_from_position_delta():
+                    return
             self._pending_requests.pop(request_id, None)
             self._cancel_pending_timeout(pending)
             await self._send(pending["requester"], payload)
@@ -616,6 +661,12 @@ class VariationalCommandBroker:
         pending["submittedResult"] = payload
         submitted_details = payload.get("details")
         accepted_details: dict[str, Any] = {"submitted": payload}
+        accepted_details["baselinePositionQty"] = format(
+            Decimal(str(pending.get("baselinePositionQty", "0"))).normalize(), "f"
+        )
+        accepted_details["baselinePortfolioVersion"] = pending.get(
+            "baselinePortfolioVersion", 0
+        )
         if isinstance(submitted_details, dict):
             used_limit_price = submitted_details.get("usedLimitPrice")
             if used_limit_price not in (None, ""):
@@ -723,6 +774,7 @@ class VariationalCommandBroker:
         ok: bool,
         error: str | None = None,
         event_type: str = "ORDER_RESULT",
+        details: dict[str, Any] | None = None,
     ) -> None:
         payload: dict[str, Any] = {
             "type": event_type,
@@ -732,6 +784,8 @@ class VariationalCommandBroker:
         }
         if error is not None:
             payload["error"] = error
+        if details is not None:
+            payload["details"] = details
         await self._send(websocket, payload)
 
     async def _send(self, websocket, payload: dict[str, Any]) -> None:

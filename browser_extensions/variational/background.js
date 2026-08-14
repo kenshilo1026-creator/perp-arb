@@ -1,5 +1,5 @@
 const DEBUGGER_VERSION = "1.3";
-const ORDER_AUTOMATION_VERSION = "variational-order-automation-2026-07-26-10";
+const ORDER_AUTOMATION_VERSION = "variational-order-automation-2026-08-13-11";
 const MAX_QUEUE_SIZE = 1000;
 const AUTO_RELOAD_COOLDOWN_MS = 5000;
 const MAX_ORDER_RELOAD_RETRIES = 2;
@@ -484,6 +484,7 @@ async function applyCdpSubmitClickIfRequested(result, payload) {
         details: {
           ...details,
           needsCdpSubmitClick: false,
+          postSubmitAmbiguous: true,
           submitVerifiedOpenOrder: false,
           submitFollowupAfterSubmit: followupAfterSubmit,
           openOrderCheck: finalCheck.payload,

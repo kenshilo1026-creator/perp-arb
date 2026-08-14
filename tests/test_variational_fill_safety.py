@@ -5,12 +5,15 @@ import tempfile
 import unittest
 from decimal import Decimal
 from pathlib import Path
+from unittest import mock
 
 from hydra_basis.execution_engine.executor import execute_single_clip_with_sides
 from hydra_basis.execution_engine.state_machine import ExecutionStateMachine
 from hydra_basis.execution_engine.variational_broker import VariationalCommandBroker
 from scripts.place_order import (
+    ClosePositionPlan,
     MAKER_REPRICE_ATTEMPTS,
+    execute_close_position_plan,
     maker_reprice_attempts_for_venue,
     record_open_execution_from_live_positions,
 )
@@ -39,10 +42,54 @@ def pending_order(requester: FakeRequester, *, submitted: bool = True) -> dict:
         "orderId": None,
         "timeoutTask": None,
         "baselinePositionQty": Decimal("1000"),
+        "baselinePortfolioVersion": 7,
     }
 
 
 class VariationalFillSafetyTests(unittest.IsolatedAsyncioTestCase):
+    async def test_close_resolves_variational_price_before_dispatch(self) -> None:
+        submitted: dict[str, object] = {}
+
+        class MakerAdapter:
+            async def get_limit_price_preview(self, **kwargs):
+                return "0.1828"
+
+            async def place_limit_order(self, **kwargs):
+                submitted.update(kwargs)
+                return {
+                    "ok": True,
+                    "filled": True,
+                    "filled_quantity": "1000",
+                    "status": "FILLED",
+                }
+
+        class TakerAdapter:
+            async def place_market_order(self, **kwargs):
+                return {"ok": True, "status": "FILLED"}
+
+        result = await execute_close_position_plan(
+            plan=ClosePositionPlan(
+                symbol="NXPC",
+                quantity=Decimal("1000"),
+                maker_venue="variational",
+                taker_venue="hyperliquid",
+                maker_price="0.1827",
+                clip_usd=182.8,
+                side_by_venue={"variational": "SELL", "hyperliquid": "BUY"},
+                spread_by_venue={"variational": 0.0, "hyperliquid": 0.0},
+            ),
+            adapters={
+                "variational": MakerAdapter(),
+                "hyperliquid": TakerAdapter(),
+            },
+            symbol="NXPC",
+            venues=["variational", "hyperliquid"],
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(submitted["price"], "0.1828")
+        self.assertTrue(submitted["reduce_only"])
+
     def test_variational_reprices_only_through_guarded_executor_loop(self) -> None:
         self.assertEqual(
             maker_reprice_attempts_for_venue("variational"),
@@ -68,9 +115,65 @@ class VariationalFillSafetyTests(unittest.IsolatedAsyncioTestCase):
         accepted = requester.messages[0]
         self.assertEqual(accepted["type"], "ORDER_ACCEPTED")
         self.assertEqual(accepted["details"]["usedLimitPrice"], "100.25")
+        self.assertEqual(accepted["details"]["baselinePositionQty"], "1000")
+        self.assertEqual(accepted["details"]["baselinePortfolioVersion"], 7)
         self.assertEqual(
             maker_reprice_attempts_for_venue("hyperliquid"),
             MAKER_REPRICE_ATTEMPTS,
+        )
+
+    async def test_post_submit_absent_error_preserves_position_baseline(self) -> None:
+        broker = VariationalCommandBroker(quiet=True)
+        requester = FakeRequester()
+        broker._pending_requests["req-safety"] = pending_order(requester, submitted=False)
+
+        await broker._handle_order_result(
+            {
+                "type": "ORDER_RESULT",
+                "requestId": "req-safety",
+                "ok": False,
+                "error": "Variational limit submit click did not create a matching open order.",
+                "details": {
+                    "clickedViaPageGesture": True,
+                    "submitVerifiedOpenOrder": False,
+                    "usedLimitPrice": "0.1828",
+                },
+            }
+        )
+
+        self.assertEqual(len(requester.messages), 1)
+        result = requester.messages[0]
+        self.assertFalse(result["ok"])
+        self.assertTrue(result["details"]["postSubmitAmbiguous"])
+        self.assertEqual(result["details"]["baselinePositionQty"], "1000")
+        self.assertEqual(result["details"]["baselinePortfolioVersion"], 7)
+
+    async def test_post_submit_absent_error_uses_current_position_delta_as_fill(self) -> None:
+        broker = VariationalCommandBroker(quiet=True)
+        requester = FakeRequester()
+        pending = pending_order(requester, submitted=False)
+        pending["order"]["side"] = "SELL"
+        broker._pending_requests["req-safety"] = pending
+
+        await broker._handle_order_result(
+            {
+                "type": "ORDER_RESULT",
+                "requestId": "req-safety",
+                "ok": False,
+                "error": "Variational limit submit click did not create a matching open order.",
+                "details": {
+                    "clickedViaPageGesture": True,
+                    "submitVerifiedOpenOrder": False,
+                },
+            }
+        )
+
+        self.assertEqual(len(requester.messages), 1)
+        result = requester.messages[0]
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["filled"])
+        self.assertEqual(
+            result["details"]["fill"]["source"], "portfolio_position_delta"
         )
 
     async def test_portfolio_position_delta_confirms_fill_quantity(self) -> None:
@@ -149,15 +252,22 @@ class VariationalFillSafetyTests(unittest.IsolatedAsyncioTestCase):
         class MakerAdapter:
             async def place_limit_order(self, **kwargs):
                 calls.append("submit")
-                error = RuntimeError("variational limit order fill timeout after 60s")
+                error = RuntimeError("variational order acceptance timeout after 30s")
                 setattr(
                     error,
                     "order_result",
                     {
-                        "type": "ORDER_ACCEPTED",
+                        "type": "ORDER_DISPATCHED",
                         "ok": True,
                         "orderId": None,
-                        "details": {"usedLimitPrice": "100"},
+                        "details": {
+                            "potentiallySubmitted": True,
+                            "symbol": "NXPC",
+                            "side": "SELL",
+                            "amount": "1000",
+                            "baselinePositionQty": "1000",
+                            "baselinePortfolioVersion": 1,
+                        },
                     },
                 )
                 raise error
@@ -177,7 +287,7 @@ class VariationalFillSafetyTests(unittest.IsolatedAsyncioTestCase):
                 calls.append("taker")
                 return {"ok": True}
 
-        with self.assertRaisesRegex(RuntimeError, "fill timeout"):
+        with self.assertRaisesRegex(RuntimeError, "acceptance timeout"):
             await execute_single_clip_with_sides(
                 symbol="NXPC",
                 clip_usd=1000.0,
@@ -333,7 +443,83 @@ class VariationalFillSafetyTests(unittest.IsolatedAsyncioTestCase):
             ["submit_1", "refresh_price", "cancel_old", "submit_2", "taker"],
         )
 
-    async def test_missing_order_after_timeout_is_not_replaced(self) -> None:
+    async def test_cancel_already_absent_reconciles_partial_fill_before_replacement(self) -> None:
+        calls: list[str] = []
+
+        class MakerAdapter:
+            def __init__(self) -> None:
+                self.position_checks = 0
+
+            async def place_limit_order(self, **kwargs):
+                calls.append("submit")
+                error = RuntimeError("variational limit order fill timeout after 60s")
+                setattr(
+                    error,
+                    "order_result",
+                    {
+                        "type": "ORDER_ACCEPTED",
+                        "ok": True,
+                        "orderId": None,
+                        "details": {
+                            "usedLimitPrice": "100",
+                            "baselinePositionQty": "1000",
+                            "baselinePortfolioVersion": 1,
+                        },
+                    },
+                )
+                raise error
+
+            async def cancel_order(self, **kwargs):
+                calls.append("cancel_already_absent")
+                return {"ok": True, "raw": {"status": "already_absent"}}
+
+            async def get_open_position_snapshot(self, **kwargs):
+                self.position_checks += 1
+                calls.append(f"position_{self.position_checks}")
+                if self.position_checks <= 5:
+                    return {
+                        "position": {"side": "LONG", "quantity": "1000"},
+                        "portfolio_version": 2,
+                    }
+                return {
+                    "position": {"side": "LONG", "quantity": "400"},
+                    "portfolio_version": 3,
+                }
+
+        class TakerAdapter:
+            async def place_market_order(self, **kwargs):
+                calls.append(f"taker_{kwargs['amount']}")
+                return {"ok": True}
+
+        async def refresh_price() -> str:
+            calls.append("refresh_price")
+            return "101"
+
+        with mock.patch("asyncio.sleep", new=mock.AsyncMock()):
+            result = await execute_single_clip_with_sides(
+                symbol="NXPC",
+                clip_usd=1000.0,
+                quantity=Decimal("1000"),
+                maker_venue="variational",
+                taker_venue="hyperliquid",
+                maker_side="SELL",
+                taker_side="BUY",
+                maker_adapter=MakerAdapter(),
+                taker_adapter=TakerAdapter(),
+                max_hedge_retries=0,
+                state_machine=ExecutionStateMachine(),
+                require_maker_fill_confirmation=True,
+                max_maker_reprice_attempts=-1,
+                maker_reprice_min_change_pct=0.0005,
+                maker_price_refresher=refresh_price,
+            )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["executed_quantity"], "600")
+        self.assertEqual(calls.count("cancel_already_absent"), 1)
+        self.assertEqual(calls[-2:], ["position_6", "taker_600"])
+
+    async def test_missing_order_reconciles_position_fill_and_hedges(self) -> None:
         calls: list[str] = []
 
         class MakerAdapter:
@@ -347,7 +533,11 @@ class VariationalFillSafetyTests(unittest.IsolatedAsyncioTestCase):
                         "type": "ORDER_ACCEPTED",
                         "ok": True,
                         "orderId": None,
-                        "details": {"usedLimitPrice": "100"},
+                        "details": {
+                            "usedLimitPrice": "100",
+                            "baselinePositionQty": "1000",
+                            "baselinePortfolioVersion": 1,
+                        },
                     },
                 )
                 raise error
@@ -356,9 +546,211 @@ class VariationalFillSafetyTests(unittest.IsolatedAsyncioTestCase):
                 calls.append("check_absent")
                 return False
 
+            async def get_open_position_snapshot(self, **kwargs):
+                calls.append("position_now_flat")
+                return {"position": None, "portfolio_version": 2}
+
+        class TakerAdapter:
+            async def place_market_order(self, **kwargs):
+                calls.append(f"taker_{kwargs['amount']}")
+                return {"ok": True}
+
+        async def refresh_price() -> str:
+            raise AssertionError("price refresh must not run before fill reconciliation")
+
+        result = await execute_single_clip_with_sides(
+            symbol="NXPC",
+            clip_usd=1000.0,
+            quantity=Decimal("1000"),
+            maker_venue="variational",
+            taker_venue="hyperliquid",
+            maker_side="SELL",
+            taker_side="BUY",
+            maker_adapter=MakerAdapter(),
+            taker_adapter=TakerAdapter(),
+            max_hedge_retries=0,
+            state_machine=ExecutionStateMachine(),
+            require_maker_fill_confirmation=True,
+            max_maker_reprice_attempts=-1,
+            maker_reprice_min_change_pct=0.0005,
+            maker_price_refresher=refresh_price,
+            maker_keep_existing_check_delay_seconds=0,
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(
+            calls,
+            ["submit", "position_now_flat", "taker_1000"],
+        )
+
+    async def test_post_submit_absent_error_reconciles_before_cleanup(self) -> None:
+        calls: list[str] = []
+
+        class MakerAdapter:
+            async def place_limit_order(self, **kwargs):
+                calls.append("submit")
+                error = RuntimeError(
+                    "variational browser order failed for NXPC: Variational limit "
+                    "submit click did not create a matching open order."
+                )
+                setattr(
+                    error,
+                    "order_result",
+                    {
+                        "type": "ORDER_RESULT",
+                        "ok": False,
+                        "details": {
+                            "postSubmitAmbiguous": True,
+                            "baselinePositionQty": "1000",
+                            "baselinePortfolioVersion": 1,
+                            "usedLimitPrice": "0.1828",
+                        },
+                    },
+                )
+                raise error
+
+            async def get_open_position_snapshot(self, **kwargs):
+                calls.append("position_now_flat")
+                return {"position": None, "portfolio_version": 2}
+
             async def cancel_order(self, **kwargs):
-                calls.append("confirm_absent")
-                return {"ok": True, "status": "already_absent"}
+                calls.append("cancel")
+                return {"ok": True, "raw": {"status": "already_absent"}}
+
+        class TakerAdapter:
+            async def place_market_order(self, **kwargs):
+                calls.append(f"taker_{kwargs['amount']}")
+                return {"ok": True}
+
+        result = await execute_single_clip_with_sides(
+            symbol="NXPC",
+            clip_usd=182.8,
+            quantity=Decimal("1000"),
+            maker_venue="variational",
+            taker_venue="hyperliquid",
+            maker_side="SELL",
+            taker_side="BUY",
+            maker_adapter=MakerAdapter(),
+            taker_adapter=TakerAdapter(),
+            max_hedge_retries=0,
+            state_machine=ExecutionStateMachine(),
+            require_maker_fill_confirmation=True,
+            max_maker_reprice_attempts=-1,
+            maker_reprice_min_change_pct=0.0005,
+            maker_price_refresher=lambda: None,
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(calls, ["submit", "position_now_flat", "taker_1000"])
+
+    async def test_post_submit_absent_unfilled_error_cancels_before_exit(self) -> None:
+        calls: list[str] = []
+
+        class MakerAdapter:
+            async def place_limit_order(self, **kwargs):
+                calls.append("submit")
+                error = RuntimeError(
+                    "variational browser order failed for NXPC: Variational limit "
+                    "submit click did not create a matching open order."
+                )
+                setattr(
+                    error,
+                    "order_result",
+                    {
+                        "type": "ORDER_RESULT",
+                        "ok": False,
+                        "details": {
+                            "postSubmitAmbiguous": True,
+                            "baselinePositionQty": "1000",
+                            "baselinePortfolioVersion": 1,
+                            "usedLimitPrice": "0.1828",
+                        },
+                    },
+                )
+                raise error
+
+            async def get_open_position_snapshot(self, **kwargs):
+                calls.append("position_unchanged")
+                return {
+                    "position": {"side": "LONG", "quantity": "1000"},
+                    "portfolio_version": 2,
+                }
+
+            async def cancel_order(self, **kwargs):
+                calls.append("cancel_before_exit")
+                return {"ok": True, "raw": {"status": "already_absent"}}
+
+        class TakerAdapter:
+            async def place_market_order(self, **kwargs):
+                calls.append("taker")
+                return {"ok": True}
+
+        with mock.patch("asyncio.sleep", new=mock.AsyncMock()):
+            with self.assertRaisesRegex(RuntimeError, "did not create a matching open order"):
+                await execute_single_clip_with_sides(
+                    symbol="NXPC",
+                    clip_usd=182.8,
+                    quantity=Decimal("1000"),
+                    maker_venue="variational",
+                    taker_venue="hyperliquid",
+                    maker_side="SELL",
+                    taker_side="BUY",
+                    maker_adapter=MakerAdapter(),
+                    taker_adapter=TakerAdapter(),
+                    max_hedge_retries=0,
+                    state_machine=ExecutionStateMachine(),
+                    require_maker_fill_confirmation=True,
+                    max_maker_reprice_attempts=0,
+                )
+
+        self.assertEqual(calls.count("position_unchanged"), 5)
+        self.assertEqual(calls[-1], "cancel_before_exit")
+        self.assertNotIn("taker", calls)
+
+    async def test_missing_unfilled_order_with_stable_position_is_replaced(self) -> None:
+        calls: list[str] = []
+
+        class MakerAdapter:
+            def __init__(self) -> None:
+                self.submits = 0
+
+            async def place_limit_order(self, **kwargs):
+                self.submits += 1
+                calls.append(f"submit_{self.submits}")
+                if self.submits == 1:
+                    error = RuntimeError("variational limit order fill timeout after 60s")
+                    setattr(
+                        error,
+                        "order_result",
+                        {
+                            "type": "ORDER_ACCEPTED",
+                            "ok": True,
+                            "orderId": None,
+                            "details": {
+                                "usedLimitPrice": "100",
+                                "baselinePositionQty": "1000",
+                                "baselinePortfolioVersion": 1,
+                            },
+                        },
+                    )
+                    raise error
+                return {
+                    "ok": True,
+                    "filled": True,
+                    "filled_quantity": "1000",
+                    "status": "FILLED",
+                }
+
+            async def has_open_order(self, **kwargs):
+                calls.append("check_absent")
+                return False
+
+            async def get_open_position_snapshot(self, **kwargs):
+                calls.append("position_unchanged")
+                return {
+                    "position": {"side": "LONG", "quantity": "1000"},
+                    "portfolio_version": 2,
+                }
 
         class TakerAdapter:
             async def place_market_order(self, **kwargs):
@@ -369,8 +761,8 @@ class VariationalFillSafetyTests(unittest.IsolatedAsyncioTestCase):
             calls.append("refresh_price")
             return "100.01"
 
-        with self.assertRaisesRegex(RuntimeError, "disappeared without fill confirmation"):
-            await execute_single_clip_with_sides(
+        with mock.patch("asyncio.sleep", new=mock.AsyncMock()):
+            result = await execute_single_clip_with_sides(
                 symbol="NXPC",
                 clip_usd=1000.0,
                 quantity=Decimal("1000"),
@@ -389,10 +781,9 @@ class VariationalFillSafetyTests(unittest.IsolatedAsyncioTestCase):
                 maker_keep_existing_check_delay_seconds=0,
             )
 
-        self.assertEqual(
-            calls,
-            ["submit", "refresh_price", "check_absent", "confirm_absent"],
-        )
+        self.assertTrue(result["ok"])
+        self.assertEqual(calls.count("position_unchanged"), 10)
+        self.assertEqual(calls[-2:], ["submit_2", "taker"])
 
     async def test_live_position_mismatch_stops_before_registry_recording(self) -> None:
         class Adapter:

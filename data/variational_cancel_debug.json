@@ -1,19 +1,14 @@
 {
   "type": "CANCEL_RESULT",
-  "requestId": "a7f4b54d-e069-470c-a9e7-f722d290e092",
+  "requestId": "1511ff77-d1f3-48c1-bd4d-3d5c3647a4b1",
   "ok": false,
   "orderId": null,
   "error": "Could not identify cancel button for Variational order.",
   "details": {
-    "automationVersion": "variational-order-automation-2026-06-05-2",
-    "amount": "2000",
+    "automationVersion": "variational-order-automation-2026-07-26-10",
+    "amount": "1000",
     "diagnostics": {
       "buttons": [
-        {
-          "className": "absolute right-2 size-4 text-button-primary-foreground",
-          "disabled": false,
-          "text": ""
-        },
         {
           "className": "overflow-hidden shrink-0 w-[26px] min-[1300px]:w-auto min-[1300px]:max-w-none",
           "disabled": false,
@@ -92,7 +87,7 @@
         {
           "className": "text-xs",
           "disabled": false,
-          "text": "Portfolio $10,356.71 Portfolio $10,356.71"
+          "text": "Portfolio $9,688.50 Portfolio $9,688.50"
         },
         {
           "className": "min-h-8 h-8 max-h-8 p-2 bg-button-primary-background hover:bg-button-primary-background-hover focus:bg-button-primary-background-hover active:bg-button-primary-",
@@ -122,7 +117,7 @@
         {
           "className": "min-w-10 min-h-10 h-10 max-h-10 p-2 hover:bg-button-secondary-background-hover border border-button-secondary-border text-button-secondary-foreground disabled:t",
           "disabled": false,
-          "text": "IMX IMX"
+          "text": "NXPC NXPC"
         },
         {
           "className": "font-inter font-normal text-2xs leading-4 text-foreground-muted tooltip-link",
@@ -147,7 +142,7 @@
         {
           "className": "flex cursor-help",
           "disabled": false,
-          "text": "-0.0207% / 03:56:59 -0.0207% / 03:56:59"
+          "text": "0.0011% / 01:36:15 0.0011% / 01:36:15"
         },
         {
           "className": "h-1 cursor-ns-resize bg-background-muted-trade hover:bg-foreground-muted-more-more hover:border-foreground-muted-more-more transition-colors duration-200 group ",
@@ -162,7 +157,7 @@
         {
           "className": "h-8 max-h-8 px-2.5 py-1.5 text-xs bg-transparent text-tab-foreground-active rounded-md font-inter inline-flex items-center justify-center outline-none focus:out",
           "disabled": false,
-          "text": "Open Orders Open Orders"
+          "text": "Open Orders (1) Open Orders (1)"
         },
         {
           "className": "h-8 max-h-8 px-2.5 py-1.5 text-xs bg-transparent hover:bg-tab-background-hover text-tab-foreground rounded-md font-inter inline-flex items-center justify-center",
@@ -186,11 +181,11 @@
         },
         {
           "className": "min-h-8 h-8 p-2 text-2xs flex items-center justify-between gap-1 rounded-md border border-input-border hover:border-alpha-brand-brand-40 text-input-foreground b",
-          "disabled": false,
+          "disabled": true,
           "text": "Instrument: All Instrument: All"
         },
         {
-          "className": "",
+          "className": "tooltip-link",
           "disabled": false,
           "text": "Maximum Slippage Maximum Slippage"
         },
@@ -198,6 +193,31 @@
           "className": "group pointer-events-none w-full",
           "disabled": true,
           "text": "Time (UTC+8) Time (UTC+8)"
+        },
+        {
+          "className": "flex gap-x-2 items-center link-instrument min-w-0",
+          "disabled": false,
+          "text": "NXPC-PERP NXPC-PERP"
+        },
+        {
+          "className": "truncate text-foreground-foreground-brand align-right",
+          "disabled": false,
+          "text": "Q Q"
+        },
+        {
+          "className": "p-1 rounded hover:bg-background-muted-more text-foreground-foreground-brand",
+          "disabled": false,
+          "text": "Cancel & Replace Order"
+        },
+        {
+          "className": "truncate",
+          "disabled": false,
+          "text": "f71b...8f39 f71b...8f39"
+        },
+        {
+          "className": "",
+          "disabled": false,
+          "text": ""
         },
         {
           "className": "min-w-8 min-h-8 h-8 max-h-8 p-2 hover:bg-button-secondary-background-hover border border-button-secondary-border text-button-secondary-foreground disabled:text-",
@@ -227,12 +247,12 @@
         {
           "className": "min-w-10 min-h-10 h-10 max-h-10 p-2 border disabled:text-button-primary-affirmative-background-disabled rounded-md font-inter items-center justify-center outlin",
           "disabled": false,
-          "text": "Buy $0.1244 Buy $0.1244"
+          "text": "Buy $0.2006 Buy $0.2006"
         },
         {
           "className": "min-w-10 min-h-10 h-10 max-h-10 p-2 border border-button-secondary-destructive-border disabled:text-button-secondary-destructive-foreground-disabled rounded-md ",
           "disabled": false,
-          "text": "Sell $0.1241 Sell $0.1241"
+          "text": "Sell $0.2001 Sell $0.2001"
         },
         {
           "className": "link disabled:text-foreground-muted-more",
@@ -242,7 +262,7 @@
         {
           "className": "flex items-center justify-end text-alpha-foreground-foreground-80 enabled:hover:text-foreground-foreground hover:text-foreground-foreground gap-1 disabled:text-",
           "disabled": false,
-          "text": "IMX IMX IMX"
+          "text": "NXPC NXPC NXPC"
         },
         {
           "className": "group inline-block relative outline-none focus-visible:outline-none shrink-0 cursor-pointer",
@@ -257,31 +277,100 @@
         {
           "className": "min-w-8 min-h-8 h-8 max-h-8 p-2 bg-button-primary-destructive-background focus:bg-button-primary-destructive-background-hover active:bg-button-primary-destructi",
           "disabled": false,
-          "text": "Sell IMX Sell IMX"
+          "text": "Sell NXPC Sell NXPC"
         },
         {
           "className": "flex items-center gap-1 cursor-pointer group text-link-default hover:text-link-default-hover text-2xs",
           "disabled": false,
-          "text": "Est: 0.16% / Max: 0.3% Est: 0.16% / Max: 0.3%"
+          "text": "Est: -0.2% / Max: 0.5% Est: -0.2% / Max: 0.5%"
         },
         {
           "className": "",
           "disabled": false,
-          "text": "https://www.coingecko.com/en/coins/immutable-x"
+          "text": "https://www.coingecko.com/en/coins/nexpace"
+        },
+        {
+          "className": "",
+          "disabled": false,
+          "text": ""
+        },
+        {
+          "className": "",
+          "disabled": false,
+          "text": ""
+        },
+        {
+          "className": "",
+          "disabled": false,
+          "text": ""
+        },
+        {
+          "className": "",
+          "disabled": false,
+          "text": ""
+        },
+        {
+          "className": "",
+          "disabled": false,
+          "text": ""
+        },
+        {
+          "className": "",
+          "disabled": false,
+          "text": ""
+        },
+        {
+          "className": "",
+          "disabled": false,
+          "text": ""
+        },
+        {
+          "className": "",
+          "disabled": false,
+          "text": ""
+        },
+        {
+          "className": "",
+          "disabled": false,
+          "text": ""
+        },
+        {
+          "className": "",
+          "disabled": false,
+          "text": ""
+        },
+        {
+          "className": "",
+          "disabled": false,
+          "text": ""
+        },
+        {
+          "className": "",
+          "disabled": false,
+          "text": ""
+        },
+        {
+          "className": "",
+          "disabled": false,
+          "text": ""
         }
       ],
       "rows": [
         {
           "actionCount": 1,
           "text": "Instrument Side Qty Status Type Trigger Maximum Slippage Close Only ID Time (UTC+8) Instrument Side Qty Status Type Trigger Maximum Slippage Close Only ID Time (UTC+8)"
+        },
+        {
+          "actionCount": 5,
+          "text": "NXPC-PERP Sell 1,000 Pending Limit Q $0.2003 0.5% No f71b...8f39 2026-08-12 - 18:22:24 NXPC-PERP sell 1,000 Pending Limit Q $0.2003 0.5% No f71b...8f39 2026-08-12 - 18:22:24"
         }
       ],
-      "title": "0.1243 | IMX-PERP | Variational Omni",
-      "url": "https://omni.variational.io/perpetual/IMX"
+      "title": "0.1997 | NXPC-PERP | Variational Omni",
+      "url": "https://omni.variational.io/perpetual/NXPC"
     },
     "orderId": null,
     "side": "sell",
-    "symbol": "IMX"
+    "symbol": "NXPC"
   },
-  "timestamp": "2026-07-24T16:03:00.086Z"
+  "timestamp": "2026-08-12T10:23:45.260Z"
 }

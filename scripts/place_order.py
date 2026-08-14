@@ -450,8 +450,14 @@ async def execute_close_position_plan(
 
     if plan.maker_venue == "variational":
         close_price_refresher = _refresh_variational_maker_price
+        # Resolve the browser's current Mid price before dispatch.  Passing an
+        # explicit price makes it available in ORDER_DISPATCHED, so an
+        # acceptance timeout can still cancel, compare prices, and safely
+        # decide whether to replace the order.
+        initial_maker_price = await _refresh_variational_maker_price()
     else:
         close_price_refresher = _refresh_close_maker_price
+        initial_maker_price = plan.maker_price
 
     taker_side = plan.side_by_venue[plan.taker_venue]
     taker_adapter = adapters[plan.taker_venue]
@@ -480,7 +486,7 @@ async def execute_close_position_plan(
         taker_adapter=taker_adapter,
         max_hedge_retries=0,
         state_machine=ExecutionStateMachine(),
-        maker_price=None if plan.maker_venue == "variational" else plan.maker_price,
+        maker_price=initial_maker_price,
         require_maker_fill_confirmation=True,
         maker_fill_timeout_seconds=MAKER_FILL_TIMEOUT_SECONDS,
         max_maker_reprice_attempts=maker_reprice_attempts_for_venue(plan.maker_venue),
@@ -600,8 +606,13 @@ async def execute_open_clip(
 
         if maker_venue == "variational":
             open_price_refresher = _refresh_variational_open_maker_price
+            # Do not dispatch a Variational maker without a known price.  The
+            # dispatch event must carry enough context to clean up and reprice
+            # even when ORDER_ACCEPTED never arrives.
+            initial_maker_price = await _refresh_variational_open_maker_price()
         else:
             open_price_refresher = _refresh_open_maker_price
+            initial_maker_price = None
 
         taker_pre_hook = None
         prepare_fn = getattr(taker_adapter, "prepare_market_order", None)
@@ -622,6 +633,7 @@ async def execute_open_clip(
             taker_adapter=taker_adapter,
             max_hedge_retries=0,
             state_machine=ExecutionStateMachine(),
+            maker_price=initial_maker_price,
             maker_orderbook=use_maker_orderbook,
             taker_orderbook=taker_book,
             require_maker_fill_confirmation=True,

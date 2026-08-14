@@ -349,7 +349,7 @@ class VariationalBrowserExecutionAdapter:
             raise RuntimeError(f"variational get_limit_price_preview returned invalid price for {mapped}: {price!r}")
         return str(price)
 
-    async def get_open_position(self, *, symbol: str, market_type: str) -> dict | None:
+    async def _get_position_result(self, *, symbol: str, market_type: str) -> dict:
         symbol = self._map_symbol(symbol)
         request_id = str(uuid.uuid4())
         async with ClientSession() as session:
@@ -368,7 +368,19 @@ class VariationalBrowserExecutionAdapter:
         result = msg.json()
         if not result.get("ok"):
             raise RuntimeError(f"variational get_open_position failed for {symbol}: {result.get('error')}")
+        return result
+
+    async def get_open_position(self, *, symbol: str, market_type: str) -> dict | None:
+        result = await self._get_position_result(symbol=symbol, market_type=market_type)
         return result.get("position")
+
+    async def get_open_position_snapshot(self, *, symbol: str, market_type: str) -> dict:
+        """Return the position plus portfolio version used for fill reconciliation."""
+        result = await self._get_position_result(symbol=symbol, market_type=market_type)
+        return {
+            "position": result.get("position"),
+            "portfolio_version": int(result.get("portfolioVersion") or 0),
+        }
 
     async def wait_for_order_fill(
         self,
@@ -413,26 +425,41 @@ class VariationalBrowserExecutionAdapter:
     ) -> dict[str, object]:
         order_dispatched = False
         import time as _time
+        acceptance_deadline: float | None = None
         fill_deadline: float | None = None
+        dispatched_order_result: dict[str, object] | None = None
         submitted_order_result: dict[str, object] | None = None
         while True:
-            if order_dispatched:
-                if fill_deadline is not None:
-                    remaining = fill_deadline - _time.monotonic()
-                    if remaining <= 0:
-                        raise self._order_error(
-                            f"variational limit order fill timeout after {fill_timeout_seconds:.0f}s",
-                            order_result=submitted_order_result,
-                        )
-                    try:
-                        msg = await asyncio.wait_for(ws.receive(), timeout=remaining)
-                    except (TimeoutError, asyncio.TimeoutError):
-                        raise self._order_error(
-                            f"variational limit order fill timeout after {fill_timeout_seconds:.0f}s",
-                            order_result=submitted_order_result,
-                        )
-                else:
-                    msg = await ws.receive()
+            if submitted_order_result is not None and fill_deadline is not None:
+                remaining = fill_deadline - _time.monotonic()
+                if remaining <= 0:
+                    raise self._order_error(
+                        f"variational limit order fill timeout after {fill_timeout_seconds:.0f}s",
+                        order_result=submitted_order_result,
+                    )
+                try:
+                    msg = await asyncio.wait_for(ws.receive(), timeout=remaining)
+                except (TimeoutError, asyncio.TimeoutError):
+                    raise self._order_error(
+                        f"variational limit order fill timeout after {fill_timeout_seconds:.0f}s",
+                        order_result=submitted_order_result,
+                    )
+            elif order_dispatched and acceptance_deadline is not None:
+                remaining = acceptance_deadline - _time.monotonic()
+                if remaining <= 0:
+                    raise self._order_error(
+                        f"variational order acceptance timeout after {self.timeout_seconds:.0f}s",
+                        order_result=dispatched_order_result,
+                    )
+                try:
+                    msg = await asyncio.wait_for(ws.receive(), timeout=remaining)
+                except (TimeoutError, asyncio.TimeoutError):
+                    raise self._order_error(
+                        f"variational order acceptance timeout after {self.timeout_seconds:.0f}s",
+                        order_result=dispatched_order_result,
+                    )
+            elif order_dispatched:
+                msg = await ws.receive()
             else:
                 msg = await asyncio.wait_for(ws.receive(), timeout=self.timeout_seconds)
             if msg.type != WSMsgType.TEXT:
@@ -442,13 +469,14 @@ class VariationalBrowserExecutionAdapter:
                 continue
             if payload.get("type") == "ORDER_DISPATCHED":
                 order_dispatched = True
-                if fill_timeout_seconds is not None:
-                    fill_deadline = _time.monotonic() + fill_timeout_seconds
+                dispatched_order_result = payload
+                acceptance_deadline = _time.monotonic() + self.timeout_seconds
                 continue
             if payload.get("type") == "ORDER_ACCEPTED":
                 order_dispatched = True
                 submitted_order_result = payload
-                if fill_timeout_seconds is not None and fill_deadline is None:
+                acceptance_deadline = None
+                if fill_timeout_seconds is not None:
                     fill_deadline = _time.monotonic() + fill_timeout_seconds
                 continue
             if payload.get("type") != "ORDER_RESULT":

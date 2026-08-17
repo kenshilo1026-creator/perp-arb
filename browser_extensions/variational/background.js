@@ -1,5 +1,5 @@
 const DEBUGGER_VERSION = "1.3";
-const ORDER_AUTOMATION_VERSION = "variational-order-automation-2026-08-13-11";
+const ORDER_AUTOMATION_VERSION = "variational-order-automation-2026-08-17-12";
 const MAX_QUEUE_SIZE = 1000;
 const AUTO_RELOAD_COOLDOWN_MS = 5000;
 const MAX_ORDER_RELOAD_RETRIES = 2;
@@ -1036,6 +1036,11 @@ async function handlePricePreviewCommand(payload) {
     if (state.attachedTabId == null) {
       throw new Error("No Variational tab attached. Click Start in the extension popup first.");
     }
+    // The SPA can update the ticker URL before Svelte has mounted the order
+    // form.  Do not run the one-page preview injection until the quantity
+    // input and live bid/ask quote are both present.
+    await waitForTabComplete(state.attachedTabId);
+    await waitForVariationalOrderPageReady(payload);
     const injectionResult = await runVariationalPricePreviewInjection(payload);
     let result = injectionResult?.result || {};
     if (!result || typeof result !== "object" || !("ok" in result)) {
@@ -1658,6 +1663,18 @@ function executeVariationalLimitPricePreview(command) {
       .find((el) => normalizedTextOf(el) === "mid" || /\bmid\b/i.test(textOf(el)));
   }
 
+  async function waitForPreviewControl(finder, timeoutMs) {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() <= deadline) {
+      const control = finder();
+      if (control) {
+        return control;
+      }
+      await sleep(100);
+    }
+    return finder();
+  }
+
   async function waitForPreviewLimitPrice(timeoutMs) {
     const deadline = Date.now() + timeoutMs;
     while (Date.now() <= deadline) {
@@ -1712,7 +1729,11 @@ function executeVariationalLimitPricePreview(command) {
       };
     }
 
-    const limitButton = findPreviewLimitOrderTypeButton();
+    const controlTimeoutMs = Number(command.previewControlTimeoutMs || 5000);
+    const limitButton = await waitForPreviewControl(
+      findPreviewLimitOrderTypeButton,
+      controlTimeoutMs
+    );
     if (!limitButton) {
       return {
         ok: false,
@@ -1721,9 +1742,13 @@ function executeVariationalLimitPricePreview(command) {
       };
     }
     click(limitButton);
-    await sleep(300);
 
-    const midButton = findPreviewMidButton();
+    // Switching tabs re-renders the form.  Wait for the Limit controls from
+    // the new DOM instead of assuming they exist after a fixed delay.
+    const midButton = await waitForPreviewControl(
+      findPreviewMidButton,
+      controlTimeoutMs
+    );
     if (!midButton) {
       return {
         ok: false,

@@ -144,7 +144,10 @@ class VariationalExtensionCommandClientTests(unittest.TestCase):
         background = (EXT_DIR / "background.js").read_text(encoding="utf-8")
 
         self.assertIn("findPreviewLimitOrderTypeButton", background)
+        self.assertIn("waitForPreviewControl", background)
         self.assertIn("waitForPreviewLimitPrice", background)
+        self.assertIn("await waitForVariationalOrderPageReady(payload)", background)
+        self.assertIn("previewControlTimeoutMs || 5000", background)
         self.assertIn("Could not switch Variational order form to Limit", background)
         self.assertNotIn(
             'return executeVariationalOrder({ ...command, orderType: "LIMIT", previewOnly: true });',

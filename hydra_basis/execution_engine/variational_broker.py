@@ -708,11 +708,16 @@ class VariationalCommandBroker:
                 "requestId": request_id,
                 "ok": True,
                 "filled": True,
+                # A trade/position update is fill evidence, not proof that the
+                # remainder of the order is terminal. The executor reconciles it.
+                "terminal": False,
                 "status": "FILLED",
                 "orderId": fill.get("orderId") or pending.get("orderId"),
                 "details": {
                     "fill": fill,
                     "submitted": pending.get("submittedResult"),
+                    "baselinePositionQty": str(pending.get("baselinePositionQty", "0")),
+                    "baselinePortfolioVersion": pending.get("baselinePortfolioVersion", 0),
                 },
                 "timestamp": utc_now(),
             },

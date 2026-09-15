@@ -356,8 +356,25 @@ class HyperliquidExecutionAdapter:
             tif="Ioc",
         )
         data = await self._post_order(action)
-        order_id = extract_hyperliquid_order_id(data, fill_type="filled")
-        return {"ok": True, "order_id": order_id, "raw": data}
+        statuses = data.get("response", {}).get("data", {}).get("statuses", [])
+        status = statuses[0] if len(statuses) == 1 else None
+        if isinstance(status, dict) and "error" in status:
+            error = RuntimeError(f"hyperliquid order error: {status['error']}")
+            error.order_result = {
+                "ok": False, "terminal": True, "filled_quantity": "0", "raw": data,
+            }
+            raise error
+        fill = status.get("filled") if isinstance(status, dict) else None
+        if not isinstance(fill, dict) or fill.get("totalSz") is None:
+            raise RuntimeError(f"hyperliquid IOC fill quantity unavailable: {data}")
+        filled_quantity = Decimal(str(fill["totalSz"]))
+        if not filled_quantity.is_finite() or filled_quantity < 0:
+            raise RuntimeError(f"hyperliquid invalid IOC fill quantity: {data}")
+        return {
+            "ok": True, "terminal": True, "order_id": fill.get("oid"),
+            "filled_quantity": str(filled_quantity), "avg_price": fill.get("avgPx"),
+            "raw": data,
+        }
 
     async def close_position(
         self,

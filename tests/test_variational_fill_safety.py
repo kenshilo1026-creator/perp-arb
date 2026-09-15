@@ -51,11 +51,17 @@ class VariationalFillSafetyTests(unittest.IsolatedAsyncioTestCase):
         submitted: dict[str, object] = {}
 
         class MakerAdapter:
+            quantity = "1000"
+
+            async def get_open_position(self, **kwargs):
+                return {"side": "LONG", "quantity": self.quantity} if self.quantity != "0" else None
+
             async def get_limit_price_preview(self, **kwargs):
                 return "0.1828"
 
             async def place_limit_order(self, **kwargs):
                 submitted.update(kwargs)
+                self.quantity = "0"
                 return {
                     "ok": True,
                     "filled": True,
@@ -64,8 +70,14 @@ class VariationalFillSafetyTests(unittest.IsolatedAsyncioTestCase):
                 }
 
         class TakerAdapter:
+            quantity = "1000"
+
+            async def get_open_position(self, **kwargs):
+                return {"side": "SHORT", "quantity": self.quantity} if self.quantity != "0" else None
+
             async def place_market_order(self, **kwargs):
-                return {"ok": True, "status": "FILLED"}
+                self.quantity = "0"
+                return {"ok": True, "status": "FILLED", "filled_quantity": kwargs["amount"]}
 
         result = await execute_close_position_plan(
             plan=ClosePositionPlan(

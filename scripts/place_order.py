@@ -333,30 +333,33 @@ async def record_open_execution_from_live_positions(
         if "variational" in {short_venue.strip().lower(), long_venue.strip().lower()}
         else None
     )
-    short_leg = await fetch_required_perp_live_leg(
-        adapters_by_venue[short_venue],
-        venue=short_venue,
-        symbol=symbol,
-        expected_side="SHORT",
-        fallback_quantity=fallback_quantity,
-    )
-    long_leg = await fetch_required_perp_live_leg(
-        adapters_by_venue[long_venue],
-        venue=long_venue,
-        symbol=symbol,
-        expected_side="LONG",
-        fallback_quantity=fallback_quantity,
-    )
-    assert_variational_pair_balanced(
-        short_leg=short_leg,
-        long_leg=long_leg,
-        short_venue=short_venue,
-        long_venue=long_venue,
-        reference_quantity=(
-            fallback_quantity
-            or min(Decimal(str(short_leg["quantity"])), Decimal(str(long_leg["quantity"])))
-        ),
-    )
+    verified = execution_result.get("hedge_verified") is True
+    # Verified execution must remain backed by live positions when recorded.
+    # A temporary missing position cannot be replaced with the requested size.
+    for attempt in range(5 if verified else 1):
+        try:
+            short_leg, long_leg = await asyncio.gather(
+                fetch_required_perp_live_leg(
+                    adapters_by_venue[short_venue], venue=short_venue, symbol=symbol,
+                    expected_side="SHORT", fallback_quantity=None if verified else fallback_quantity,
+                ),
+                fetch_required_perp_live_leg(
+                    adapters_by_venue[long_venue], venue=long_venue, symbol=symbol,
+                    expected_side="LONG", fallback_quantity=None if verified else fallback_quantity,
+                ),
+            )
+            assert_variational_pair_balanced(
+                short_leg=short_leg, long_leg=long_leg,
+                short_venue=short_venue, long_venue=long_venue,
+                reference_quantity=(fallback_quantity or min(
+                    Decimal(str(short_leg["quantity"])), Decimal(str(long_leg["quantity"])),
+                )),
+            )
+            break
+        except RuntimeError:
+            if not verified or attempt == 4:
+                raise
+            await asyncio.sleep(0.5)
     strategy_id = f"manual-{symbol.upper()}-{int(time.time() * 1000)}"
     return record_successful_live_legs(
         path=registry_path,
@@ -499,6 +502,7 @@ async def execute_close_position_plan(
         taker_pre_hook=taker_pre_hook,
         maker_reduce_only=plan.maker_venue == "variational",
         taker_reduce_only=plan.taker_venue == "variational",
+        verify_hedge_fill="variational" in {plan.maker_venue, plan.taker_venue},
     )
 
 
@@ -632,6 +636,7 @@ async def execute_open_clip(
             maker_adapter=maker_adapter,
             taker_adapter=taker_adapter,
             max_hedge_retries=0,
+            verify_hedge_fill="variational" in {maker_venue, taker_venue},
             state_machine=ExecutionStateMachine(),
             maker_price=initial_maker_price,
             maker_orderbook=use_maker_orderbook,

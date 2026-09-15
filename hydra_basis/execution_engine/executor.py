@@ -6,6 +6,9 @@ import inspect
 from typing import Awaitable, Callable
 
 from hydra_basis.execution_engine.order_fill import extract_filled_quantity
+from hydra_basis.execution_engine.hedge_safety import (
+    confirm_pair_execution, execute_confirmed_market_order, position_quantity,
+)
 
 
 def passive_limit_price_from_orderbook(orderbook: dict[str, float | int], side: str) -> str:
@@ -79,11 +82,15 @@ def extract_baseline_position(order_result: object) -> tuple[Decimal, int] | Non
 
 
 def signed_position_quantity(position: object) -> Decimal:
-    if not isinstance(position, dict):
+    if position is None:
         return Decimal("0")
-    quantity = Decimal(str(position.get("quantity") or "0"))
+    if not isinstance(position, dict):
+        raise RuntimeError("invalid position snapshot")
+    quantity = Decimal(str(position.get("quantity")))
     side = str(position.get("side") or "").upper()
-    return -abs(quantity) if side == "SHORT" else abs(quantity)
+    if side not in {"LONG", "SHORT"} or not quantity.is_finite() or quantity < 0:
+        raise RuntimeError("invalid position side or quantity")
+    return -quantity if side == "SHORT" else quantity
 
 
 async def reconcile_disappeared_variational_order(
@@ -95,6 +102,7 @@ async def reconcile_disappeared_variational_order(
     requested_quantity: Decimal,
     attempts: int = 5,
     retry_delay_seconds: float = 1.0,
+    settle: bool = False,
 ) -> dict[str, object]:
     """Classify an absent order from live position movement before replacing it."""
     baseline = extract_baseline_position(order_result)
@@ -109,12 +117,15 @@ async def reconcile_disappeared_variational_order(
     last_quantity: Decimal | None = None
     last_version = baseline_version
     successful_queries = 0
+    latest_fill: dict[str, object] | None = None
     for attempt in range(max(attempts, 1)):
         try:
             if callable(snapshot_getter):
                 snapshot = await snapshot_getter(symbol=symbol, market_type="perp")
-                position = snapshot.get("position") if isinstance(snapshot, dict) else None
-                version = int(snapshot.get("portfolio_version") or 0) if isinstance(snapshot, dict) else 0
+                if not isinstance(snapshot, dict) or "position" not in snapshot:
+                    raise RuntimeError("position snapshot missing position field")
+                position = snapshot["position"]
+                version = int(snapshot.get("portfolio_version") or 0)
             else:
                 position = await position_getter(symbol=symbol, market_type="perp")
                 version = baseline_version
@@ -125,8 +136,9 @@ async def reconcile_disappeared_variational_order(
             delta = current_quantity - baseline_quantity
             filled_quantity = delta if side.strip().upper() == "BUY" else -delta
             if filled_quantity > 0:
-                filled_quantity = min(filled_quantity, requested_quantity)
-                return {
+                if not settle:
+                    filled_quantity = min(filled_quantity, requested_quantity)
+                latest_fill = {
                     "status": "filled",
                     "fill_result": {
                         "ok": True,
@@ -139,7 +151,9 @@ async def reconcile_disappeared_variational_order(
                         "portfolio_version": version,
                     },
                 }
-            if current_quantity != baseline_quantity:
+                if not settle or filled_quantity >= requested_quantity:
+                    return latest_fill
+            if filled_quantity <= 0 and current_quantity != baseline_quantity:
                 return {
                     "status": "ambiguous",
                     "reason": "position_moved_opposite_order_direction",
@@ -152,6 +166,8 @@ async def reconcile_disappeared_variational_order(
         if attempt < max(attempts, 1) - 1 and retry_delay_seconds > 0:
             await asyncio.sleep(retry_delay_seconds)
 
+    if latest_fill is not None:
+        return latest_fill
     if (
         successful_queries > 0
         and last_quantity == baseline_quantity
@@ -464,6 +480,7 @@ async def execute_single_clip(
     min_hedge_notional_usd: float = 0.0,
     maker_reduce_only: bool = False,
     taker_reduce_only: bool = False,
+    verify_hedge_fill: bool = False,
 ) -> dict[str, object]:
     maker_side, taker_side = execution_sides_for_signal(
         maker_venue=maker_venue,
@@ -497,6 +514,7 @@ async def execute_single_clip(
         min_hedge_notional_usd=min_hedge_notional_usd,
         maker_reduce_only=maker_reduce_only,
         taker_reduce_only=taker_reduce_only,
+        verify_hedge_fill=verify_hedge_fill,
     )
 
 
@@ -528,6 +546,7 @@ async def execute_single_clip_with_sides(
     min_hedge_notional_usd: float = 0.0,
     maker_reduce_only: bool = False,
     taker_reduce_only: bool = False,
+    verify_hedge_fill: bool = False,
 ) -> dict[str, object]:
     state_machine.to_preview_ready()
     state_machine.to_awaiting_confirm()
@@ -587,6 +606,23 @@ async def execute_single_clip_with_sides(
 
     if taker_pre_hook is not None:
         await taker_pre_hook()
+
+    maker_position_baseline = None
+    taker_position_baseline = None
+    if verify_hedge_fill:
+        for setup_name in ("ensure_isolated_margin", "ensure_leverage"):
+            setup = getattr(taker_adapter, setup_name, None)
+            if callable(setup):
+                await setup(symbol)
+        # Fail before submitting the maker if either live position is unavailable.
+        maker_position_baseline, taker_position_baseline = await asyncio.gather(
+            position_quantity(maker_adapter, symbol), position_quantity(taker_adapter, symbol),
+        )
+        if abs(maker_position_baseline + taker_position_baseline) > max(
+            Decimal(str(quantity)) * Decimal("0.001"), Decimal("0.00000001")
+        ):
+            raise RuntimeError("FAIL-CLOSED existing position imbalance before maker dispatch: "
+                               f"{maker_venue}={maker_position_baseline} {taker_venue}={taker_position_baseline}")
 
     maker_fill_result: dict[str, object] | None = None
     maker_result: dict[str, object] | None = None
@@ -681,6 +717,16 @@ async def execute_single_clip_with_sides(
             break
         except BaseException as exc:
             exception_order_result = getattr(exc, "order_result", None)
+            if (verify_hedge_fill and maker_venue == "variational"
+                    and not isinstance(exception_order_result, dict)):
+                # A dropped browser/socket response can lose all order metadata
+                # after the click. Keep the pre-dispatch position for recovery.
+                exception_order_result = {
+                    "ok": False,
+                    "details": {"potentiallySubmitted": True,
+                                "baselinePositionQty": str(maker_position_baseline),
+                                "baselinePortfolioVersion": 0},
+                }
             if isinstance(exception_order_result, dict):
                 attempt_record.setdefault("maker_result", exception_order_result)
                 maker_result = exception_order_result
@@ -725,6 +771,17 @@ async def execute_single_clip_with_sides(
                     break
             exhausted = max_maker_reprice_attempts >= 0 and maker_attempt >= max_maker_reprice_attempts
             if exhausted or not maker_fill_error_is_repriceable(exc):
+                if verify_hedge_fill and maker_venue == "variational" and isinstance(maker_result, dict):
+                    cleanup_errors = await cleanup_active_makers()
+                    if not cleanup_errors:
+                        reconciliation = await reconcile_disappeared_variational_order(
+                            maker_adapter, order_result=maker_result, symbol=symbol,
+                            side=maker_side, requested_quantity=Decimal(str(quantity)), settle=True,
+                        )
+                        if reconciliation.get("status") == "filled":
+                            maker_fill_result = reconciliation["fill_result"]
+                            maker_cancel_result = {"ok": True, "status": "cancelled"}
+                            break
                 await raise_after_maker_cleanup(exc)
             placed_result = attempt_record.get("maker_result") or maker_result or {}
             fresh_price: str | None = None
@@ -978,6 +1035,41 @@ async def execute_single_clip_with_sides(
     elif require_maker_fill_confirmation or order_result_looks_filled(maker_result):
         mark_maker_closed(maker_result)
 
+    if verify_hedge_fill:
+        # Even a broker FILLED message may describe only the first trade.
+        # Resolve any remaining maker before reading its final position delta.
+        has_open_order = getattr(maker_adapter, "has_open_order", None)
+        if maker_cancel_result is None and callable(has_open_order):
+            register_active_maker(maker_result)
+            try:
+                if await has_open_order(order_result=maker_result, symbol=symbol,
+                                        side=maker_side, amount=str(quantity)):
+                    maker_cancel_result = await cancel_maker_order_with_retries(
+                        maker_adapter, maker_result=maker_result, symbol=symbol,
+                        side=maker_side, amount=str(quantity),
+                    )
+                mark_maker_closed(maker_result)
+            except BaseException as exc:
+                await raise_after_maker_cleanup(exc)
+        final_reconciliation = await reconcile_disappeared_variational_order(
+            maker_adapter,
+            order_result={"details": {"baselinePositionQty": str(maker_position_baseline),
+                                      "baselinePortfolioVersion": 0}},
+            symbol=symbol, side=maker_side, requested_quantity=requested_quantity,
+            attempts=10, settle=True,
+        )
+        if final_reconciliation.get("status") != "filled":
+            raise RuntimeError(f"FAIL-CLOSED {maker_venue} final maker fill unresolved: "
+                               f"{final_reconciliation}")
+        maker_fill_result = final_reconciliation["fill_result"]
+        executed_quantity = Decimal(str(maker_fill_result["filled_quantity"]))
+        maker_result = {
+            "ok": True, "filled": True, "filled_quantity": str(executed_quantity),
+            "source": "live_position_delta", "raw": maker_result,
+        }
+        partial_fill = executed_quantity < requested_quantity
+        print(f"[maker-reconcile] final {maker_venue} quantity={executed_quantity}", flush=True)
+
     state_machine.to_hedging_taker_leg()
     last_error: Exception | None = None
     for attempt in range(max_hedge_retries + 1):
@@ -991,7 +1083,25 @@ async def execute_single_clip_with_sides(
             }
             if taker_reduce_only:
                 taker_kwargs["reduce_only"] = True
-            hedge_result = await taker_adapter.place_market_order(**taker_kwargs)
+            if verify_hedge_fill:
+                # Recovery orders only go to the original hedge leg. Never
+                # reverse the filled maker to compensate for a failed hedge.
+                hedge_result = await execute_confirmed_market_order(
+                    taker_adapter, symbol=symbol, side=taker_side,
+                    quantity=executed_quantity, clip_usd=hedge_clip_usd,
+                    baseline=taker_position_baseline, reduce_only=taker_reduce_only,
+                    max_attempts=max(3, max_hedge_retries + 1),
+                )
+            else:
+                hedge_result = await taker_adapter.place_market_order(**taker_kwargs)
+                if not isinstance(hedge_result, dict) or not hedge_result.get("ok", False):
+                    raise RuntimeError(f"hedge order rejected: {hedge_result}")
+            if verify_hedge_fill:
+                await confirm_pair_execution(
+                    maker_adapter, taker_adapter, symbol=symbol,
+                    maker_baseline=maker_position_baseline, taker_baseline=taker_position_baseline,
+                    maker_side=maker_side, quantity=executed_quantity,
+                )
             maker_avg_price = (
                 extract_average_price(maker_fill_result)
                 or extract_average_price(maker_result)
@@ -1011,6 +1121,7 @@ async def execute_single_clip_with_sides(
             state_machine.to_completed()
             return {
                 "ok": True,
+                "hedge_verified": verify_hedge_fill,
                 "maker_result": maker_result,
                 "maker_attempts": maker_attempts,
                 "maker_fill_result": maker_fill_result,
@@ -1018,13 +1129,13 @@ async def execute_single_clip_with_sides(
                 "hedge_result": hedge_result,
                 "requested_quantity": format(requested_quantity.normalize(), "f"),
                 "executed_quantity": format(executed_quantity.normalize(), "f"),
-                "remaining_quantity": format((requested_quantity - executed_quantity).normalize(), "f"),
+                "remaining_quantity": format(max(Decimal("0"), requested_quantity - executed_quantity).normalize(), "f"),
                 "partial_fill": partial_fill,
                 "execution_price_summary": execution_price_summary,
             }
         except Exception as exc:
             last_error = exc
-            if attempt >= max_hedge_retries:
+            if verify_hedge_fill or attempt >= max_hedge_retries:
                 state_machine.to_emergency_exit()
                 await raise_after_maker_cleanup(
                     RuntimeError(f"hedge failed on {taker_venue}: {exc}")

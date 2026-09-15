@@ -344,6 +344,30 @@ def maker_fill_error_is_repriceable(error: Exception) -> bool:
     )
 
 
+def maker_order_failure(*, venue: str, symbol: str, side: str, result: object) -> RuntimeError:
+    """Retain the response so rejection handling can reconcile/cancel this order."""
+    if isinstance(result, dict):
+        reason = result.get("error") or result.get("message") or result.get("msg")
+        raw = result.get("raw")
+        if not reason and isinstance(raw, dict):
+            reason = raw.get("error") or raw.get("message") or raw.get("msg")
+        details = result.get("details")
+        if not reason and isinstance(details, dict):
+            reason = details.get("error") or details.get("message")
+        context = (
+            f"error={reason or 'response missing successful acknowledgement'} "
+            f"status={result.get('status')} type={result.get('type')} "
+            f"requestId={result.get('requestId')} "
+            f"orderId={result.get('orderId') or result.get('order_id')}"
+        )
+    else:
+        context = f"invalid response type={type(result).__name__}"
+    error = RuntimeError(f"maker order failed on {venue}: symbol={symbol} side={side} {context}")
+    if isinstance(result, dict):
+        error.order_result = result
+    return error
+
+
 def resolve_executed_quantity(
     *,
     requested_quantity: Decimal,
@@ -696,8 +720,10 @@ async def execute_single_clip_with_sides(
                     if used_price:
                         maker_kwargs["price"] = str(used_price)
             attempt_record["maker_result"] = maker_result
-            if not maker_result.get("ok", False):
-                raise RuntimeError(f"maker order failed on {maker_venue}")
+            if not isinstance(maker_result, dict) or not maker_result.get("ok", False):
+                raise maker_order_failure(
+                    venue=maker_venue, symbol=symbol, side=maker_side, result=maker_result,
+                )
             register_active_maker(maker_result)
 
             if not require_maker_fill_confirmation:
@@ -717,18 +743,29 @@ async def execute_single_clip_with_sides(
             break
         except BaseException as exc:
             exception_order_result = getattr(exc, "order_result", None)
-            if (verify_hedge_fill and maker_venue == "variational"
-                    and not isinstance(exception_order_result, dict)):
-                # A dropped browser/socket response can lose all order metadata
-                # after the click. Keep the pre-dispatch position for recovery.
-                exception_order_result = {
-                    "ok": False,
-                    "details": {"potentiallySubmitted": True,
-                                "baselinePositionQty": str(maker_position_baseline),
-                                "baselinePortfolioVersion": 0},
-                }
+            if not isinstance(exception_order_result, dict) and isinstance(maker_result, dict):
+                # A fill waiter can raise without carrying the accepted order.
+                exception_order_result = maker_result
+            if verify_hedge_fill and maker_venue == "variational":
+                # Keep real identifiers/error/price. Only supplement a missing
+                # baseline; never replace the actual response with a synthetic one.
+                if not isinstance(exception_order_result, dict):
+                    exception_order_result = {"ok": False}
+                if extract_baseline_position(exception_order_result) is None:
+                    details = exception_order_result.get("details")
+                    details = dict(details) if isinstance(details, dict) else {}
+                    details.update({"potentiallySubmitted": True,
+                                    "baselinePositionQty": str(maker_position_baseline),
+                                    "baselinePortfolioVersion": 0})
+                    exception_order_result = {**exception_order_result, "details": details}
+                if isinstance(exc, Exception):
+                    exc.order_result = exception_order_result
             if isinstance(exception_order_result, dict):
-                attempt_record.setdefault("maker_result", exception_order_result)
+                attempt_record["maker_result"] = exception_order_result
+                # Enriching a previously accepted response creates a new dict,
+                # but it still represents the same active maker order.
+                if maker_result is not exception_order_result:
+                    mark_maker_closed(maker_result)
                 maker_result = exception_order_result
                 if maker_kwargs.get("price") is None:
                     used_price = extract_used_limit_price(exception_order_result)
@@ -745,6 +782,7 @@ async def execute_single_clip_with_sides(
                     register_active_maker(exception_order_result)
             attempt_record["maker_fill_error"] = str(exc)
             maker_attempts.append(attempt_record)
+            print(f"[maker-failure] venue={maker_venue} symbol={symbol} side={maker_side} error={exc}", flush=True)
             if isinstance(exc, (asyncio.CancelledError, KeyboardInterrupt, SystemExit)):
                 await raise_after_maker_cleanup(exc)
             if (
@@ -777,6 +815,11 @@ async def execute_single_clip_with_sides(
                         reconciliation = await reconcile_disappeared_variational_order(
                             maker_adapter, order_result=maker_result, symbol=symbol,
                             side=maker_side, requested_quantity=Decimal(str(quantity)), settle=True,
+                        )
+                        attempt_record["post_cleanup_position_reconciliation"] = reconciliation
+                        print(
+                            f"[maker-reconcile] after cleanup venue={maker_venue} symbol={symbol} "
+                            f"side={maker_side} result={reconciliation}", flush=True,
                         )
                         if reconciliation.get("status") == "filled":
                             maker_fill_result = reconciliation["fill_result"]

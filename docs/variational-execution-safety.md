@@ -7,6 +7,11 @@ containing Variational. The web maker/taker flow uses the same open-clip functio
   the taker's margin/leverage where supported. Existing imbalance blocks a new batch.
 - Variational trade messages carry their position baseline. A trade message is
   fill evidence, not proof that the remaining order is terminal.
+- Failed maker responses retain the original error, request/order identifiers,
+  price and position baseline. Missing baselines are supplemented from the live
+  pre-dispatch position. `[maker-failure]` logs the cause; `[maker-reconcile] after
+  cleanup` shows whether cancellation was followed by a fill, unchanged position,
+  or inconclusive data. A cancellation acknowledgement alone does not prove zero fill.
 - After cancelling a partial maker, the executor polls its position delta for
   up to ten observations, including fills arriving during cancellation. It hedges
   the resulting quantity rather than the first trade's quantity.

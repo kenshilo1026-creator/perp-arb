@@ -12,7 +12,9 @@ from hydra_basis.execution_engine.hedge_safety import (
 )
 from hydra_basis.execution_engine.hyperliquid_adapter import HyperliquidExecutionAdapter
 from hydra_basis.execution_engine.state_machine import ExecutionStateMachine
-from scripts.place_order import record_open_execution_from_live_positions
+from scripts.place_order import (
+    ClosePositionPlan, execute_close_position_plan, record_open_execution_from_live_positions,
+)
 
 
 class PositionAdapter:
@@ -187,6 +189,90 @@ class HedgeSafetyTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result["maker_result"]["ok"])
         self.assertEqual(taker.quantity, 30000)
         self.assertEqual(maker.cancel_order.await_count, 1)
+
+    async def test_failed_close_response_still_hedges_fill_during_cleanup(self):
+        maker, taker = PositionAdapter("-25000"), PositionAdapter("25000")
+        maker.get_limit_price_preview = AsyncMock(return_value="0.1")
+        maker.place_limit_order = AsyncMock(return_value={
+            "ok": False, "error": "submit verification failed", "requestId": "2z-close",
+            "orderId": "maker-2z", "details": {"usedLimitPrice": "0.1"},
+        })
+
+        async def cancel(**kwargs):
+            self.assertEqual(kwargs["order_result"]["orderId"], "maker-2z")
+            self.assertEqual(kwargs["order_result"]["details"]["baselinePositionQty"], "-25000")
+            maker.quantity = Decimal("-20000")
+            return {"ok": True, "status": "cancelled"}
+
+        maker.cancel_order = AsyncMock(side_effect=cancel)
+        result = await execute_close_position_plan(
+            plan=ClosePositionPlan(
+                symbol="2Z", quantity=Decimal("10000"), maker_venue="variational",
+                taker_venue="hyperliquid", maker_price="0.1", clip_usd=1000,
+                side_by_venue={"variational": "BUY", "hyperliquid": "SELL"}, spread_by_venue={},
+            ),
+            adapters={"variational": maker, "hyperliquid": taker},
+            symbol="2Z", venues=["variational", "hyperliquid"],
+        )
+        self.assertTrue(result["hedge_verified"])
+        self.assertEqual(maker.quantity, -20000)
+        self.assertEqual(taker.quantity, 20000)
+        self.assertTrue(maker.place_limit_order.await_args.kwargs["reduce_only"])
+        self.assertEqual(taker.orders[0]["side"], "SELL")
+        self.assertEqual(taker.orders[0]["amount"], "5000")
+        self.assertEqual(maker.orders, [])
+        self.assertEqual(maker.cancel_order.await_count, 1)
+
+    async def test_failed_response_preserves_original_baseline_and_rejection(self):
+        maker, taker = self.maker(late_fill=False), PositionAdapter("25000")
+        response = {
+            "ok": False, "error": "Reduce-only order rejected", "requestId": "reject-2z",
+            "orderId": "maker-2z", "details": {"baselinePositionQty": "-25000",
+                                                     "baselinePortfolioVersion": 17, "usedLimitPrice": "0.1"},
+        }
+        maker.place_limit_order = AsyncMock(return_value=response)
+        maker.cancel_order = AsyncMock(return_value={"ok": True})
+        with self.assertRaisesRegex(RuntimeError, "Reduce-only order rejected.*requestId=reject-2z") as raised:
+            await self.execute_pair(maker, taker)
+        self.assertIs(raised.exception.order_result, response)
+        self.assertIs(maker.cancel_order.await_args.kwargs["order_result"], response)
+        maker.place_limit_order.assert_awaited_once()
+        self.assertEqual(taker.orders, [])
+
+    async def test_returned_timeout_is_repriced_only_after_cancel_and_reconciliation(self):
+        maker, taker = self.maker(late_fill=False), PositionAdapter("25000")
+        maker.cancel_order = AsyncMock(return_value={"ok": True})
+        calls = []
+
+        async def submit(**kwargs):
+            calls.append(kwargs)
+            if len(calls) == 1:
+                return {"ok": False, "error": "limit order fill timeout", "orderId": "old-order",
+                        "details": {"usedLimitPrice": "0.1"}}
+            self.assertEqual(maker.cancel_order.await_count, 1)
+            maker.quantity = Decimal("-35000")
+            return {"ok": True, "filled": True, "filled_quantity": "10000"}
+
+        maker.place_limit_order = submit
+        result = await self.execute_pair(
+            maker, taker, max_maker_reprice_attempts=1,
+            maker_price_refresher=AsyncMock(return_value="0.11"),
+        )
+        self.assertTrue(result["hedge_verified"])
+        self.assertEqual(maker.cancel_order.await_args.kwargs["order_result"]["orderId"], "old-order")
+        self.assertEqual(calls[-1]["price"], "0.11")
+        self.assertEqual(taker.quantity, 35000)
+
+    async def test_waiter_failure_preserves_accepted_order_and_cancels_it_once(self):
+        maker, taker = self.maker(late_fill=False), PositionAdapter("25000")
+        maker.place_limit_order = AsyncMock(return_value={"ok": True, "orderId": "accepted-order"})
+        maker.wait_for_order_fill = AsyncMock(side_effect=RuntimeError("fill feed disconnected"))
+        maker.cancel_order = AsyncMock(return_value={"ok": True})
+        with self.assertRaisesRegex(RuntimeError, "fill feed disconnected") as raised:
+            await self.execute_pair(maker, taker)
+        self.assertEqual(raised.exception.order_result["orderId"], "accepted-order")
+        self.assertEqual(maker.cancel_order.await_count, 1)
+        self.assertEqual(taker.orders, [])
 
     async def test_exhausted_rejection_never_closes_filled_maker(self):
         maker = self.maker(late_fill=False)

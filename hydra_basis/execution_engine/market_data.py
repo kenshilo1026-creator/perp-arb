@@ -225,6 +225,11 @@ def select_variational_quote_fields(listing: dict[str, Any], clip_usd: float) ->
 
 async def fetch_variational_quote(session: aiohttp.ClientSession, symbol: str, *, clip_usd: float) -> dict[str, float | int]:
     data = await fetch_json(session, "GET", f"{VARIATIONAL_BASE_URL}/metadata/stats")
+    return parse_variational_quote(data, symbol, clip_usd=clip_usd)
+
+
+def parse_variational_quote(data: dict, symbol: str, *, clip_usd: float) -> dict[str, float | int]:
+    """Select one quote from a stats snapshot without changing live-fetch behavior."""
     listings = data.get("listings") or []
     for listing in listings:
         if str(listing.get("ticker") or "").upper() != symbol.upper():

@@ -3,7 +3,7 @@ from __future__ import annotations
 import datetime as dt
 from typing import Sequence, TypeVar
 
-from hydra_basis.execution_engine.market_data import fetch_orderbook_snapshot
+from hydra_basis.execution_engine.market_data import fetch_orderbook_snapshot, parse_variational_quote
 from hydra_basis.execution_engine.risk import compute_spread_pct
 from hydra_basis.history_store import funding_history_is_complete
 
@@ -165,6 +165,7 @@ async def capture_backfill_spread_snapshot_with_error(
     symbol: str,
     clip_usd: float,
     force_refresh: bool = False,
+    variational_stats: dict | None = None,
 ) -> dict[str, object]:
     if spreads.get((venue, symbol), {}).get("status") == INVALID_SYMBOL_SENTINEL:
         return {
@@ -184,12 +185,15 @@ async def capture_backfill_spread_snapshot_with_error(
         }
 
     try:
-        orderbook = await fetch_orderbook_snapshot(
-            session,
-            venue=venue,
-            symbol=symbol,
-            clip_usd=clip_usd,
-        )
+        if venue == "variational" and variational_stats is not None:
+            orderbook = parse_variational_quote(variational_stats, symbol, clip_usd=clip_usd)
+        else:
+            orderbook = await fetch_orderbook_snapshot(
+                session,
+                venue=venue,
+                symbol=symbol,
+                clip_usd=clip_usd,
+            )
     except Exception as exc:
         message = _safe_error_text(exc)
         if "missing " in message.lower() and " orderbook for " in message.lower():

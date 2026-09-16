@@ -5,7 +5,10 @@ import html
 
 import aiohttp
 
-from _bootstrap import ensure_project_root_on_path
+try:
+    from _bootstrap import ensure_project_root_on_path
+except ModuleNotFoundError:  # support importing the runner in offline tests
+    from scripts._bootstrap import ensure_project_root_on_path
 
 ensure_project_root_on_path()
 
@@ -21,7 +24,8 @@ from hydra_basis.backfill import (
     backfill_incremental_start_ms,
     backfill_needs_top_up,
 )
-from hydra_basis.adapters.variational import VARIATIONAL_LORIS_INVALID_SYMBOLS
+from hydra_basis.adapters.base import fetch_json
+from hydra_basis.adapters.variational import VARIATIONAL_BASE_URL, VARIATIONAL_LORIS_INVALID_SYMBOLS
 from hydra_basis.config import (
     BACKFILL_SPREAD_CLIP_USD,
     FETCH_CONCURRENCY_LIMIT,
@@ -79,6 +83,7 @@ async def capture_spread_snapshot_with_venue_delay(
     spreads,
     venue: str,
     symbol: str,
+    variational_stats: dict | None = None,
 ) -> dict[str, object]:
     result = await capture_backfill_spread_snapshot_with_error(
         session=session,
@@ -87,11 +92,29 @@ async def capture_spread_snapshot_with_venue_delay(
         symbol=symbol,
         clip_usd=BACKFILL_SPREAD_CLIP_USD,
         force_refresh=True,
+        variational_stats=variational_stats,
     )
-    delay = SPREAD_REFRESH_DELAY_BY_VENUE_SECONDS.get(venue, 0.0)
+    # A shared snapshot performs no network request per symbol. The single
+    # stats request is paced before this batch is processed instead.
+    delay = 0.0 if venue == "variational" and variational_stats is not None else SPREAD_REFRESH_DELAY_BY_VENUE_SECONDS.get(venue, 0.0)
     if delay > 0:
         await asyncio.sleep(delay)
     return result
+
+
+async def fetch_variational_spread_batch_stats(session) -> dict | None:
+    """Reuse one fresh bulk response for one spread batch, never across runs."""
+    try:
+        data = await fetch_json(session, "GET", f"{VARIATIONAL_BASE_URL}/metadata/stats")
+        if not isinstance(data, dict) or not isinstance(data.get("listings"), list) or not data["listings"]:
+            raise RuntimeError("Variational stats response has no listings")
+    except Exception as exc:
+        print(f"backfill bulk Variational stats unavailable; using per-symbol fetches: {exc!r}")
+        data = None
+    delay = SPREAD_REFRESH_DELAY_BY_VENUE_SECONDS.get("variational", 0.0)
+    if delay > 0:
+        await asyncio.sleep(delay)
+    return data
 
 
 async def send_spread_error_alert(
@@ -175,7 +198,8 @@ async def run_backfill(*, skip_spread_refresh: bool = False, symbols_filter: set
             for symbol in sorted(venue_symbols.get(venue, set())):
                 if symbols_filter is not None and symbol.upper() not in symbols_filter:
                     continue
-                merged_cached_points = merge_points_by_interval_bucket(all_points.get((venue, symbol), []))
+                # Every loaded key was already merged once above.
+                merged_cached_points = all_points.get((venue, symbol), [])
                 cached_points = trim_points_to_analysis_days(
                     merged_cached_points,
                     analysis_days=7,
@@ -209,6 +233,8 @@ async def run_backfill(*, skip_spread_refresh: bool = False, symbols_filter: set
             enabled_venues=enabled_venues,
             supported_venues=set(FETCHERS),
         )
+        if symbols_filter is not None:
+            spread_refresh_keys = [key for key in spread_refresh_keys if key[1].upper() in symbols_filter]
         print(f"backfill spread refresh size={len(spread_refresh_keys)}")
 
         immediate_keys, loris_batched_keys = split_loris_batched_keys(pending_keys)
@@ -384,12 +410,17 @@ async def run_backfill(*, skip_spread_refresh: bool = False, symbols_filter: set
                         f"{batch_index}/{len(spread_batches)} size={len(batch)} "
                         f"concurrency={spread_limit}"
                     )
+                    variational_stats = (
+                        await fetch_variational_spread_batch_stats(session)
+                        if venue == "variational" else None
+                    )
                     tasks = [
                         capture_spread_snapshot_with_venue_delay(
                             session=session,
                             spreads=all_spreads,
                             venue=item_venue,
                             symbol=symbol,
+                            variational_stats=variational_stats,
                         )
                         for item_venue, symbol in batch
                     ]
@@ -422,12 +453,9 @@ async def run_backfill(*, skip_spread_refresh: bool = False, symbols_filter: set
                         batch_count=len(spread_batches),
                         errors=spread_errors,
                     )
-                    persist_backfill_progress(
-                        history_store=store,
-                        spread_store=spread_store,
-                        funding_points=all_points,
-                        spreads=all_spreads,
-                    )
+                    # Funding history has already been checkpointed above and
+                    # is unchanged throughout the spread-only phase.
+                    spread_store.save(all_spreads)
 
 
 if __name__ == "__main__":

@@ -149,6 +149,8 @@ def build_adapter_for_venue(venue: str, *, leverage: int = 1, broker_url: str | 
             signer_client_factory=build_lighter_client_factory_from_env(),
             market_config_loader=lambda symbol: fetch_lighter_market_config(symbol),
             orderbook_loader=lambda symbol: fetch_lighter_orderbook_live(symbol),
+            leverage=leverage,
+            skip_margin_setup=skip_margin_setup,
         )
     if v == "variational":
         if broker_url is not None:

@@ -85,20 +85,22 @@ async def fetch_lighter_market_config(
         data = await fetch_json(
             session,
             "GET",
-            f"{base_url}/api/v1/orderBooks",
+            f"{base_url}/api/v1/orderBookDetails",
             headers={"accept": "application/json"},
         )
-    for market in data.get("order_books", []):
+    for market in data.get("order_book_details", []):
         if str(market.get("symbol") or "").upper() != symbol.upper():
             continue
         price_decimals = int(market["supported_price_decimals"])
         size_decimals = int(market["supported_size_decimals"])
+        market_settings = market.get("market_config") or {}
         return {
             "market_index": int(market["market_id"]),
             "base_amount_multiplier": pow(10, size_decimals),
             "price_multiplier": pow(10, price_decimals),
             "min_base_amount": Decimal(str(market.get("min_base_amount", "0"))),
             "min_quote_amount": Decimal(str(market.get("min_quote_amount", "0"))),
+            "market_margin_mode": int(market_settings.get("market_margin_mode", 0)),
         }
     raise RuntimeError(f"Ticker {symbol} not found in Lighter order books")
 

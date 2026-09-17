@@ -80,7 +80,9 @@ class AsterCancelOrderTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(adapter.status_calls, 0)
 
     async def test_cancel_order_returns_ok_when_cancel_succeeds(self) -> None:
-        adapter = self._build_adapter()
+        adapter = self._build_adapter(
+            status_payload={"orderId": "9", "status": "CANCELED", "executedQty": "0"},
+        )
 
         result = await adapter.cancel_order(
             order_result={"ok": True, "order_id": "9"},
@@ -91,10 +93,60 @@ class AsterCancelOrderTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(result["ok"])
         self.assertNotIn("already_gone", result)
-        self.assertEqual(adapter.status_calls, 0)
+        self.assertEqual(result["raw"]["status"], "CANCELED")
+        self.assertEqual(adapter.status_calls, 1)
 
 
 class ExecutorCancelRaceTests(unittest.IsolatedAsyncioTestCase):
+    async def test_reprice_stops_and_hedges_fill_confirmed_by_cancel(self) -> None:
+        events: list[str] = []
+        taker_amounts: list[str] = []
+
+        class MakerAdapter:
+            async def place_limit_order(self, **kwargs):
+                events.append("place")
+                return {"ok": True, "order_id": "maker-1", "raw": {"status": "NEW"}}
+
+            async def wait_for_order_fill(self, **kwargs):
+                events.append("wait")
+                raise RuntimeError("aster limit order fill timeout")
+
+            async def cancel_order(self, **kwargs):
+                events.append("cancel")
+                return {
+                    "ok": True,
+                    "raw": {"status": "CANCELED", "executedQty": "4", "origQty": "10"},
+                }
+
+        class TakerAdapter:
+            async def place_market_order(self, **kwargs):
+                events.append("hedge")
+                taker_amounts.append(kwargs["amount"])
+                return {"ok": True, "order_id": "taker-1"}
+
+        result = await execute_single_clip_with_sides(
+            symbol="BTW",
+            clip_usd=1000.0,
+            quantity=Decimal("10"),
+            maker_venue="aster",
+            taker_venue="mexc",
+            maker_side="SELL",
+            taker_side="BUY",
+            maker_adapter=MakerAdapter(),
+            taker_adapter=TakerAdapter(),
+            max_hedge_retries=0,
+            state_machine=ExecutionStateMachine(),
+            require_maker_fill_confirmation=True,
+            maker_fill_timeout_seconds=0.01,
+            max_maker_reprice_attempts=3,
+            maker_price="1",
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(events, ["place", "wait", "cancel", "hedge"])
+        self.assertEqual(taker_amounts, ["4"])
+        self.assertEqual(result["executed_quantity"], "4")
+
     async def test_execute_single_clip_hedges_full_quantity_when_cancel_finds_order_already_filled(self) -> None:
         taker_amounts: list[str] = []
 

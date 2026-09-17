@@ -638,7 +638,10 @@ async def execute_open_clip(
             maker_adapter=maker_adapter,
             taker_adapter=taker_adapter,
             max_hedge_retries=0,
-            verify_hedge_fill="variational" in {maker_venue, taker_venue},
+            # Every supported perp adapter exposes live positions. Confirm both
+            # deltas so an acknowledged-but-unfilled hedge or a maker cancel
+            # race cannot silently carry an imbalance into the next batch.
+            verify_hedge_fill=True,
             state_machine=ExecutionStateMachine(),
             maker_price=initial_maker_price,
             maker_orderbook=use_maker_orderbook,

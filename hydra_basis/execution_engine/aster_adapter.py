@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import threading
 import os
 import time
@@ -357,18 +358,35 @@ class AsterExecutionAdapter:
             "symbol": raw_symbol,
             "orderId": str(order_id),
         })
+        cancel_response = None
         try:
-            data = await self._delete_signed_query(f"{self.BASE_URL}/fapi/v3/order", params)
+            cancel_response = await self._delete_signed_query(f"{self.BASE_URL}/fapi/v3/order", params)
         except RuntimeError as exc:
             if "-2011" not in str(exc):
                 raise
-            # -2011 "Unknown order sent." means the order already left the book,
-            # usually because the remainder filled between the caller's last fill
-            # check and this cancel. Resolve the race by returning the terminal
-            # order state so callers can pick up the final executedQty.
-            status = await self._get_order_status(symbol=symbol, order_id=order_id)
-            return {"ok": True, "already_gone": True, "raw": status}
-        return {"ok": True, "raw": data}
+        # Aster's cancel endpoint can acknowledge before the chain applies the
+        # cancellation. Never place a replacement until the old order is
+        # observably terminal, otherwise both limit orders can fill.
+        deadline = time.monotonic() + 15.0
+        last_status = None
+        while True:
+            last_status = await self._get_order_status(symbol=symbol, order_id=order_id)
+            status = str(last_status.get("status", "")).strip().upper()
+            if status in {"CANCELED", "CANCELLED", "FILLED", "EXPIRED", "REJECTED"}:
+                result = {
+                    "ok": True,
+                    "raw": last_status,
+                    "cancel_response": cancel_response,
+                }
+                if cancel_response is None:
+                    result["already_gone"] = True
+                return result
+            if time.monotonic() >= deadline:
+                raise RuntimeError(
+                    "aster cancel was acknowledged but order did not become terminal: "
+                    f"order_id={order_id} last_status={last_status}"
+                )
+            await asyncio.sleep(0.5)
 
     async def ensure_isolated_margin(self, symbol: str) -> None:
         raw_symbol = await self._resolve_raw_symbol(symbol)

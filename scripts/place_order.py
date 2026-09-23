@@ -149,6 +149,8 @@ def build_adapter_for_venue(venue: str, *, leverage: int = 1, broker_url: str | 
             signer_client_factory=build_lighter_client_factory_from_env(),
             market_config_loader=lambda symbol: fetch_lighter_market_config(symbol),
             orderbook_loader=lambda symbol: fetch_lighter_orderbook_live(symbol),
+            leverage=leverage,
+            skip_margin_setup=skip_margin_setup,
         )
     if v == "variational":
         if broker_url is not None:
@@ -636,7 +638,10 @@ async def execute_open_clip(
             maker_adapter=maker_adapter,
             taker_adapter=taker_adapter,
             max_hedge_retries=0,
-            verify_hedge_fill="variational" in {maker_venue, taker_venue},
+            # Every supported perp adapter exposes live positions. Confirm both
+            # deltas so an acknowledged-but-unfilled hedge or a maker cancel
+            # race cannot silently carry an imbalance into the next batch.
+            verify_hedge_fill=True,
             state_machine=ExecutionStateMachine(),
             maker_price=initial_maker_price,
             maker_orderbook=use_maker_orderbook,

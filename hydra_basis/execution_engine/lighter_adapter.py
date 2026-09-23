@@ -255,13 +255,23 @@ class LighterExecutionAdapter:
         signer_client_factory,
         market_config_loader,
         orderbook_loader,
+        leverage: int | None = None,
+        skip_margin_setup: bool = False,
         slippage_bps: float = 100.0,
     ) -> None:
         self._signer_client_factory = signer_client_factory
         self._market_config_loader = market_config_loader
         self._orderbook_loader = orderbook_loader
+        self.default_leverage = (
+            leverage if leverage is not None else int(os.getenv("LIGHTER_LEVERAGE", "1"))
+        )
+        if self.default_leverage <= 0:
+            raise ValueError("lighter leverage must be positive")
+        self.skip_margin_setup = skip_margin_setup
         self.slippage_bps = slippage_bps
         self.client = None
+        self._isolated_market_indices: set[int] = set()
+        self._margin_setup_locks: dict[int, asyncio.Lock] = {}
 
     def _get_client(self):
         if self.client is None:
@@ -307,6 +317,34 @@ class LighterExecutionAdapter:
         if inspect.isawaitable(result):
             return await result
         return result
+
+    async def ensure_isolated_margin(self, symbol: str) -> int:
+        market_config = self._normalize_market_config(await self._load_market_config(symbol))
+        market_index = int(market_config["market_index"])
+        if self.skip_margin_setup or market_index in self._isolated_market_indices:
+            return market_index
+
+        lock = self._margin_setup_locks.setdefault(market_index, asyncio.Lock())
+        async with lock:
+            if market_index in self._isolated_market_indices:
+                return market_index
+            client = self._get_client()
+            margin_mode = client.ISOLATED_MARGIN_MODE
+            _tx, response, error = await client.update_leverage(
+                market_index=market_index,
+                margin_mode=margin_mode,
+                leverage=self.default_leverage,
+            )
+            if error is not None:
+                raise RuntimeError(f"lighter update_leverage failed: {error}")
+            response_code = getattr(response, "code", None)
+            if response_code not in (None, 200):
+                message = getattr(response, "message", None)
+                raise RuntimeError(
+                    f"lighter update_leverage failed: code={response_code} message={message!r}"
+                )
+            self._isolated_market_indices.add(market_index)
+            return market_index
 
     def _create_auth_token(self) -> str:
         client = self._get_client()
@@ -491,6 +529,8 @@ class LighterExecutionAdapter:
         amount: str,
         reduce_only: bool,
     ) -> dict[str, object]:
+        if not reduce_only:
+            await self.ensure_isolated_margin(symbol)
         quantity = Decimal(str(amount))
         market_config = self._normalize_market_config(await self._load_market_config(symbol))
         orderbook = await self._load_orderbook(symbol)
@@ -516,6 +556,8 @@ class LighterExecutionAdapter:
         price: str,
         reduce_only: bool,
     ) -> dict[str, object]:
+        if not reduce_only:
+            await self.ensure_isolated_margin(symbol)
         quantity = Decimal(str(amount))
         limit_price = Decimal(str(price))
         market_config = self._normalize_market_config(await self._load_market_config(symbol))

@@ -1225,9 +1225,15 @@ class LighterExecutionAdapterTests(unittest.IsolatedAsyncioTestCase):
         class FakeSignerClient:
             ORDER_TYPE_LIMIT = "limit"
             ORDER_TIME_IN_FORCE_GOOD_TILL_TIME = "gtt"
+            ISOLATED_MARGIN_MODE = 1
 
             def __init__(self) -> None:
                 self.calls = []
+                self.margin_calls = []
+
+            async def update_leverage(self, **kwargs):
+                self.margin_calls.append(kwargs)
+                return None, None, None
 
             async def create_order(self, **kwargs):
                 self.calls.append(kwargs)
@@ -1248,14 +1254,22 @@ class LighterExecutionAdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(call["base_amount"], 10000)
         self.assertEqual(call["price"], 10201)
         self.assertFalse(call["is_ask"])
+        self.assertEqual(
+            adapter.client.margin_calls,
+            [{"market_index": 7, "margin_mode": 1, "leverage": 1}],
+        )
 
     async def test_place_limit_order_calls_create_order_with_explicit_price(self) -> None:
         class FakeSignerClient:
             ORDER_TYPE_LIMIT = "limit"
             ORDER_TIME_IN_FORCE_GOOD_TILL_TIME = "gtt"
+            ISOLATED_MARGIN_MODE = 1
 
             def __init__(self) -> None:
                 self.calls = []
+
+            async def update_leverage(self, **kwargs):
+                return None, None, None
 
             async def create_order(self, **kwargs):
                 self.calls.append(kwargs)
@@ -1287,9 +1301,13 @@ class LighterExecutionAdapterTests(unittest.IsolatedAsyncioTestCase):
         class FakeSignerClient:
             ORDER_TYPE_LIMIT = "limit"
             ORDER_TIME_IN_FORCE_GOOD_TILL_TIME = "gtt"
+            ISOLATED_MARGIN_MODE = 1
 
             def __init__(self) -> None:
                 self.calls = []
+
+            async def update_leverage(self, **kwargs):
+                return None, None, None
 
             async def create_order(self, **kwargs):
                 self.calls.append(kwargs)

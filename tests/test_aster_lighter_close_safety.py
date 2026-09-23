@@ -14,12 +14,14 @@ from scripts.place_order import ClosePositionPlan, execute_close_position_plan
 
 
 class Signer:
+    ISOLATED_MARGIN_MODE = 1
     ORDER_TYPE_LIMIT = 0
     ORDER_TIME_IN_FORCE_GOOD_TILL_TIME = 1
     ORDER_TIME_IN_FORCE_IMMEDIATE_OR_CANCEL = 0
     DEFAULT_IOC_EXPIRY = 0
 
     def __init__(self):
+        self.update_leverage = AsyncMock(return_value=(None, None, None))
         self.create_order = AsyncMock(return_value=(None, "tx", None))
         self.cancel_order = AsyncMock(return_value=(None, "cancel-tx", None))
 

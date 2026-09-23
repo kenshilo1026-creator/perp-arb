@@ -358,23 +358,24 @@ class AsterExecutionAdapter:
             "symbol": raw_symbol,
             "orderId": str(order_id),
         })
+        cancel_response = None
         try:
-            data = await self._delete_signed_query(f"{self.BASE_URL}/fapi/v3/order", params)
+            cancel_response = await self._delete_signed_query(f"{self.BASE_URL}/fapi/v3/order", params)
         except RuntimeError as exc:
             if "-2011" not in str(exc):
                 raise
-            # -2011 "Unknown order sent." means the order already left the book,
-            # usually because the remainder filled between the caller's last fill
-            # check and this cancel. Resolve the race by returning the terminal
-            # order state so callers can pick up the final executedQty.
-            status = await wait_for_terminal_order(
-                lambda: self._get_order_status(symbol=symbol, order_id=order_id),
-            )
-            return {"ok": True, "already_gone": True, "raw": status}
-        data = await wait_for_terminal_order(
-            lambda: self._get_order_status(symbol=symbol, order_id=order_id), initial=data,
+        # A cancel acknowledgement can precede chain execution. Always query
+        # the order again, including after -2011, and require its terminal
+        # cumulative fill before authorizing a replacement or residual hedge.
+        status = await wait_for_terminal_order(
+            lambda: self._get_order_status(symbol=symbol, order_id=order_id),
+            attempts=31, poll_delay=0.5,
         )
-        return {"ok": True, "raw": data}
+        result = {"ok": True, "raw": status, "cancel_response": cancel_response}
+        if cancel_response is None:
+            result["already_gone"] = True
+        return result
+
 
     async def get_order_execution(self, *, order_result: dict, symbol: str) -> dict:
         order_id = order_result.get("order_id") or order_result.get("orderId")

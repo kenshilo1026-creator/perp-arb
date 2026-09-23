@@ -988,6 +988,22 @@ async def execute_single_clip_with_sides(
             cancel_status = str(
                 cancel_raw.get("status", "") if isinstance(cancel_raw, dict) else ""
             ).lower()
+            canceled_fill_quantity = extract_filled_quantity(
+                cancel_result,
+                allow_terminal_quantity_fallback=True,
+            )
+            if canceled_fill_quantity is not None and canceled_fill_quantity > 0:
+                # Hedge fills from this attempt before placing another maker.
+                # Otherwise a replacement for the full clip loses this fill and
+                # can over-open the maker venue.
+                maker_fill_result = cancel_result
+                maker_result = placed_result
+                print(
+                    "[reprice] cancelled maker had a fill — "
+                    f"hedging before replacement qty={format_decimal(canceled_fill_quantity)}",
+                    flush=True,
+                )
+                break
             baseline_available = extract_baseline_position(placed_result) is not None
             if maker_venue in {"aster", "lighter"}:
                 final_fill = terminal_fill_quantity(cancel_result)

@@ -2150,7 +2150,7 @@ class EmergencyCloserAdapterTests(unittest.IsolatedAsyncioTestCase):
                 actions.append(action)
                 if action["type"] == "updateLeverage":
                     return {"status": "ok", "response": {"type": "default"}}
-                return {"status": "ok", "response": {"data": {"statuses": [{"filled": {"oid": 1}}]}}}
+                return {"status": "ok", "response": {"data": {"statuses": [{"filled": {"oid": 1, "totalSz": "0.01", "avgPx": "1773.75"}}]}}}
 
         adapter = FakeHyperliquid()
 
@@ -2246,6 +2246,8 @@ class EmergencyCloserAdapterTests(unittest.IsolatedAsyncioTestCase):
         class FakeSignerClient:
             ORDER_TYPE_LIMIT = "limit"
             ORDER_TIME_IN_FORCE_GOOD_TILL_TIME = "gtt"
+            ORDER_TIME_IN_FORCE_IMMEDIATE_OR_CANCEL = "ioc"
+            DEFAULT_IOC_EXPIRY = 0
 
             def __init__(self) -> None:
                 self.calls = []

@@ -15,6 +15,7 @@ except ImportError:  # eth-account >= 0.12
 from eth_account.messages import encode_typed_data
 
 from hydra_basis.execution_engine.order_fill import poll_until_filled
+from hydra_basis.execution_engine.hedge_safety import wait_for_terminal_order
 
 ASTER_EXECUTION_SUFFIXES = ("USDT", "USDC", "USD")
 
@@ -366,9 +367,20 @@ class AsterExecutionAdapter:
             # usually because the remainder filled between the caller's last fill
             # check and this cancel. Resolve the race by returning the terminal
             # order state so callers can pick up the final executedQty.
-            status = await self._get_order_status(symbol=symbol, order_id=order_id)
+            status = await wait_for_terminal_order(
+                lambda: self._get_order_status(symbol=symbol, order_id=order_id),
+            )
             return {"ok": True, "already_gone": True, "raw": status}
+        data = await wait_for_terminal_order(
+            lambda: self._get_order_status(symbol=symbol, order_id=order_id), initial=data,
+        )
         return {"ok": True, "raw": data}
+
+    async def get_order_execution(self, *, order_result: dict, symbol: str) -> dict:
+        order_id = order_result.get("order_id") or order_result.get("orderId")
+        if order_id is None:
+            raise RuntimeError("aster order query requires order_id")
+        return await self._get_order_status(symbol=symbol, order_id=order_id)
 
     async def ensure_isolated_margin(self, symbol: str) -> None:
         raw_symbol = await self._resolve_raw_symbol(symbol)
@@ -417,7 +429,8 @@ class AsterExecutionAdapter:
         return {"ok": True, "raw": data}
 
     async def place_limit_order(
-        self, *, symbol: str, side: str, amount: str, clip_usd: float, price: str
+        self, *, symbol: str, side: str, amount: str, clip_usd: float, price: str,
+        reduce_only: bool = False,
     ) -> dict:
         raw_symbol = await self._resolve_raw_symbol(symbol)
         quantity = await self._format_quantity(symbol, amount, market=False)
@@ -430,11 +443,13 @@ class AsterExecutionAdapter:
             "timeInForce": "GTC",
             "quantity": quantity,
             "price": price,
+            **({"reduceOnly": "true"} if reduce_only else {}),
         })
         return {"ok": True, "order_id": data.get("orderId"), "raw": data}
 
     async def place_market_order(
-        self, *, symbol: str, side: str, amount: str, clip_usd: float
+        self, *, symbol: str, side: str, amount: str, clip_usd: float,
+        reduce_only: bool = False,
     ) -> dict:
         raw_symbol = await self._resolve_raw_symbol(symbol)
         quantity = await self._format_quantity(symbol, amount, market=True)
@@ -445,6 +460,7 @@ class AsterExecutionAdapter:
             "side": side.upper(),
             "type": "MARKET",
             "quantity": quantity,
+            **({"reduceOnly": "true"} if reduce_only else {}),
         })
         return {"ok": True, "order_id": data.get("orderId"), "raw": data}
 

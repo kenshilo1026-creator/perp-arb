@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 from decimal import Decimal
+from typing import Awaitable, Callable
 
 class HedgeFailure(RuntimeError):
     def __init__(self, message: str, *, confirmed: Decimal, uncertain: bool, attempts: list):
@@ -80,6 +81,29 @@ async def confirm_pair_execution(
     raise RuntimeError(f"FAIL-CLOSED hedge live position confirmation failed: {last}")
 
 
+async def wait_for_terminal_order(
+    fetch_status: Callable[[], Awaitable[dict]], *, initial: dict | None = None,
+    attempts: int = 20, poll_delay: float = 0.5,
+) -> dict:
+    """A cancel acknowledgement is insufficient: obtain the final cumulative fill."""
+    result = initial
+    last_error = None
+    for attempt in range(max(1, attempts)):
+        if terminal_fill_quantity(result) is not None:
+            return result
+        try:
+            result = await fetch_status()
+        except Exception as exc:
+            last_error = str(exc)
+            result = None
+        if terminal_fill_quantity(result) is not None:
+            return result
+        if attempt + 1 < attempts:
+            await asyncio.sleep(poll_delay)
+    raise RuntimeError(f"order terminal state/fill unresolved; refusing replacement; "
+                       f"last_status={result} last_error={last_error}")
+
+
 async def execute_confirmed_market_order(
     adapter, *, symbol: str, side: str, quantity: Decimal, clip_usd: float,
     baseline: Decimal, reduce_only: bool = False, max_attempts: int = 3,
@@ -112,19 +136,19 @@ async def execute_confirmed_market_order(
         record = {"amount": str(remaining), "result": result, "error": error}
         attempts.append(record)
         terminal_quantity = terminal_fill_quantity(result)
-        if terminal_quantity is not None:
-            if terminal_quantity > remaining:
-                raise HedgeFailure("hedge overfilled requested remainder", confirmed=confirmed,
-                                   uncertain=True, attempts=attempts)
-            confirmed += terminal_quantity
-            if confirmed == quantity:
-                return {"ok": True, "terminal": True, "filled_quantity": str(confirmed),
-                        "attempts": attempts, "raw": result}
-            print(f"[hedge-reconcile] terminal fill={terminal_quantity} remaining={quantity - confirmed}", flush=True)
-        else:
-            # Missing/negative acknowledgements and transport errors are all
-            # potentially submitted. Reconcile, but do not blindly resubmit.
+        if terminal_quantity is None:
+            query = getattr(adapter, "get_order_execution", None)
+            # Keep the submitted identity: status responses need not contain it.
             for check in range(max(1, confirmation_attempts)):
+                if callable(query) and isinstance(result, dict):
+                    try:
+                        status = await query(order_result=result, symbol=symbol)
+                        record["order_status"] = status
+                        terminal_quantity = terminal_fill_quantity(status)
+                        if terminal_quantity is not None:
+                            break
+                    except Exception as exc:
+                        record["status_error"] = str(exc)
                 try:
                     delta = (await position_quantity(adapter, symbol) - baseline) * direction
                     record["live_filled_quantity"] = str(delta)
@@ -138,6 +162,16 @@ async def execute_confirmed_market_order(
                     record["position_error"] = str(exc)
                 if check + 1 < confirmation_attempts:
                     await asyncio.sleep(poll_delay)
+        if terminal_quantity is not None:
+            if terminal_quantity > remaining:
+                raise HedgeFailure("hedge overfilled requested remainder", confirmed=confirmed,
+                                   uncertain=True, attempts=attempts)
+            confirmed += terminal_quantity
+            if confirmed == quantity:
+                return {"ok": True, "terminal": True, "filled_quantity": str(confirmed),
+                        "attempts": attempts, "raw": result}
+            print(f"[hedge-reconcile] terminal fill={terminal_quantity} remaining={quantity - confirmed}", flush=True)
+        else:
             raise HedgeFailure(
                 f"hedge outcome unknown for {symbol}; confirmed={confirmed} target={quantity}; "
                 f"observed_position_fill={record.get('live_filled_quantity', 'unavailable')}; "

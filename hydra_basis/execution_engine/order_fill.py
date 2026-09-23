@@ -18,7 +18,6 @@ _FILLED_QUANTITY_KEYS = {
     "filled_quantity",
     "filledbaseamount",
     "filled_base_amount",
-    "remainingbaseamount",
     "cumfilledqty",
     "cum_filled_qty",
     "dealvol",

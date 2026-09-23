@@ -10,6 +10,7 @@ import aiohttp
 
 from hydra_basis.adapters.base import fetch_json
 from hydra_basis.execution_engine.order_fill import poll_until_filled
+from hydra_basis.execution_engine.hedge_safety import terminal_fill_quantity, wait_for_terminal_order
 
 
 LIGHTER_BASE_URL = "https://mainnet.zklighter.elliot.ai"
@@ -326,54 +327,53 @@ class LighterExecutionAdapter:
             )
 
     async def _get_order_status(
-        self,
-        client_order_index: object,
-        market_index: int,
-        original_base_amount: int | None = None,
-        base_amount_multiplier: int | None = None,
+        self, client_order_index: object, market_index: int,
+        original_base_amount: int | None = None, base_amount_multiplier: int | None = None,
     ) -> dict[str, object]:
-        account_index = int(os.getenv("LIGHTER_ACCOUNT_INDEX", "0"))
         try:
-            auth_token = self._create_auth_token()
             async with aiohttp.ClientSession() as session:
                 data = await fetch_json(
-                    session,
-                    "GET",
-                    f"{LIGHTER_BASE_URL}/api/v1/accountActiveOrders",
-                    params={"account_index": account_index, "auth": auth_token},
-                    headers={"accept": "application/json"},
+                    session, "GET", f"{LIGHTER_BASE_URL}/api/v1/accountOrders",
+                    params={"account_index": int(os.getenv("LIGHTER_ACCOUNT_INDEX", "0")),
+                            "client_order_indexes": str(client_order_index)},
+                    headers={"accept": "application/json", "Authorization": self._create_auth_token()},
                 )
-            orders = data.get("orders") or []
-            for order in orders:
-                coi = order.get("client_order_index") or order.get("client_order_id")
-                if coi is not None and int(coi) == int(client_order_index):
-                    result: dict[str, object] = {"status": "OPEN", "raw": order}
-                    # Try to expose filled_qty so extract_filled_quantity can find it.
-                    # Lighter may include filled_base_amount directly, or we compute
-                    # filled = original - remaining (base_amount in active orders = remaining).
-                    if original_base_amount is not None and base_amount_multiplier:
-                        try:
-                            for field in ("filled_base_amount", "filledBaseAmount"):
-                                raw_filled = order.get(field)
-                                if raw_filled is not None:
-                                    filled_qty = Decimal(str(raw_filled)) / Decimal(str(base_amount_multiplier))
-                                    result["filled_qty"] = str(filled_qty.normalize())
-                                    break
-                            else:
-                                # Assume base_amount in active orders = remaining
-                                remaining_raw = order.get("base_amount")
-                                if remaining_raw is not None:
-                                    filled_raw = int(original_base_amount) - int(remaining_raw)
-                                    if filled_raw > 0:
-                                        filled_qty = Decimal(str(filled_raw)) / Decimal(str(base_amount_multiplier))
-                                        result["filled_qty"] = str(filled_qty.normalize())
-                        except Exception:
-                            pass
-                    return result
-            return {"status": "FILLED", "raw": data}
+            for order in data.get("orders") or []:
+                coi = order.get("client_order_index", order.get("client_order_id"))
+                if (coi is None or int(coi) != int(client_order_index)
+                        or _lighter_position_market_id(order) != market_index):
+                    continue
+                status = str(order.get("status", "UNKNOWN")).upper()
+                if status.startswith(("CANCELED", "CANCELLED")):
+                    status = "CANCELED"
+                raw_filled = order.get("filled_base_amount", order.get("filledBaseAmount"))
+                if raw_filled is None and order.get("remaining_base_amount") is not None:
+                    initial = order.get("initial_base_amount")
+                    if initial is None and original_base_amount is not None and base_amount_multiplier:
+                        initial = Decimal(str(original_base_amount)) / Decimal(str(base_amount_multiplier))
+                    if initial is not None:
+                        raw_filled = Decimal(str(initial)) - Decimal(str(order["remaining_base_amount"]))
+                if raw_filled is None:
+                    return {"status": "UNKNOWN", "terminal": False}
+                # REST amounts are token units; only submission integers are scaled.
+                filled = Decimal(str(raw_filled))
+                if not filled.is_finite() or filled < 0:
+                    raise RuntimeError("invalid lighter cumulative fill")
+                return {"status": status, "filled_quantity": str(filled),
+                        "terminal": status in {"FILLED", "CANCELED", "REJECTED", "EXPIRED"},
+                        "raw": order}
+            # Missing orders / indexing delays are never evidence of a fill.
+            return {"status": "UNKNOWN", "terminal": False}
         except Exception as exc:
-            print(f"[lighter] order status poll failed: {exc} — assuming OPEN", flush=True)
-            return {"status": "OPEN"}
+            print(f"[lighter] order status unresolved: {exc}", flush=True)
+            return {"status": "UNKNOWN", "terminal": False}
+
+    async def get_order_execution(self, *, order_result: dict, symbol: str) -> dict:
+        return await self._get_order_status(
+            order_result["client_order_index"], int(order_result["market_index"]),
+            original_base_amount=order_result.get("base_amount"),
+            base_amount_multiplier=order_result.get("base_amount_multiplier"),
+        )
 
     async def get_open_position(self, *, symbol: str, market_type: str) -> dict[str, object] | None:
         if market_type != "perp":
@@ -461,6 +461,28 @@ class LighterExecutionAdapter:
 
         raise RuntimeError("lighter account snapshot returned no accounts")
 
+    async def _send_order(self, request: dict, market_config: dict, *, reduce_only: bool, immediate: bool) -> dict:
+        client = self._get_client()
+        identity = {"client_order_index": request["client_order_index"],
+                    "market_index": request["market_index"], "base_amount": request["base_amount"],
+                    "base_amount_multiplier": market_config["base_amount_multiplier"]}
+        options = {"time_in_force": client.ORDER_TIME_IN_FORCE_GOOD_TILL_TIME}
+        if immediate:
+            options = {"time_in_force": client.ORDER_TIME_IN_FORCE_IMMEDIATE_OR_CANCEL,
+                       "order_expiry": client.DEFAULT_IOC_EXPIRY}
+        try:
+            _tx, tx_hash, error = await client.create_order(
+                **request, order_type=client.ORDER_TYPE_LIMIT, reduce_only=reduce_only,
+                trigger_price=0, **options,
+            )
+            if error is not None:
+                raise RuntimeError(f"lighter create_order failed: {error}")
+        except Exception as exc:
+            # Preserve the identity even if the response is lost. Query before retrying.
+            exc.order_result = {"ok": False, **identity}
+            raise
+        return {"ok": True, "tx_hash": tx_hash, **identity}
+
     async def _submit_market_order(
         self,
         *,
@@ -483,26 +505,7 @@ class LighterExecutionAdapter:
             min_base_amount=market_config.get("min_base_amount"),
             min_quote_amount=market_config.get("min_quote_amount"),
         )
-        client = self._get_client()
-        _tx, tx_hash, error = await client.create_order(
-            market_index=request["market_index"],
-            client_order_index=request["client_order_index"],
-            base_amount=request["base_amount"],
-            price=request["price"],
-            is_ask=request["is_ask"],
-            order_type=client.ORDER_TYPE_LIMIT,
-            time_in_force=client.ORDER_TIME_IN_FORCE_GOOD_TILL_TIME,
-            reduce_only=reduce_only,
-            trigger_price=0,
-        )
-        if error is not None:
-            raise RuntimeError(f"lighter create_order failed: {error}")
-        return {
-            "ok": True,
-            "tx_hash": tx_hash,
-            "client_order_index": request["client_order_index"],
-            "market_index": request["market_index"],
-        }
+        return await self._send_order(request, market_config, reduce_only=reduce_only, immediate=True)
 
     async def _submit_limit_order(
         self,
@@ -526,46 +529,25 @@ class LighterExecutionAdapter:
             min_base_amount=market_config.get("min_base_amount"),
             min_quote_amount=market_config.get("min_quote_amount"),
         )
-        client = self._get_client()
-        _tx, tx_hash, error = await client.create_order(
-            market_index=request["market_index"],
-            client_order_index=request["client_order_index"],
-            base_amount=request["base_amount"],
-            price=request["price"],
-            is_ask=request["is_ask"],
-            order_type=client.ORDER_TYPE_LIMIT,
-            time_in_force=client.ORDER_TIME_IN_FORCE_GOOD_TILL_TIME,
-            reduce_only=reduce_only,
-            trigger_price=0,
-        )
-        if error is not None:
-            raise RuntimeError(f"lighter create_order failed: {error}")
-        return {
-            "ok": True,
-            "tx_hash": tx_hash,
-            "client_order_index": request["client_order_index"],
-            "market_index": request["market_index"],
-            "base_amount": request["base_amount"],
-            "base_amount_multiplier": market_config["base_amount_multiplier"],
-        }
+        return await self._send_order(request, market_config, reduce_only=reduce_only, immediate=False)
 
-    async def place_market_order(self, *, symbol: str, side: str, amount: str, clip_usd: float) -> dict[str, object]:
+    async def place_market_order(self, *, symbol: str, side: str, amount: str, clip_usd: float, reduce_only: bool = False) -> dict[str, object]:
         return await self._submit_market_order(
             symbol=symbol,
             side=side,
             amount=amount,
-            reduce_only=False,
+            reduce_only=reduce_only,
         )
 
     async def place_limit_order(
-        self, *, symbol: str, side: str, amount: str, clip_usd: float, price: str
+        self, *, symbol: str, side: str, amount: str, clip_usd: float, price: str, reduce_only: bool = False
     ) -> dict[str, object]:
         return await self._submit_limit_order(
             symbol=symbol,
             side=side,
             amount=amount,
             price=price,
-            reduce_only=False,
+            reduce_only=reduce_only,
         )
 
     async def wait_for_order_fill(
@@ -617,37 +599,20 @@ class LighterExecutionAdapter:
         if client_order_index is None or market_index is None:
             raise RuntimeError("lighter cancel_order requires client_order_index and market_index in order_result")
 
-        # Snapshot fill before cancelling so resolve_executed_quantity gets the real partial fill
-        original_base_amount = order_result.get("base_amount")
-        base_amount_multiplier = order_result.get("base_amount_multiplier")
-        pre_cancel_status = None
-        try:
-            pre_cancel_status = await self._get_order_status(
-                client_order_index,
-                int(market_index),
-                original_base_amount=original_base_amount,
-                base_amount_multiplier=base_amount_multiplier,
-            )
-        except Exception as exc:
-            print(f"[lighter] pre-cancel status query failed: {exc}", flush=True)
-
+        pre_cancel_status = await self.get_order_execution(order_result=order_result, symbol=symbol)
+        if terminal_fill_quantity(pre_cancel_status) is not None:
+            return {"ok": True, "already_gone": True, "raw": pre_cancel_status}
         client = self._get_client()
-        cancel = getattr(client, "cancel_order", None)
-        if not callable(cancel):
-            raise RuntimeError("lighter client has no cancel_order method")
-        result = cancel(market_index=int(market_index), order_index=int(client_order_index))
+        # The signer accepts the client order index for cancellation.
+        result = client.cancel_order(market_index=int(market_index), order_index=int(client_order_index))
         if inspect.isawaitable(result):
             result = await result
         _tx, tx_hash, error = result
-        if error is not None:
-            raise RuntimeError(f"lighter cancel_order failed: {error}")
-
-        cancel_result: dict[str, object] = {"ok": True, "tx_hash": tx_hash}
-        if pre_cancel_status is not None:
-            filled_qty = pre_cancel_status.get("filled_qty")
-            if filled_qty is not None:
-                cancel_result["filled_qty"] = filled_qty
-        return cancel_result
+        # An accepted cancel is not final. Include fills racing the cancellation.
+        final = await wait_for_terminal_order(
+            lambda: self.get_order_execution(order_result=order_result, symbol=symbol),
+        )
+        return {"ok": True, "tx_hash": tx_hash, "cancel_error": error, "raw": final}
 
     async def close_position(
         self,

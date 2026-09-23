@@ -184,7 +184,8 @@ class MexcExecutionAdapter:
         return positions
 
     async def place_limit_order(
-        self, *, symbol: str, side: str, amount: str, clip_usd: float, price: str
+        self, *, symbol: str, side: str, amount: str, clip_usd: float, price: str,
+        reduce_only: bool = False,
     ) -> dict:
         contract_sym = mexc_contract_symbol(symbol)
         data = await self._post_order({
@@ -192,7 +193,7 @@ class MexcExecutionAdapter:
             "price": float(price),
             "vol": float(amount),
             "leverage": self.leverage,
-            "side": self._side(side),
+            "side": mexc_close_side(side) if reduce_only else self._side(side),
             "type": _TYPE_LIMIT,
             "openType": self.open_type,
             "positionId": 0,
@@ -246,7 +247,8 @@ class MexcExecutionAdapter:
         return {"ok": True, "order_id": normalized_order_id, "raw": data}
 
     async def place_market_order(
-        self, *, symbol: str, side: str, amount: str, clip_usd: float
+        self, *, symbol: str, side: str, amount: str, clip_usd: float,
+        reduce_only: bool = False,
     ) -> dict:
         contract_sym = mexc_contract_symbol(symbol)
         data = await self._post_order({
@@ -254,7 +256,7 @@ class MexcExecutionAdapter:
             "price": 0,
             "vol": float(amount),
             "leverage": self.leverage,
-            "side": self._side(side),
+            "side": mexc_close_side(side) if reduce_only else self._side(side),
             "type": _TYPE_MARKET,
             "openType": self.open_type,
             "positionId": 0,

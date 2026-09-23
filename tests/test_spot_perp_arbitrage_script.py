@@ -732,7 +732,7 @@ class SpotPerpArbitrageRecordingTests(unittest.IsolatedAsyncioTestCase):
 
             async def cancel_order(self, **kwargs):
                 events.append(f"{self.venue}:cancel")
-                return {"ok": True}
+                return {"ok": True, "raw": {"status": "CANCELED", "executedQty": "0"}}
 
             async def place_market_order(self, **kwargs):
                 events.append(f"{self.venue}:place_market")

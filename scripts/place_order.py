@@ -500,9 +500,9 @@ async def execute_close_position_plan(
         ),
         maker_price_refresher=close_price_refresher,
         taker_pre_hook=taker_pre_hook,
-        maker_reduce_only=plan.maker_venue == "variational",
-        taker_reduce_only=plan.taker_venue == "variational",
-        verify_hedge_fill="variational" in {plan.maker_venue, plan.taker_venue},
+        maker_reduce_only=True,
+        taker_reduce_only=True,
+        verify_hedge_fill=True,
     )
 
 

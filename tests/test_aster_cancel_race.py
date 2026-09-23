@@ -32,7 +32,7 @@ class AsterCancelOrderTests(unittest.IsolatedAsyncioTestCase):
                 self.delete_calls += 1
                 if delete_error is not None:
                     raise RuntimeError(delete_error)
-                return {"orderId": params["orderId"], "status": "CANCELED"}
+                return {"orderId": params["orderId"], "status": "CANCELED", "executedQty": "0"}
 
             async def _get_order_status(self, *, symbol: str, order_id: object) -> dict:
                 self.status_calls += 1

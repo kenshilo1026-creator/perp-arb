@@ -278,7 +278,8 @@ class HyperliquidExecutionAdapter:
         }
 
     async def place_limit_order(
-        self, *, symbol: str, side: str, amount: str, clip_usd: float, price: str
+        self, *, symbol: str, side: str, amount: str, clip_usd: float, price: str,
+        reduce_only: bool = False,
     ) -> dict:
         asset_index = await self.ensure_isolated_margin(symbol)
         is_buy = side.strip().upper() == "BUY"
@@ -288,6 +289,7 @@ class HyperliquidExecutionAdapter:
             price=float(price),
             size=float(amount),
             tif="Gtc",
+            reduce_only=reduce_only,
         )
         data = await self._post_order(action)
         order_id = extract_hyperliquid_order_id(data, fill_type="resting")
@@ -340,7 +342,8 @@ class HyperliquidExecutionAdapter:
         return {"ok": True, "order_id": order_id, "raw": data}
 
     async def place_market_order(
-        self, *, symbol: str, side: str, amount: str, clip_usd: float
+        self, *, symbol: str, side: str, amount: str, clip_usd: float,
+        reduce_only: bool = False,
     ) -> dict:
         asset_index = await self.ensure_isolated_margin(symbol)
         is_buy = side.strip().upper() == "BUY"
@@ -354,6 +357,7 @@ class HyperliquidExecutionAdapter:
             price=price,
             size=size,
             tif="Ioc",
+            reduce_only=reduce_only,
         )
         data = await self._post_order(action)
         statuses = data.get("response", {}).get("data", {}).get("statuses", [])

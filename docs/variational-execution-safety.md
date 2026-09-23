@@ -1,7 +1,9 @@
 # Variational paired execution
 
 `scripts/place_order.py` enables verified execution for open and close pairs
-containing Variational. The web maker/taker flow uses the same open-clip function.
+containing Variational. All perpetual close pairs now use verified execution;
+see [Aster / Lighter close execution](aster-lighter-close-safety.md). The web
+maker/taker flow uses the same open-clip function.
 
 - Before maker submission, the executor checks both live positions and prepares
   the taker's margin/leverage where supported. Existing imbalance blocks a new batch.

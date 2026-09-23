@@ -7,7 +7,8 @@ from typing import Awaitable, Callable
 
 from hydra_basis.execution_engine.order_fill import extract_filled_quantity
 from hydra_basis.execution_engine.hedge_safety import (
-    confirm_pair_execution, execute_confirmed_market_order, position_quantity,
+    confirm_pair_execution, execute_confirmed_market_order, position_quantity, terminal_fill_quantity,
+    wait_for_terminal_order,
 )
 
 
@@ -647,6 +648,13 @@ async def execute_single_clip_with_sides(
         ):
             raise RuntimeError("FAIL-CLOSED existing position imbalance before maker dispatch: "
                                f"{maker_venue}={maker_position_baseline} {taker_venue}={taker_position_baseline}")
+        for baseline, side, reduce_only in (
+            (maker_position_baseline, maker_side, maker_reduce_only),
+            (taker_position_baseline, taker_side, taker_reduce_only),
+        ):
+            if reduce_only and (abs(baseline) < Decimal(str(quantity))
+                                or baseline * (1 if side.upper() == "BUY" else -1) >= 0):
+                raise RuntimeError("FAIL-CLOSED close quantity/direction exceeds live position")
 
     maker_fill_result: dict[str, object] | None = None
     maker_result: dict[str, object] | None = None
@@ -655,6 +663,7 @@ async def execute_single_clip_with_sides(
     maker_attempt = 0
     reuse_existing_maker_result = False
     active_maker_orders: list[dict[str, object]] = []
+    deferred_interrupt: BaseException | None = None
 
     def register_active_maker(order_result: dict[str, object]) -> None:
         if not any(item is order_result for item in active_maker_orders):
@@ -668,18 +677,21 @@ async def execute_single_clip_with_sides(
         ]
 
     async def cleanup_active_makers() -> list[str]:
+        nonlocal maker_cancel_result
         errors: list[str] = []
         for active_order in reversed(active_maker_orders.copy()):
             try:
                 # Shield the cancel so a Ctrl+C / task-cancellation cannot
                 # interrupt the cleanup itself mid-flight.
-                await asyncio.shield(cancel_maker_order_with_retries(
+                cancelled = await asyncio.shield(cancel_maker_order_with_retries(
                     maker_adapter,
                     maker_result=active_order,
                     symbol=symbol,
                     side=maker_side,
                     amount=str(quantity),
                 ))
+                if active_order is maker_result:
+                    maker_cancel_result = cancelled
                 mark_maker_closed(active_order)
                 print(
                     "[maker-cleanup] cancelled active maker before exit "
@@ -711,6 +723,8 @@ async def execute_single_clip_with_sides(
                 attempt_record["reused_existing_order"] = True
             else:
                 maker_result = None
+                maker_cancel_result = None
+                maker_fill_result = None
                 maker_result = await maker_adapter.place_limit_order(**maker_kwargs)
                 attempt_record["maker_result"] = maker_result
                 # If the order was placed without an explicit price (e.g. variational Mid click),
@@ -774,6 +788,7 @@ async def execute_single_clip_with_sides(
                 order_id = (
                     exception_order_result.get("order_id")
                     or exception_order_result.get("orderId")
+                    or exception_order_result.get("client_order_index")
                 )
                 # Variational frequently has no usable order id. It can still
                 # cancel safely by symbol + side + amount, so every dispatched
@@ -784,6 +799,16 @@ async def execute_single_clip_with_sides(
             maker_attempts.append(attempt_record)
             print(f"[maker-failure] venue={maker_venue} symbol={symbol} side={maker_side} error={exc}", flush=True)
             if isinstance(exc, (asyncio.CancelledError, KeyboardInterrupt, SystemExit)):
+                if verify_hedge_fill and maker_venue in {"aster", "lighter"}:
+                    cleanup_errors = await cleanup_active_makers()
+                    final_fill = terminal_fill_quantity(maker_cancel_result)
+                    if not cleanup_errors and final_fill is not None and final_fill > 0:
+                        # Finish only the counterpart of an already executed
+                        # maker, then honor the interrupt without a new batch.
+                        deferred_interrupt = exc
+                        maker_fill_result = {"ok": True, "filled_quantity": str(final_fill)}
+                        print(f"[maker-cleanup] completing hedge for confirmed fill={final_fill} before exit", flush=True)
+                        break
                 await raise_after_maker_cleanup(exc)
             if (
                 maker_venue.strip().lower() == "variational"
@@ -809,6 +834,12 @@ async def execute_single_clip_with_sides(
                     break
             exhausted = max_maker_reprice_attempts >= 0 and maker_attempt >= max_maker_reprice_attempts
             if exhausted or not maker_fill_error_is_repriceable(exc):
+                if verify_hedge_fill and maker_venue in {"aster", "lighter"} and isinstance(maker_result, dict):
+                    cleanup_errors = await cleanup_active_makers()
+                    final_fill = terminal_fill_quantity(maker_cancel_result)
+                    if not cleanup_errors and final_fill is not None and final_fill > 0:
+                        maker_fill_result = {"ok": True, "filled_quantity": str(final_fill)}
+                        break
                 if verify_hedge_fill and maker_venue == "variational" and isinstance(maker_result, dict):
                     cleanup_errors = await cleanup_active_makers()
                     if not cleanup_errors:
@@ -958,7 +989,16 @@ async def execute_single_clip_with_sides(
                 cancel_raw.get("status", "") if isinstance(cancel_raw, dict) else ""
             ).lower()
             baseline_available = extract_baseline_position(placed_result) is not None
-            if maker_venue.strip().lower() == "variational" and baseline_available:
+            if maker_venue in {"aster", "lighter"}:
+                final_fill = terminal_fill_quantity(cancel_result)
+                if final_fill is None:
+                    await raise_after_maker_cleanup(RuntimeError(
+                        "maker cancellation has no terminal fill quantity; refusing replacement"
+                    ))
+                if final_fill > 0:
+                    maker_fill_result = {"ok": True, "filled_quantity": str(final_fill)}
+                    break
+            elif maker_venue.strip().lower() == "variational" and baseline_available:
                 reconciliation = await reconcile_disappeared_variational_order(
                     maker_adapter,
                     order_result=placed_result,
@@ -1011,7 +1051,8 @@ async def execute_single_clip_with_sides(
         )
 
     min_hedge_notional = Decimal(str(min_hedge_notional_usd))
-    while executed_quantity < requested_quantity and min_hedge_notional > 0:
+    while (executed_quantity < requested_quantity and min_hedge_notional > 0
+           and maker_cancel_result is None):
         current_notional = filled_notional_usd(
             clip_usd=clip_usd,
             requested_quantity=requested_quantity,
@@ -1094,21 +1135,44 @@ async def execute_single_clip_with_sides(
                 mark_maker_closed(maker_result)
             except BaseException as exc:
                 await raise_after_maker_cleanup(exc)
-        final_reconciliation = await reconcile_disappeared_variational_order(
-            maker_adapter,
-            order_result={"details": {"baselinePositionQty": str(maker_position_baseline),
-                                      "baselinePortfolioVersion": 0}},
-            symbol=symbol, side=maker_side, requested_quantity=requested_quantity,
-            attempts=10, settle=True,
-        )
+        if maker_venue in {"aster", "lighter"}:
+            final_fill = None
+            for response in (maker_cancel_result, maker_fill_result, maker_result):
+                final_fill = terminal_fill_quantity(response)
+                if final_fill is not None:
+                    break
+            if final_fill is None:
+                query = getattr(maker_adapter, "get_order_execution", None)
+                if not callable(query):
+                    raise RuntimeError("FAIL-CLOSED maker final order query unavailable")
+                final_status = await wait_for_terminal_order(
+                    lambda: query(order_result=maker_result, symbol=symbol),
+                )
+                final_fill = terminal_fill_quantity(final_status)
+            if final_fill is None or not 0 < final_fill <= requested_quantity:
+                raise RuntimeError(f"FAIL-CLOSED invalid final maker fill: {final_fill}")
+            # Use the order's terminal total, never a lagging partial position
+            # snapshot. Verify both live positions after completing the hedge.
+            final_reconciliation = {"status": "filled", "fill_result": {
+                "ok": True, "filled_quantity": str(final_fill), "source": "terminal_order",
+            }}
+        else:
+            final_reconciliation = await reconcile_disappeared_variational_order(
+                maker_adapter,
+                order_result={"details": {"baselinePositionQty": str(maker_position_baseline),
+                                          "baselinePortfolioVersion": 0}},
+                symbol=symbol, side=maker_side, requested_quantity=requested_quantity,
+                attempts=10, settle=True,
+            )
         if final_reconciliation.get("status") != "filled":
             raise RuntimeError(f"FAIL-CLOSED {maker_venue} final maker fill unresolved: "
                                f"{final_reconciliation}")
-        maker_fill_result = final_reconciliation["fill_result"]
+        previous_fill_result = maker_fill_result
+        maker_fill_result = {**final_reconciliation["fill_result"], "raw": previous_fill_result}
         executed_quantity = Decimal(str(maker_fill_result["filled_quantity"]))
         maker_result = {
             "ok": True, "filled": True, "filled_quantity": str(executed_quantity),
-            "source": "live_position_delta", "raw": maker_result,
+            "source": maker_fill_result.get("source", "live_position_delta"), "raw": maker_result,
         }
         partial_fill = executed_quantity < requested_quantity
         print(f"[maker-reconcile] final {maker_venue} quantity={executed_quantity}", flush=True)
@@ -1162,6 +1226,8 @@ async def execute_single_clip_with_sides(
                 "pre_trade": pre_trade_price_summary,
             }
             state_machine.to_completed()
+            if deferred_interrupt is not None:
+                raise deferred_interrupt
             return {
                 "ok": True,
                 "hedge_verified": verify_hedge_fill,

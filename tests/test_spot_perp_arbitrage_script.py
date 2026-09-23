@@ -297,6 +297,11 @@ class MissingMakerCancelAdapterTests(unittest.IsolatedAsyncioTestCase):
                 actions.append(action)
                 return {"status": "ok", "response": {"type": "cancel", "data": {"statuses": ["success"]}}}
 
+            async def _get_order_status(self, order_id: object) -> dict:
+                return {"status": "order", "order": {"status": "canceled", "order": {
+                    "oid": order_id, "coin": "BTC", "origSz": "0.01", "sz": "0.01",
+                }}}
+
         result = await Adapter().cancel_order(
             order_result={"order_id": 12345},
             symbol="BTC",
@@ -324,6 +329,9 @@ class MissingMakerCancelAdapterTests(unittest.IsolatedAsyncioTestCase):
                     "code": 0,
                     "data": [{"orderId": order_ids[0], "errorCode": 0, "errorMsg": "success"}],
                 }
+
+            async def _get_order_status(self, order_id: object) -> dict:
+                return {"orderId": order_id, "state": 4, "dealVol": "0", "vol": "1"}
 
         result = await Adapter().cancel_order(
             order_result={"order_id": 98765},

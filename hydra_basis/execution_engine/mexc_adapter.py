@@ -11,6 +11,7 @@ import aiohttp
 
 from hydra_basis.adapters.mexc import mexc_contract_symbol
 from hydra_basis.execution_engine.order_fill import poll_until_filled
+from hydra_basis.execution_engine.hedge_safety import wait_for_terminal_order
 
 
 # MEXC futures order sides
@@ -112,6 +113,29 @@ class MexcExecutionAdapter:
                 if resp.status != 200 or not data.get("success"):
                     raise RuntimeError(f"mexc order status {resp.status}: {data}")
                 return data.get("data", data)
+
+    async def get_order_execution(self, *, order_result: dict, symbol: str) -> dict:
+        order_id = order_result.get("order_id") or order_result.get("orderId")
+        if order_id is None:
+            raise RuntimeError("mexc order query requires order_id")
+        data = await self._get_order_status(order_id)
+        if data.get("orderId") is not None and str(data["orderId"]) != str(order_id):
+            raise RuntimeError("mexc order query identity mismatch")
+        if data.get("symbol") is not None and data["symbol"] != mexc_contract_symbol(symbol):
+            raise RuntimeError("mexc order query symbol mismatch")
+        status = {1: "PENDING", 2: "OPEN", 3: "FILLED", 4: "CANCELED", 5: "REJECTED"}.get(
+            int(data.get("state", 0)), "UNKNOWN",
+        )
+        try:
+            filled = Decimal(str(data["dealVol"]))
+            if not filled.is_finite() or filled < 0:
+                raise ValueError("invalid fill")
+            if data.get("vol") is not None and filled > Decimal(str(data["vol"])):
+                raise ValueError("fill exceeds order size")
+        except (KeyError, ValueError, ArithmeticError) as exc:
+            raise RuntimeError("mexc cumulative fill unavailable") from exc
+        return {"status": status, "terminal": status in {"FILLED", "CANCELED", "REJECTED"},
+                "filled_quantity": str(filled), "order_id": order_id, "raw": data}
 
     async def _get_open_positions(self, symbol: str | None = None) -> list[dict]:
         params = {"symbol": mexc_contract_symbol(symbol)} if symbol else None
@@ -216,7 +240,7 @@ class MexcExecutionAdapter:
         if order_id is None:
             raise RuntimeError("mexc limit order fill wait requires order_id")
         return await poll_until_filled(
-            fetch_status=lambda: self._get_order_status(order_id),
+            fetch_status=lambda: self.get_order_execution(order_result=order_result, symbol=symbol),
             timeout_seconds=timeout_seconds,
             poll_interval_seconds=poll_interval_seconds,
             timeout_message="mexc limit order fill timeout",
@@ -235,16 +259,17 @@ class MexcExecutionAdapter:
         if order_id is None:
             raise RuntimeError("mexc cancel_order requires order_id")
         normalized_order_id = int(order_id)
-        data = await self._post_cancel([normalized_order_id])
-        results = data.get("data", [])
-        if isinstance(results, list) and results:
-            error_code = int(results[0].get("errorCode", 0) or 0)
-            if error_code != 0:
-                raise RuntimeError(
-                    "mexc cancel_order failed: "
-                    f"code={error_code} message={results[0].get('errorMsg')}"
-                )
-        return {"ok": True, "order_id": normalized_order_id, "raw": data}
+        data = None
+        cancel_error = None
+        try:
+            data = await self._post_cancel([normalized_order_id])
+        except Exception as exc:
+            cancel_error = str(exc)
+        final = await wait_for_terminal_order(
+            lambda: self.get_order_execution(order_result=order_result, symbol=symbol),
+        )
+        return {"ok": True, "order_id": normalized_order_id, "raw": final,
+                "cancel_response": data, "cancel_error": cancel_error}
 
     async def place_market_order(
         self, *, symbol: str, side: str, amount: str, clip_usd: float,

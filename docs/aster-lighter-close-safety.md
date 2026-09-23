@@ -42,3 +42,20 @@ API references: [Lighter OrderApi](https://github.com/elliottech/lighter-python/
 
 Offline regression tests: `python -m pytest tests/test_aster_lighter_close_safety.py
 tests/test_hedge_safety.py tests/test_aster_cancel_race.py tests/test_variational_fill_safety.py -q`.
+
+## Hyperliquid / MEXC after the merge
+
+Hyperliquid and MEXC now follow the same terminal-order checks before maker
+replacement, including cleanup after an exhausted wait or interrupt. Hyperliquid
+normalizes its nested order status and computes cumulative fills from original
+size minus remaining size. MEXC normalizes order states 3/4/5 and uses `dealVol`,
+including zero. Missing quantities and nonterminal cancellations cannot authorize
+a replacement or hedge remainder. MEXC hedge acknowledgements are now queried
+until their execution is known, allowing confirmed terminal remainders to be filled.
+
+An actual maker overfill is hedged on the original counterpart and then raises
+an error instead of reporting a successful batch. No maker reversal is submitted.
+
+References: [Hyperliquid order status](https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/info-endpoint#query-order-status-by-oid-or-cloid),
+[MEXC order status](https://mexcdevelop.github.io/apidocs/contract_v1_en/#get-order-by-order-id).
+Regression tests: `tests/test_hyperliquid_mexc_fill_safety.py`.

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import unittest
+import inspect
 
 from hydra_basis.execution_engine.lighter_adapter import LighterExecutionAdapter
+from hydra_basis.execution_engine.lighter_live import import_lighter_signer_client
 
 
 class _FakeSignerClient:
@@ -43,6 +45,21 @@ def _adapter(client: _FakeSignerClient, *, leverage: int = 3) -> LighterExecutio
 
 
 class LighterMarginSetupTests(unittest.IsolatedAsyncioTestCase):
+    def test_installed_sdk_accepts_adapter_parameters(self) -> None:
+        # Import the real SDK through the Windows compatibility wrapper, without
+        # instantiating an account client or contacting the exchange.
+        client = import_lighter_signer_client()
+        inspect.signature(client.update_leverage).bind(
+            None, market_index=215, margin_mode=client.ISOLATED_MARGIN_MODE, leverage=3,
+        )
+        inspect.signature(client.create_order).bind(
+            None, market_index=215, client_order_index=123, base_amount=500,
+            price=20000, is_ask=False, order_type=client.ORDER_TYPE_LIMIT,
+            time_in_force=client.ORDER_TIME_IN_FORCE_IMMEDIATE_OR_CANCEL,
+            order_expiry=client.DEFAULT_IOC_EXPIRY, reduce_only=True, trigger_price=0,
+        )
+        inspect.signature(client.cancel_order).bind(None, market_index=215, order_index=123)
+
     async def test_open_order_sets_isolated_leverage_once_before_orders(self) -> None:
         client = _FakeSignerClient()
         adapter = _adapter(client)

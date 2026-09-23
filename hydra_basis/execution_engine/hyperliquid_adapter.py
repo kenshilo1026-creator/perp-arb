@@ -17,6 +17,7 @@ from eth_hash.auto import keccak
 from hydra_basis.adapters.base import fetch_json
 from hydra_basis.adapters.hyperliquid import fetch_hyperliquid_universe
 from hydra_basis.execution_engine.order_fill import poll_until_filled
+from hydra_basis.execution_engine.hedge_safety import wait_for_terminal_order
 
 
 HYPERLIQUID_EXCHANGE_URL = "https://api.hyperliquid.xyz/exchange"
@@ -172,6 +173,32 @@ class HyperliquidExecutionAdapter:
                 },
             )
 
+    async def get_order_execution(self, *, order_result: dict, symbol: str) -> dict:
+        order_id = order_result.get("order_id") or order_result.get("orderId") or order_result.get("oid")
+        if order_id is None:
+            raise RuntimeError("hyperliquid order query requires order_id")
+        data = await self._get_order_status(order_id)
+        wrapper = data.get("order") if data.get("status") == "order" else None
+        order = wrapper.get("order") if isinstance(wrapper, dict) else None
+        if not isinstance(order, dict):
+            return {"status": "UNKNOWN", "terminal": False}
+        if str(order.get("oid")) != str(order_id) or str(order.get("coin", "")).upper() != symbol.upper():
+            raise RuntimeError("hyperliquid order query identity mismatch")
+        status = str(wrapper.get("status", "")).upper()
+        if status.endswith("CANCELED") or status == "SCHEDULEDCANCEL":
+            status = "CANCELED"
+        elif status.endswith("REJECTED"):
+            status = "REJECTED"
+        try:
+            original = Decimal(str(order["origSz"]))
+            remaining = Decimal(str(order["sz"]))
+            if not original.is_finite() or not remaining.is_finite() or not 0 <= remaining <= original:
+                raise ValueError("invalid sizes")
+        except (KeyError, ValueError, ArithmeticError) as exc:
+            raise RuntimeError("hyperliquid cumulative fill unavailable") from exc
+        return {"status": status, "terminal": status in {"FILLED", "CANCELED", "REJECTED"},
+                "filled_quantity": str(original - remaining), "order_id": order_id, "raw": data}
+
     async def get_open_position(self, *, symbol: str, market_type: str) -> dict | None:
         if market_type != "perp":
             raise RuntimeError("hyperliquid live position query only supports perp")
@@ -293,6 +320,8 @@ class HyperliquidExecutionAdapter:
         )
         data = await self._post_order(action)
         order_id = extract_hyperliquid_order_id(data, fill_type="resting")
+        if order_id is None:
+            order_id = extract_hyperliquid_order_id(data, fill_type="filled")
         return {"ok": True, "order_id": order_id, "raw": data}
 
     async def wait_for_order_fill(
@@ -310,7 +339,7 @@ class HyperliquidExecutionAdapter:
         if order_id is None:
             raise RuntimeError("hyperliquid limit order fill wait requires order_id")
         return await poll_until_filled(
-            fetch_status=lambda: self._get_order_status(order_id),
+            fetch_status=lambda: self.get_order_execution(order_result=order_result, symbol=symbol),
             timeout_seconds=timeout_seconds,
             poll_interval_seconds=poll_interval_seconds,
             timeout_message="hyperliquid limit order fill timeout",
@@ -333,13 +362,19 @@ class HyperliquidExecutionAdapter:
             "type": "cancel",
             "cancels": [{"a": asset_index, "o": int(order_id)}],
         }
-        data = await self._post_order(action)
-        statuses = data.get("response", {}).get("data", {}).get("statuses", [])
-        if statuses:
-            status = statuses[0]
-            if isinstance(status, dict) and status.get("error"):
-                raise RuntimeError(f"hyperliquid cancel_order failed: {status['error']}")
-        return {"ok": True, "order_id": order_id, "raw": data}
+        # An already-filled order can reject cancellation. In either case the
+        # terminal lookup, not the cancel acknowledgement, decides the fill.
+        data = None
+        cancel_error = None
+        try:
+            data = await self._post_order(action)
+        except Exception as exc:
+            cancel_error = str(exc)
+        final = await wait_for_terminal_order(
+            lambda: self.get_order_execution(order_result=order_result, symbol=symbol),
+        )
+        return {"ok": True, "order_id": order_id, "raw": final,
+                "cancel_response": data, "cancel_error": cancel_error}
 
     async def place_market_order(
         self, *, symbol: str, side: str, amount: str, clip_usd: float,

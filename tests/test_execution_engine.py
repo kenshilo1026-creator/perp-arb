@@ -1,4 +1,5 @@
 import unittest
+import asyncio
 import json
 import tempfile
 import os
@@ -37,23 +38,11 @@ from hydra_basis.execution_engine.mexc_spot_adapter import MexcSpotExecutionAdap
 from hydra_basis.risk_management.models import PositionLeg
 from hydra_basis.risk_management.registry import PositionRegistry
 from scripts.run_execution_preview import compute_batch_count
-from scripts.run_execution_once import (
-    MAKER_FILL_TIMEOUT_SECONDS,
-    MAX_MAKER_REPRICE_ATTEMPTS,
-    ClosePositionPlan,
-    build_adapter_for_venue,
-    build_close_position_plan,
-    compute_batch_count as compute_single_clip_batch_count,
-    compute_token_batch_count,
-    discover_live_close_candidates_for_symbol,
-    execute_close_position_plan,
-    format_execution_price_summary_zh,
-    format_execution_result_summary_zh,
-    format_open_positions_zh,
-    load_live_close_candidates,
-    load_live_close_legs,
-    run_close_execution_once,
-    validate_maker_fill_supported,
+from scripts.place_order import (
+    MAKER_FILL_TIMEOUT_SECONDS, MAKER_REPRICE_ATTEMPTS, ClosePositionPlan,
+    build_adapter_for_venue, build_close_position_plan, compute_token_batch_count,
+    execute_close_position_plan, print_execution_prices, scan_open_positions,
+    find_close_pairs, run_close_execution_once,
 )
 
 
@@ -75,57 +64,24 @@ class ExecutionConfigTests(unittest.TestCase):
         self.assertEqual(signal.symbol, "BTC")
         self.assertEqual(request.total_usd, 10000.0)
 
-    def test_format_execution_price_summary_zh_shows_avg_prices_and_gap(self) -> None:
-        text = format_execution_price_summary_zh(
-            {
-                "execution_price_summary": {
-                    "maker_avg_price": "100",
-                    "taker_avg_price": "100.5",
-                    "price_gap_pct": "0.004987531172069825436408977556",
-                    "pre_trade": {
-                        "maker_price": "100",
-                        "taker_price": "100.5",
-                        "price_gap_pct": "0.004987531172069825436408977556",
-                    },
-                }
-            }
-        )
+    def test_print_execution_prices_shows_prices_and_gap(self):
+        with mock.patch("builtins.print") as output:
+            print_execution_prices({"execution_price_summary": {
+                "maker_avg_price": "100", "taker_avg_price": "100.5", "price_gap_pct": "0.005",
+            }}, maker_venue="aster", taker_venue="lighter")
+        text = "\n".join(str(c.args[0]) for c in output.call_args_list)
+        self.assertIn("aster", text)
+        self.assertIn("lighter", text)
+        self.assertIn("100.5", text)
+        self.assertIn("0.50%", text)
 
-        self.assertIn("成交均價", text)
-        self.assertIn("maker=100", text)
-        self.assertIn("taker=100.5", text)
-        self.assertIn("成交價差=0.4988%", text)
-        self.assertIn("下單前價差=0.4988%", text)
-
-    def test_format_execution_result_summary_zh_omits_full_nested_payload(self) -> None:
-        text = format_execution_result_summary_zh(
-            {
-                "ok": True,
-                "maker_result": {
-                    "type": "ORDER_RESULT",
-                    "orderId": "maker-1",
-                    "status": "FILLED",
-                    "details": {"fill": {"raw": {"very": "large"}}},
-                },
-                "hedge_result": {
-                    "ok": True,
-                    "order_id": "taker-1",
-                    "raw": {"status": "FILLED", "avgPrice": "100.5"},
-                },
-                "execution_price_summary": {
-                    "maker_avg_price": "100",
-                    "taker_avg_price": "100.5",
-                    "price_gap_pct": "0.004987531172069825436408977556",
-                },
-            }
-        )
-
-        self.assertIn("執行結果: ok=True", text)
-        self.assertIn("maker_order_id=maker-1", text)
-        self.assertIn("taker_order_id=taker-1", text)
-        self.assertIn("成交均價", text)
-        self.assertNotIn("details", text)
-        self.assertNotIn("very", text)
+    def test_print_execution_prices_omits_raw_order_payload(self):
+        with mock.patch("builtins.print") as output:
+            print_execution_prices({"raw": {"secret_raw_field": "unused"}, "execution_price_summary": {
+                "maker_avg_price": "100", "taker_avg_price": "101",
+            }}, maker_venue="aster", taker_venue="lighter")
+        self.assertEqual(output.call_count, 2)
+        self.assertNotIn("secret_raw_field", str(output.call_args_list))
 
 
 class MexcSpotOrderbookTests(unittest.IsolatedAsyncioTestCase):
@@ -289,21 +245,11 @@ class PriorityTests(unittest.TestCase):
 
 
 class ExecutionClosePlanTests(unittest.TestCase):
-    def test_format_open_positions_zh_lists_open_strategies(self) -> None:
-        registry = PositionRegistry(
-            legs=[
-                PositionLeg("manual-BEAT-1", "beat-short", "aster", "BEAT", "perp", "SHORT", "10"),
-                PositionLeg("manual-BEAT-1", "beat-long", "variational", "BEAT", "perp", "LONG", "10"),
-                PositionLeg("manual-OLD-1", "old", "mexc", "OLD", "perp", "LONG", "1", "closed"),
-            ]
-        )
-
-        lines = format_open_positions_zh(registry)
-
-        self.assertIn("1. strategy_id=manual-BEAT-1", lines)
-        self.assertIn("BEAT", lines)
-        self.assertIn("aster SHORT 10", lines)
-        self.assertNotIn("manual-OLD-1", lines)
+    def test_find_close_pairs_matches_live_short_and_long_legs(self):
+        legs = [PositionLeg("live", "a", "aster", "BEAT", "perp", "SHORT", "10"),
+                PositionLeg("live", "b", "lighter", "BEAT", "perp", "LONG", "8")]
+        self.assertEqual(find_close_pairs(legs), [(legs[0], legs[1])])
+        self.assertEqual(find_close_pairs(legs[:1]), [])
 
     def test_build_close_position_plan_reverses_sides_and_uses_execution_priority_when_spreads_not_both_high(self) -> None:
         registry = PositionRegistry(
@@ -314,8 +260,7 @@ class ExecutionClosePlanTests(unittest.TestCase):
         )
 
         plan = build_close_position_plan(
-            registry=registry,
-            strategy_id="manual-BEAT-1",
+            legs=registry.legs_for_strategy("manual-BEAT-1"),
             clip_size=Decimal("3"),
             priorities={"aster": 2, "lighter": 0},
             orderbooks={
@@ -340,8 +285,7 @@ class ExecutionClosePlanTests(unittest.TestCase):
         )
 
         plan = build_close_position_plan(
-            registry=registry,
-            strategy_id="manual-BEAT-1",
+            legs=registry.legs_for_strategy("manual-BEAT-1"),
             clip_size=Decimal("3"),
             priorities={"aster": 0, "lighter": 2},
             orderbooks={
@@ -355,310 +299,84 @@ class ExecutionClosePlanTests(unittest.TestCase):
 
 
 class ExecutionCloseFlowTests(unittest.IsolatedAsyncioTestCase):
-    def test_run_execution_once_uses_longer_maker_wait_and_reprice_attempts(self) -> None:
-        self.assertEqual(MAKER_FILL_TIMEOUT_SECONDS, 180.0)
-        self.assertEqual(MAX_MAKER_REPRICE_ATTEMPTS, 3)
+    def plan(self, maker="aster", taker="lighter"):
+        return ClosePositionPlan(symbol="BEAT", quantity=Decimal("10"), maker_venue=maker,
+                                 taker_venue=taker, maker_price="1.23", clip_usd=12.3,
+                                 side_by_venue={maker: "SELL", taker: "BUY"}, spread_by_venue={})
 
-    async def test_execute_close_position_plan_passes_maker_reprice_attempts(self) -> None:
-        leg_a = PositionLeg(
-            strategy_id="manual-close",
-            leg_id="leg-a",
-            venue="variational",
-            symbol="BEAT",
-            side="LONG",
-            quantity="10",
-            market_type="perp",
-        )
-        leg_b = PositionLeg(
-            strategy_id="manual-close",
-            leg_id="leg-b",
-            venue="aster",
-            symbol="BEAT",
-            side="SHORT",
-            quantity="10",
-            market_type="perp",
-        )
-        plan = ClosePositionPlan(
-            strategy_id="manual-close",
-            symbol="BEAT",
-            quantity=Decimal("10"),
-            maker_venue="variational",
-            taker_venue="aster",
-            maker_price="1.23",
-            clip_usd=1000.0,
-            side_by_venue={"variational": "SELL", "aster": "BUY"},
-            spread_by_venue={"variational": 0.001, "aster": 0.001},
-            orderbook_by_venue={
-                "variational": {"bid": 1.22, "ask": 1.23, "ts_ms": 1},
-                "aster": {"bid": 1.21, "ask": 1.24, "ts_ms": 1},
-            },
-            legs_by_venue={"variational": leg_a, "aster": leg_b},
-        )
+    def test_place_order_uses_configured_wait_and_unlimited_repricing(self):
+        self.assertEqual(MAKER_FILL_TIMEOUT_SECONDS, 60.0)
+        self.assertEqual(MAKER_REPRICE_ATTEMPTS, -1)
 
-        async def fake_execute_single_clip_with_sides(**kwargs):
-            self.assertEqual(kwargs["maker_fill_timeout_seconds"], 180.0)
-            self.assertEqual(kwargs["max_maker_reprice_attempts"], 3)
-            self.assertEqual(kwargs["maker_orderbook"]["ask"], 1.23)
-            self.assertEqual(kwargs["taker_orderbook"]["ask"], 1.24)
-            self.assertFalse(kwargs["use_maker_orderbook_price"])
-            return {"ok": True}
-
-        registry = mock.Mock(spec=PositionRegistry)
-        with mock.patch(
-            "scripts.run_execution_once.execute_single_clip_with_sides",
-            new=fake_execute_single_clip_with_sides,
-        ):
-            result = await execute_close_position_plan(
-                plan=plan,
-                registry=registry,
-                adapters={"variational": object(), "aster": object()},
-            )
-
+    async def test_execute_close_plan_passes_safety_and_reprice_options(self):
+        plan = self.plan()
+        with mock.patch("scripts.place_order.execute_single_clip_with_sides", new=mock.AsyncMock(return_value={"ok": True})) as execute:
+            result = await execute_close_position_plan(plan=plan, adapters={"aster": object(), "lighter": object()},
+                                                       symbol="BEAT", venues=["aster", "lighter"])
         self.assertTrue(result["ok"])
+        options = execute.call_args.kwargs
+        self.assertEqual(options["maker_fill_timeout_seconds"], MAKER_FILL_TIMEOUT_SECONDS)
+        self.assertEqual(options["max_maker_reprice_attempts"], MAKER_REPRICE_ATTEMPTS)
+        for key in ("require_maker_fill_confirmation", "verify_hedge_fill", "maker_reduce_only", "taker_reduce_only"):
+            self.assertTrue(options[key])
+        self.assertEqual(options["maker_price"], "1.23")
 
-    async def test_discover_live_close_candidates_for_symbol_uses_live_adapters_without_registry(self) -> None:
-        calls: list[tuple[str, str, str]] = []
+    async def test_variational_close_resolves_preview_before_dispatch(self):
+        maker = mock.Mock()
+        maker.get_limit_price_preview = mock.AsyncMock(return_value="1.25")
+        with mock.patch("scripts.place_order.execute_single_clip_with_sides", new=mock.AsyncMock(return_value={"ok": True})) as execute:
+            await execute_close_position_plan(plan=self.plan("variational", "aster"),
+                adapters={"variational": maker, "aster": object()}, symbol="BEAT", venues=["variational", "aster"])
+        maker.get_limit_price_preview.assert_awaited_once_with(symbol="BEAT")
+        self.assertEqual(execute.call_args.kwargs["maker_price"], "1.25")
 
-        class Adapter:
-            def __init__(self, venue: str) -> None:
-                self.venue = venue
+    async def test_scan_uses_live_positions_and_closes_adapters(self):
+        adapters = {}
+        for venue, side, quantity in (("aster", "SHORT", "10"), ("lighter", "LONG", "8")):
+            adapter = mock.Mock()
+            adapter.get_open_position = mock.AsyncMock(return_value={"side": side, "quantity": quantity})
+            adapter.close = mock.AsyncMock()
+            adapters[venue] = adapter
+        with mock.patch("scripts.place_order.build_adapter_for_venue", side_effect=lambda venue, **kw: adapters[venue]), mock.patch.object(PositionRegistry, "load", side_effect=AssertionError("registry must not be read")):
+            legs = await scan_open_positions(symbol="BEAT", venues=list(adapters))
+        self.assertEqual([leg.quantity for leg in legs], ["10", "8"])
+        for adapter in adapters.values():
+            adapter.get_open_position.assert_awaited_once_with(symbol="BEAT", market_type="perp")
+            adapter.close.assert_awaited_once()
 
-            async def get_open_position(self, *, symbol: str, market_type: str):
-                calls.append((self.venue, symbol, market_type))
-                if self.venue == "aster" and market_type == "perp":
-                    return {"symbol": symbol, "market_type": market_type, "side": "SHORT", "quantity": "10"}
-                if self.venue == "mexc_spot" and market_type == "spot":
-                    return {"symbol": symbol, "market_type": market_type, "side": "LONG", "quantity": "10"}
-                return None
+    async def test_scan_skips_unsupported_or_failed_position_queries(self):
+        broken = mock.Mock()
+        broken.get_open_position = mock.AsyncMock(side_effect=RuntimeError("unavailable"))
+        broken.close = mock.AsyncMock()
+        with mock.patch("scripts.place_order.build_adapter_for_venue", side_effect=[object(), broken]):
+            legs = await scan_open_positions(symbol="BEAT", venues=["aster", "lighter"])
+        self.assertEqual(legs, [])
+        broken.close.assert_awaited_once()
 
-        def fake_build_adapter(venue: str, *, leverage: int = 1, broker_url=None):
-            return Adapter(venue)
+    async def test_scan_passes_variational_broker_url(self):
+        with mock.patch("scripts.place_order.build_adapter_for_venue", return_value=object()) as build:
+            await scan_open_positions(symbol="BEAT", venues=["variational"], broker_url="ws://test")
+        build.assert_called_once_with("variational", leverage=1, broker_url="ws://test")
 
-        with mock.patch("scripts.run_execution_once.build_adapter_for_venue", new=fake_build_adapter):
-            candidates, errors = await discover_live_close_candidates_for_symbol(
-                symbol="BEAT",
-                venues=["aster", "mexc_spot"],
-            )
+    async def test_close_mode_scans_without_registry_or_leverage_prompt(self):
+        broker = mock.MagicMock()
+        broker.__aenter__ = mock.AsyncMock(return_value=broker)
+        broker.__aexit__ = mock.AsyncMock(return_value=False)
+        broker.wait_for_extension = mock.AsyncMock()
+        broker.wait_for_portfolio = mock.AsyncMock()
+        broker.ws_url = "ws://test"
+        legs = [PositionLeg("live", "a", "aster", "BEAT", "perp", "SHORT", "10"),
+                PositionLeg("live", "b", "lighter", "BEAT", "perp", "LONG", "10")]
+        books = {v: {"bid": 1, "ask": 1.01} for v in ("aster", "lighter")}
+        with mock.patch("scripts.place_order.VariationalCommandBrokerServer", return_value=broker), \
+             mock.patch("scripts.place_order.scan_open_positions", new=mock.AsyncMock(return_value=legs)), \
+             mock.patch("scripts.place_order.fetch_close_orderbooks", new=mock.AsyncMock(return_value=books)), \
+             mock.patch("scripts.place_order.prompt_decimal", return_value=Decimal("1")), \
+             mock.patch("scripts.place_order.prompt_int", side_effect=AssertionError("unexpected leverage prompt")), \
+             mock.patch.object(PositionRegistry, "load", side_effect=AssertionError("registry must not be read")), \
+             mock.patch("builtins.input", return_value="n"):
+            await run_close_execution_once(cli_ticker="BEAT")
 
-        self.assertFalse(errors)
-        self.assertEqual(len(candidates), 1)
-        self.assertEqual(candidates[0][0].venue, "aster")
-        self.assertEqual(candidates[0][1].venue, "mexc_spot")
-        self.assertIn(("aster", "BEAT", "perp"), calls)
-        self.assertIn(("mexc_spot", "BEAT", "spot"), calls)
-
-    async def test_run_close_execution_once_does_not_load_position_registry(self) -> None:
-        async def fake_run_with_broker(*, symbol: str, broker_url=None) -> None:
-            self.assertEqual(symbol, "BEAT")
-
-        with mock.patch("scripts.run_execution_once.prompt_text", return_value="BEAT"), \
-            mock.patch("scripts.run_execution_once.run_close_execution_once_with_broker", new=fake_run_with_broker), \
-            mock.patch.object(PositionRegistry, "load", side_effect=AssertionError("registry should not be loaded")):
-            await run_close_execution_once()
-
-    async def test_close_mode_does_not_prompt_for_leverage(self) -> None:
-        prompts: list[str] = []
-
-        async def fake_discover(*, symbol: str, broker_url=None, **kwargs):
-            return ([
-                (
-                    PositionLeg("live-BEAT", "a", "aster", "BEAT", "perp", "SHORT", "10"),
-                    PositionLeg("live-BEAT", "b", "lighter", "BEAT", "perp", "LONG", "10"),
-                )
-            ], {})
-
-        async def fake_fetch_orderbooks(*, symbol: str, venues: list[str], clip_usd: float):
-            return {
-                "aster": {"bid": 99.0, "ask": 99.2, "ts_ms": 1},
-                "lighter": {"bid": 100.0, "ask": 100.05, "ts_ms": 1},
-            }
-
-        def fake_prompt_text(label: str) -> str:
-            prompts.append(label)
-            if label == "ticker":
-                return "BEAT"
-            raise AssertionError(f"unexpected prompt_text {label}")
-
-        def fake_prompt_int(label: str) -> int:
-            prompts.append(label)
-            if label == "要平倉的編號":
-                return 1
-            raise AssertionError(f"unexpected prompt_int {label}")
-
-        def fake_prompt_decimal(label: str) -> Decimal:
-            prompts.append(label)
-            if label == "clip_size_token":
-                return Decimal("1")
-            raise AssertionError(f"unexpected prompt_decimal {label}")
-
-        with mock.patch("scripts.run_execution_once.discover_live_close_candidates_for_symbol", new=fake_discover), \
-            mock.patch("scripts.run_execution_once.fetch_close_orderbooks", new=fake_fetch_orderbooks), \
-            mock.patch("scripts.run_execution_once.prompt_text", new=fake_prompt_text), \
-            mock.patch("scripts.run_execution_once.prompt_int", new=fake_prompt_int), \
-            mock.patch("scripts.run_execution_once.prompt_decimal", new=fake_prompt_decimal), \
-            mock.patch("scripts.run_execution_once.LIVE_CLOSE_SCAN_VENUES", ["aster", "lighter"]), \
-            mock.patch("scripts.run_execution_once.input", return_value="n"):
-            await run_close_execution_once()
-
-        self.assertNotIn("leverage_x", prompts)
-
-    async def test_load_live_close_legs_uses_adapter_positions_not_registry_quantities(self) -> None:
-        registry = PositionRegistry(
-            legs=[
-                PositionLeg("manual-BEAT-1", "beat-short", "aster", "BEAT", "perp", "SHORT", "999"),
-                PositionLeg("manual-BEAT-1", "beat-long", "lighter", "BEAT", "perp", "LONG", "999"),
-            ]
-        )
-
-        class Adapter:
-            def __init__(self, side: str, quantity: str) -> None:
-                self.side = side
-                self.quantity = quantity
-
-            async def get_open_position(self, *, symbol: str, market_type: str):
-                return {"symbol": symbol, "market_type": market_type, "side": self.side, "quantity": self.quantity}
-
-        live_legs = await load_live_close_legs(
-            registry=registry,
-            strategy_id="manual-BEAT-1",
-            adapters={
-                "aster": Adapter("SHORT", "10"),
-                "lighter": Adapter("LONG", "8"),
-            },
-        )
-
-        self.assertEqual([leg.quantity for leg in live_legs], ["10", "8"])
-        self.assertEqual([leg.side for leg in live_legs], ["SHORT", "LONG"])
-
-    async def test_load_live_close_legs_rejects_missing_live_position_query(self) -> None:
-        registry = PositionRegistry(
-            legs=[
-                PositionLeg("manual-BEAT-1", "beat-short", "aster", "BEAT", "perp", "SHORT", "10"),
-                PositionLeg("manual-BEAT-1", "beat-long", "variational", "BEAT", "perp", "LONG", "10"),
-            ]
-        )
-
-        class Adapter:
-            pass
-
-        with self.assertRaisesRegex(RuntimeError, "live position query unavailable"):
-            await load_live_close_legs(
-                registry=registry,
-                strategy_id="manual-BEAT-1",
-                adapters={"aster": Adapter(), "variational": Adapter()},
-            )
-
-    async def test_load_live_close_candidates_passes_broker_url_to_variational_adapter(self) -> None:
-        registry = PositionRegistry(
-            legs=[
-                PositionLeg("manual-BEAT-1", "beat-short", "aster", "BEAT", "perp", "SHORT", "10"),
-                PositionLeg("manual-BEAT-1", "beat-long", "variational", "BEAT", "perp", "LONG", "10"),
-            ]
-        )
-        calls: list[tuple[str, object]] = []
-
-        class Adapter:
-            def __init__(self, venue: str) -> None:
-                self.venue = venue
-
-            async def get_open_position(self, *, symbol: str, market_type: str):
-                side = "SHORT" if self.venue == "aster" else "LONG"
-                return {"symbol": symbol, "market_type": market_type, "side": side, "quantity": "10"}
-
-        def fake_build_adapter(venue: str, *, leverage: int = 1, broker_url=None):
-            calls.append((venue, broker_url))
-            return Adapter(venue)
-
-        with mock.patch("scripts.run_execution_once.build_adapter_for_venue", new=fake_build_adapter):
-            live, errors = await load_live_close_candidates(
-                registry=registry,
-                broker_url="ws://127.0.0.1:8768",
-            )
-
-        self.assertFalse(errors)
-        self.assertIn("manual-BEAT-1", live)
-        self.assertIn(("variational", "ws://127.0.0.1:8768"), calls)
-
-    async def test_execute_close_position_plan_marks_legs_closed_after_successful_two_leg_close(self) -> None:
-        registry = PositionRegistry(
-            legs=[
-                PositionLeg("manual-BEAT-1", "beat-short", "aster", "BEAT", "perp", "SHORT", "10"),
-                PositionLeg("manual-BEAT-1", "beat-long", "lighter", "BEAT", "perp", "LONG", "10"),
-            ]
-        )
-        plan = build_close_position_plan(
-            registry=registry,
-            strategy_id="manual-BEAT-1",
-            clip_size=Decimal("10"),
-            priorities={"aster": 2, "lighter": 0},
-            orderbooks={
-                "aster": {"bid": 99.0, "ask": 99.2, "ts_ms": 1},
-                "lighter": {"bid": 100.0, "ask": 100.05, "ts_ms": 1},
-            },
-        )
-        calls: list[tuple[str, str]] = []
-
-        class Adapter:
-            def __init__(self, venue: str) -> None:
-                self.venue = venue
-
-            async def place_limit_order(self, **kwargs):
-                calls.append((self.venue, kwargs["side"]))
-                return {"ok": True, "order_id": f"{self.venue}-maker", "raw": {"status": "FILLED"}}
-
-            async def place_market_order(self, **kwargs):
-                calls.append((self.venue, kwargs["side"]))
-                return {"ok": True, "order_id": f"{self.venue}-taker"}
-
-        result = await execute_close_position_plan(
-            plan=plan,
-            registry=registry,
-            adapters={"aster": Adapter("aster"), "lighter": Adapter("lighter")},
-        )
-
-        self.assertTrue(result["ok"])
-        self.assertEqual(calls, [("aster", "BUY"), ("lighter", "SELL")])
-        self.assertEqual(registry.get_leg("beat-short").status, "closed")
-        self.assertEqual(registry.get_leg("beat-long").status, "closed")
-
-    async def test_execute_close_position_plan_omits_price_for_variational_maker_mid_button(self) -> None:
-        registry = PositionRegistry(
-            legs=[
-                PositionLeg("manual-BEAT-1", "beat-short", "variational", "BEAT", "perp", "SHORT", "10"),
-                PositionLeg("manual-BEAT-1", "beat-long", "aster", "BEAT", "perp", "LONG", "10"),
-            ]
-        )
-        plan = build_close_position_plan(
-            registry=registry,
-            strategy_id="manual-BEAT-1",
-            clip_size=Decimal("10"),
-            priorities={"variational": 2, "aster": 0},
-            orderbooks={
-                "variational": {"bid": 99.0, "ask": 99.2, "ts_ms": 1},
-                "aster": {"bid": 100.0, "ask": 100.05, "ts_ms": 1},
-            },
-        )
-        maker_kwargs: dict = {}
-
-        class Adapter:
-            def __init__(self, venue: str) -> None:
-                self.venue = venue
-
-            async def place_limit_order(self, **kwargs):
-                maker_kwargs.update(kwargs)
-                return {"ok": True, "order_id": "maker", "raw": {"status": "FILLED"}}
-
-            async def place_market_order(self, **kwargs):
-                return {"ok": True, "order_id": "taker"}
-
-        result = await execute_close_position_plan(
-            plan=plan,
-            registry=registry,
-            adapters={"variational": Adapter("variational"), "aster": Adapter("aster")},
-        )
-
-        self.assertTrue(result["ok"])
-        self.assertNotIn("price", maker_kwargs)
 
 
 class ExecutionAdapterTests(unittest.TestCase):
@@ -747,6 +465,14 @@ class StateMachineTests(unittest.TestCase):
 
 class VariationalBrowserAdapterTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
+        original_init = VariationalBrowserExecutionAdapter.__init__
+        def test_init(adapter, **kwargs):
+            kwargs.setdefault("debug_payload_path", None)
+            kwargs.setdefault("cancel_debug_payload_path", None)
+            original_init(adapter, **kwargs)
+        constructor = mock.patch.object(VariationalBrowserExecutionAdapter, "__init__", new=test_init)
+        constructor.start()
+        self.addCleanup(constructor.stop)
         self._messages: list[dict] = []
         self._app = web.Application()
         self._app.router.add_get("/", self._ws_handler)
@@ -886,7 +612,7 @@ class VariationalBrowserAdapterTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertTrue(result["ok"])
-        self.assertEqual(result["orderId"], "var-1")
+        self.assertEqual(result["raw"]["orderId"], "var-1")
         self.assertEqual(self._messages[1]["type"], "CANCEL_ORDER")
 
     async def test_preview_limit_order_price_sends_broker_preview_query(self) -> None:
@@ -923,9 +649,9 @@ class VariationalBrowserAdapterTests(unittest.IsolatedAsyncioTestCase):
         self._url = f"http://127.0.0.1:{self._port}/"
 
         adapter = VariationalBrowserExecutionAdapter(broker_url=self._url, client_role="strategy")
-        result = await adapter.preview_limit_order_price(symbol="BEAT", side="BUY", amount="100")
+        result = await adapter.get_limit_price_preview(symbol="BEAT")
 
-        self.assertEqual(result["price"], "3.88806")
+        self.assertEqual(result, "3.88806")
         self.assertEqual(self._messages[1]["type"], "PREVIEW_LIMIT_ORDER_PRICE")
         self.assertEqual(self._messages[1]["symbol"], "BEAT")
 
@@ -960,8 +686,11 @@ class VariationalBrowserAdapterTests(unittest.IsolatedAsyncioTestCase):
             client_role="strategy",
             timeout_seconds=0.2,
         )
-        with self.assertRaisesRegex(RuntimeError, "reload the Variational Chrome extension"):
-            await adapter.preview_limit_order_price(symbol="BEAT", side="BUY", amount="100")
+        original_wait = asyncio.wait_for
+        async def short_wait(awaitable, *, timeout):
+            return await original_wait(awaitable, timeout=0.01)
+        with mock.patch("asyncio.wait_for", new=short_wait), self.assertRaises(asyncio.TimeoutError):
+            await adapter.get_limit_price_preview(symbol="BEAT")
 
     async def test_place_limit_order_raises_when_broker_returns_failure(self) -> None:
         async def failing_handler(request: web.Request) -> web.WebSocketResponse:
@@ -1013,7 +742,7 @@ class VariationalBrowserAdapterTests(unittest.IsolatedAsyncioTestCase):
                     await ws.send_json({"type": "ORDER_DISPATCHED", "requestId": payload["requestId"], "ok": True})
                     await ws.send_json(
                         {
-                            "type": "ORDER_RESULT",
+                            "type": "ORDER_ACCEPTED",
                             "requestId": payload["requestId"],
                             "ok": True,
                             "orderId": "var-timeout",
@@ -1225,6 +954,8 @@ class LighterExecutionAdapterTests(unittest.IsolatedAsyncioTestCase):
         class FakeSignerClient:
             ORDER_TYPE_LIMIT = "limit"
             ORDER_TIME_IN_FORCE_GOOD_TILL_TIME = "gtt"
+            ORDER_TIME_IN_FORCE_IMMEDIATE_OR_CANCEL = "ioc"
+            DEFAULT_IOC_EXPIRY = 0
             ISOLATED_MARGIN_MODE = 1
 
             def __init__(self) -> None:
@@ -1263,6 +994,8 @@ class LighterExecutionAdapterTests(unittest.IsolatedAsyncioTestCase):
         class FakeSignerClient:
             ORDER_TYPE_LIMIT = "limit"
             ORDER_TIME_IN_FORCE_GOOD_TILL_TIME = "gtt"
+            ORDER_TIME_IN_FORCE_IMMEDIATE_OR_CANCEL = "ioc"
+            DEFAULT_IOC_EXPIRY = 0
             ISOLATED_MARGIN_MODE = 1
 
             def __init__(self) -> None:
@@ -1301,6 +1034,8 @@ class LighterExecutionAdapterTests(unittest.IsolatedAsyncioTestCase):
         class FakeSignerClient:
             ORDER_TYPE_LIMIT = "limit"
             ORDER_TIME_IN_FORCE_GOOD_TILL_TIME = "gtt"
+            ORDER_TIME_IN_FORCE_IMMEDIATE_OR_CANCEL = "ioc"
+            DEFAULT_IOC_EXPIRY = 0
             ISOLATED_MARGIN_MODE = 1
 
             def __init__(self) -> None:
@@ -1349,17 +1084,23 @@ class LighterExecutionAdapterTests(unittest.IsolatedAsyncioTestCase):
             orderbook_loader=lambda symbol: {"bid": 99.0, "ask": 101.0, "ts_ms": 1},
         )
 
+        adapter._get_order_status = mock.AsyncMock(side_effect=[
+            {"status": "OPEN", "filled_quantity": "0"},
+            {"status": "FILLED", "filled_quantity": "1", "terminal": True},
+        ])
         result = await adapter.wait_for_order_fill(
             order_result={"ok": True, "client_order_index": 123},
             symbol="BTC",
             side="SELL",
             amount="1",
             timeout_seconds=1.0,
-            poll_interval_seconds=0.0,
+            poll_interval_seconds=0.01,
+            initial_delay_seconds=0,
         )
 
         self.assertTrue(result["ok"])
-        self.assertEqual(result["raw"]["status"], "filled")
+        self.assertEqual(result["raw"]["status"], "FILLED")
+        self.assertEqual(adapter._get_order_status.await_count, 2)
 
     async def test_wait_for_order_fill_times_out_when_lighter_order_stays_open(self) -> None:
         class FakeSignerClient:
@@ -1372,6 +1113,7 @@ class LighterExecutionAdapterTests(unittest.IsolatedAsyncioTestCase):
             orderbook_loader=lambda symbol: {"bid": 99.0, "ask": 101.0, "ts_ms": 1},
         )
 
+        adapter._get_order_status = mock.AsyncMock(return_value={"status": "OPEN", "filled_quantity": "0"})
         with self.assertRaisesRegex(RuntimeError, "lighter limit order fill timeout"):
             await adapter.wait_for_order_fill(
                 order_result={"ok": True, "client_order_index": 123},
@@ -1379,7 +1121,8 @@ class LighterExecutionAdapterTests(unittest.IsolatedAsyncioTestCase):
                 side="SELL",
                 amount="1",
                 timeout_seconds=0.01,
-                poll_interval_seconds=0.0,
+                poll_interval_seconds=0.01,
+            initial_delay_seconds=0,
             )
 
 
@@ -1771,7 +1514,7 @@ class SingleClipExecutorTests(unittest.IsolatedAsyncioTestCase):
                 max_maker_reprice_attempts=1,
             )
 
-        self.assertEqual(calls, ["maker_submit", "maker_wait"])
+        self.assertEqual(calls, ["maker_submit", "maker_wait", "maker_cancel"])
 
     async def test_execute_single_clip_stops_before_any_order_when_price_gap_exceeds_limit(self) -> None:
         calls: list[str] = []
@@ -2247,8 +1990,8 @@ class MexcFuturesOrderFillWatcherTests(unittest.IsolatedAsyncioTestCase):
             async def _get_order_status(self, order_id: object) -> dict:
                 self.calls += 1
                 if self.calls == 1:
-                    return {"state": 2, "orderId": order_id}
-                return {"state": 3, "orderId": order_id}
+                    return {"state": 2, "orderId": order_id, "dealVol": "0"}
+                return {"state": 3, "orderId": order_id, "dealVol": "0.1"}
 
         result = await Adapter().wait_for_order_fill(
             order_result={"ok": True, "order_id": "abc"},
@@ -2260,7 +2003,8 @@ class MexcFuturesOrderFillWatcherTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertTrue(result["ok"])
-        self.assertEqual(result["raw"]["state"], 3)
+        self.assertEqual(result["raw"]["status"], "FILLED")
+        self.assertEqual(result["filled_quantity"], "0.1")
 
     async def test_mexc_futures_get_open_position_returns_live_side_and_quantity(self) -> None:
         class Adapter(MexcExecutionAdapter):
@@ -2290,8 +2034,8 @@ class HyperliquidOrderFillWatcherTests(unittest.IsolatedAsyncioTestCase):
             async def _get_order_status(self, order_id: object) -> dict:
                 self.calls += 1
                 if self.calls == 1:
-                    return {"status": "open", "order": {"status": "open", "oid": order_id}}
-                return {"status": "order", "order": {"status": "filled", "oid": order_id}}
+                    return {"status": "order", "order": {"status": "open", "order": {"coin": "ETH", "oid": order_id, "origSz": "0.1", "sz": "0.1"}}}
+                return {"status": "order", "order": {"status": "filled", "order": {"coin": "ETH", "oid": order_id, "origSz": "0.1", "sz": "0"}}}
 
         result = await Adapter().wait_for_order_fill(
             order_result={"ok": True, "order_id": 456},
@@ -2303,7 +2047,8 @@ class HyperliquidOrderFillWatcherTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertTrue(result["ok"])
-        self.assertEqual(result["raw"]["order"]["status"], "filled")
+        self.assertEqual(result["raw"]["status"], "FILLED")
+        self.assertEqual(result["filled_quantity"], "0.1")
 
     async def test_hyperliquid_get_open_position_returns_live_side_and_quantity(self) -> None:
         class Adapter(HyperliquidExecutionAdapter):
@@ -2355,7 +2100,7 @@ class LighterLivePositionTests(unittest.IsolatedAsyncioTestCase):
             orderbook_loader=lambda symbol: {},
         )
 
-        with self.assertRaisesRegex(RuntimeError, "account snapshot had no positions"):
+        with self.assertRaisesRegex(RuntimeError, "account snapshot returned no accounts"):
             await adapter.get_open_position(symbol="ETH", market_type="perp")
 
     async def test_lighter_get_open_position_falls_back_to_account_snapshot(self) -> None:
@@ -2364,7 +2109,7 @@ class LighterLivePositionTests(unittest.IsolatedAsyncioTestCase):
                 return {
                     "positions": [
                         {"symbol": "BTC", "sign": 1, "position": "0"},
-                        {"symbol": "ETH", "sign": -1, "position": "-2.5"},
+                        {"symbol": "ETH", "sign": -1, "position": "2.5"},
                     ]
                 }
 
@@ -2435,7 +2180,6 @@ class ExecutionPreviewCliTests(unittest.TestCase):
     def test_compute_batch_count_rounds_up(self) -> None:
         self.assertEqual(compute_batch_count(10000.0, 500.0), 20)
         self.assertEqual(compute_batch_count(10250.0, 500.0), 21)
-        self.assertEqual(compute_single_clip_batch_count(10250.0, 500.0), 21)
         self.assertEqual(compute_token_batch_count(Decimal("10"), Decimal("3")), 4)
 
     def test_estimate_clip_usd_from_token_size_uses_average_mid(self) -> None:
@@ -2462,29 +2206,31 @@ class ExecutionPreviewCliTests(unittest.TestCase):
         self.assertIn("資本回報", digest)
 
     def test_run_execution_once_passes_leverage_to_supported_venues(self) -> None:
-        with mock.patch("scripts.run_execution_once.AsterExecutionAdapter") as aster_cls:
+        with mock.patch("scripts.place_order.AsterExecutionAdapter") as aster_cls:
             build_adapter_for_venue("aster", leverage=3)
-        with mock.patch("scripts.run_execution_once.HyperliquidExecutionAdapter") as hyper_cls:
+        with mock.patch("scripts.place_order.HyperliquidExecutionAdapter") as hyper_cls:
             build_adapter_for_venue("hyperliquid", leverage=4)
-        with mock.patch("scripts.run_execution_once.MexcExecutionAdapter") as mexc_cls:
+        with mock.patch("scripts.place_order.MexcExecutionAdapter") as mexc_cls:
             build_adapter_for_venue("mexc", leverage=5)
 
-        aster_cls.assert_called_once_with(leverage=3)
-        hyper_cls.assert_called_once_with(leverage=4)
+        aster_cls.assert_called_once_with(leverage=3, skip_margin_setup=False)
+        hyper_cls.assert_called_once_with(leverage=4, skip_margin_setup=False)
         mexc_cls.assert_called_once_with(leverage=5)
 
     def test_run_execution_once_passes_broker_url_to_variational_adapter(self) -> None:
-        with mock.patch("scripts.run_execution_once.VariationalBrowserExecutionAdapter") as adapter_cls:
+        with mock.patch("scripts.place_order.VariationalBrowserExecutionAdapter") as adapter_cls:
             build_adapter_for_venue("variational", broker_url="ws://127.0.0.1:9999")
 
         adapter_cls.assert_called_once_with(
             broker_url="ws://127.0.0.1:9999",
             timeout_seconds=30.0,
+            fill_timeout_seconds=MAKER_FILL_TIMEOUT_SECONDS,
         )
 
-    def test_run_execution_once_allows_variational_as_maker_after_fill_watcher_exists(self) -> None:
-        validate_maker_fill_supported("variational")
-        validate_maker_fill_supported("aster")
+    def test_supported_maker_adapters_have_fill_watchers(self):
+        for adapter in (VariationalBrowserExecutionAdapter, AsterExecutionAdapter,
+                        LighterExecutionAdapter, HyperliquidExecutionAdapter, MexcExecutionAdapter):
+            self.assertTrue(callable(adapter.wait_for_order_fill))
 
 
 if __name__ == "__main__":

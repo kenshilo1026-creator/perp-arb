@@ -366,7 +366,7 @@ class HedgeSafetyTests(unittest.IsolatedAsyncioTestCase):
 
         async def place_limit(**kwargs):
             maker.quantity -= Decimal("10000")
-            return {"ok": True, "filled": True, "filled_quantity": "10000"}
+            return {"ok": True, "terminal": True, "filled": True, "filled_quantity": "10000"}
 
         maker.place_limit_order = place_limit
         taker = PositionAdapter("25000")

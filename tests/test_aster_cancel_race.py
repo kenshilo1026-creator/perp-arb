@@ -1,9 +1,4 @@
-"""Tests for the Aster cancel race: -2011 "Unknown order sent." during maker cleanup.
-
-Kept separate from test_execution_engine.py because that module still imports the
-removed scripts.run_execution_once (renamed to place_order.py in 148d7ab) and
-cannot be collected until it is repaired.
-"""
+"""Aster cancellation races and final fill confirmation during maker cleanup."""
 from __future__ import annotations
 
 import unittest

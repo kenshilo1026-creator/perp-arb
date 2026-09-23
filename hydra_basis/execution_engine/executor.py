@@ -799,7 +799,7 @@ async def execute_single_clip_with_sides(
             maker_attempts.append(attempt_record)
             print(f"[maker-failure] venue={maker_venue} symbol={symbol} side={maker_side} error={exc}", flush=True)
             if isinstance(exc, (asyncio.CancelledError, KeyboardInterrupt, SystemExit)):
-                if verify_hedge_fill and maker_venue in {"aster", "lighter"}:
+                if verify_hedge_fill and maker_venue in {"aster", "lighter", "hyperliquid", "mexc"}:
                     cleanup_errors = await cleanup_active_makers()
                     final_fill = terminal_fill_quantity(maker_cancel_result)
                     if not cleanup_errors and final_fill is not None and final_fill > 0:
@@ -834,7 +834,7 @@ async def execute_single_clip_with_sides(
                     break
             exhausted = max_maker_reprice_attempts >= 0 and maker_attempt >= max_maker_reprice_attempts
             if exhausted or not maker_fill_error_is_repriceable(exc):
-                if verify_hedge_fill and maker_venue in {"aster", "lighter"} and isinstance(maker_result, dict):
+                if verify_hedge_fill and maker_venue in {"aster", "lighter", "hyperliquid", "mexc"} and isinstance(maker_result, dict):
                     cleanup_errors = await cleanup_active_makers()
                     final_fill = terminal_fill_quantity(maker_cancel_result)
                     if not cleanup_errors and final_fill is not None and final_fill > 0:
@@ -988,24 +988,8 @@ async def execute_single_clip_with_sides(
             cancel_status = str(
                 cancel_raw.get("status", "") if isinstance(cancel_raw, dict) else ""
             ).lower()
-            canceled_fill_quantity = extract_filled_quantity(
-                cancel_result,
-                allow_terminal_quantity_fallback=True,
-            )
-            if canceled_fill_quantity is not None and canceled_fill_quantity > 0:
-                # Hedge fills from this attempt before placing another maker.
-                # Otherwise a replacement for the full clip loses this fill and
-                # can over-open the maker venue.
-                maker_fill_result = cancel_result
-                maker_result = placed_result
-                print(
-                    "[reprice] cancelled maker had a fill — "
-                    f"hedging before replacement qty={format_decimal(canceled_fill_quantity)}",
-                    flush=True,
-                )
-                break
             baseline_available = extract_baseline_position(placed_result) is not None
-            if maker_venue in {"aster", "lighter"}:
+            if maker_venue in {"aster", "lighter", "hyperliquid", "mexc"}:
                 final_fill = terminal_fill_quantity(cancel_result)
                 if final_fill is None:
                     await raise_after_maker_cleanup(RuntimeError(
@@ -1151,7 +1135,7 @@ async def execute_single_clip_with_sides(
                 mark_maker_closed(maker_result)
             except BaseException as exc:
                 await raise_after_maker_cleanup(exc)
-        if maker_venue in {"aster", "lighter"}:
+        if maker_venue in {"aster", "lighter", "hyperliquid", "mexc"}:
             final_fill = None
             for response in (maker_cancel_result, maker_fill_result, maker_result):
                 final_fill = terminal_fill_quantity(response)
@@ -1165,7 +1149,7 @@ async def execute_single_clip_with_sides(
                     lambda: query(order_result=maker_result, symbol=symbol),
                 )
                 final_fill = terminal_fill_quantity(final_status)
-            if final_fill is None or not 0 < final_fill <= requested_quantity:
+            if final_fill is None or final_fill <= 0:
                 raise RuntimeError(f"FAIL-CLOSED invalid final maker fill: {final_fill}")
             # Use the order's terminal total, never a lagging partial position
             # snapshot. Verify both live positions after completing the hedge.
@@ -1241,6 +1225,11 @@ async def execute_single_clip_with_sides(
                 ),
                 "pre_trade": pre_trade_price_summary,
             }
+            if executed_quantity > requested_quantity:
+                raise RuntimeError(
+                    f"FAIL-CLOSED maker exceeded requested quantity: requested={requested_quantity} "
+                    f"executed={executed_quantity}; counterpart hedged; stopping before next batch"
+                )
             state_machine.to_completed()
             if deferred_interrupt is not None:
                 raise deferred_interrupt

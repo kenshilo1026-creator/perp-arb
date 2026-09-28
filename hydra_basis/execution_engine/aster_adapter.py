@@ -72,6 +72,11 @@ def strip_aster_stable_suffix(symbol: str) -> str:
 
 class AsterExecutionAdapter:
     BASE_URL = "https://fapi.asterdex.com"
+    # Aster rejects a nonce that has already been used by the same signer/user.
+    # Adapters are recreated between batches, so nonce state must be shared
+    # across instances rather than reset in __init__.
+    _nonce_lock = threading.Lock()
+    _last_nonce_us_by_account: dict[tuple[str, str], int] = {}
 
     def __init__(
         self,
@@ -95,9 +100,6 @@ class AsterExecutionAdapter:
         self.skip_margin_setup = skip_margin_setup
         self._symbol_metadata: dict | None = None
         self._exchange_info_by_symbol: dict[str, dict] | None = None
-        self._last_nonce_ms = 0
-        self._nonce_i = 0
-        self._nonce_lock = threading.Lock()
         self._isolated_symbols: set[str] = set()
         self._leveraged_symbols: set[str] = set()
 
@@ -109,14 +111,16 @@ class AsterExecutionAdapter:
         return signed.signature.hex()
 
     def _nonce_us(self) -> int:
-        with self._nonce_lock:
-            now_ms = int(time.time())
-            if now_ms == self._last_nonce_ms:
-                self._nonce_i += 1
-            else:
-                self._last_nonce_ms = now_ms
-                self._nonce_i = 0
-            return now_ms * 1_000_000 + self._nonce_i
+        account_key = (
+            self.signer_address.strip().lower(),
+            self.user_address.strip().lower(),
+        )
+        now_us = time.time_ns() // 1_000
+        with type(self)._nonce_lock:
+            previous = type(self)._last_nonce_us_by_account.get(account_key, 0)
+            nonce = max(now_us, previous + 1)
+            type(self)._last_nonce_us_by_account[account_key] = nonce
+            return nonce
 
     async def _resolve_raw_symbol(self, symbol: str) -> str:
         exchange_info = await self._load_exchange_info_by_symbol()
@@ -263,9 +267,31 @@ class AsterExecutionAdapter:
         params["signature"] = self._sign(encoded_params)
         return params
 
+    async def _post_signed_action(
+        self,
+        url: str,
+        params: dict,
+        *,
+        max_nonce_attempts: int = 3,
+    ) -> dict:
+        last_error: RuntimeError | None = None
+        for attempt in range(max(1, max_nonce_attempts)):
+            signed_params = self.build_signed_params(params)
+            try:
+                return await self._post_signed_query(url, signed_params)
+            except RuntimeError as exc:
+                message = str(exc).lower()
+                if "-4226" not in message and "nonce used" not in message:
+                    raise
+                last_error = exc
+                if attempt + 1 >= max(1, max_nonce_attempts):
+                    break
+        raise RuntimeError(
+            f"aster nonce remained rejected after {max_nonce_attempts} signed attempts: {last_error}"
+        ) from last_error
+
     async def _post_order(self, params: dict) -> dict:
-        params = self.build_signed_params(params)
-        return await self._post_signed_query(f"{self.BASE_URL}/fapi/v3/order", params)
+        return await self._post_signed_action(f"{self.BASE_URL}/fapi/v3/order", params)
 
     async def _get_order_status(self, *, symbol: str, order_id: object) -> dict:
         raw_symbol = await self._resolve_raw_symbol(symbol)
@@ -387,12 +413,12 @@ class AsterExecutionAdapter:
         raw_symbol = await self._resolve_raw_symbol(symbol)
         if self.skip_margin_setup or raw_symbol in self._isolated_symbols:
             return
-        params = self.build_signed_params({
+        params = {
             "symbol": raw_symbol,
             "marginType": "ISOLATED",
-        })
+        }
         try:
-            await self._post_signed_query(f"{self.BASE_URL}/fapi/v3/marginType", params)
+            await self._post_signed_action(f"{self.BASE_URL}/fapi/v3/marginType", params)
         except RuntimeError as exc:
             message = str(exc)
             if "-4046" not in message and "No need to change margin type" not in message:
@@ -403,11 +429,11 @@ class AsterExecutionAdapter:
         raw_symbol = await self._resolve_raw_symbol(symbol)
         if self.skip_margin_setup or raw_symbol in self._leveraged_symbols:
             return
-        params = self.build_signed_params({
+        params = {
             "symbol": raw_symbol,
             "leverage": self.leverage,
-        })
-        await self._post_signed_query(f"{self.BASE_URL}/fapi/v3/leverage", params)
+        }
+        await self._post_signed_action(f"{self.BASE_URL}/fapi/v3/leverage", params)
         self._leveraged_symbols.add(raw_symbol)
 
     async def add_isolated_margin(
@@ -420,13 +446,13 @@ class AsterExecutionAdapter:
         **kwargs,
     ) -> dict:
         raw_symbol = await self._resolve_raw_symbol(symbol)
-        params = self.build_signed_params({
+        params = {
             "symbol": raw_symbol,
             "positionSide": "BOTH",
             "amount": str(amount_usd),
             "type": 1,
-        })
-        data = await self._post_signed_query(f"{self.BASE_URL}/fapi/v3/positionMargin", params)
+        }
+        data = await self._post_signed_action(f"{self.BASE_URL}/fapi/v3/positionMargin", params)
         return {"ok": True, "raw": data}
 
     async def place_limit_order(

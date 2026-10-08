@@ -2,8 +2,8 @@
   "symbol": "ETH",
   "short_venue": "aster",
   "long_venue": "hyperliquid",
-  "maker_venue": "aster",
   "execution_method": "maker_taker",
+  "maker_venue": "aster",
   "total_quantity": "0.02",
   "clip_quantity": "0.01",
   "entry_bps": "40",
@@ -16,11 +16,15 @@
     "hyperliquid": {"maker": "0.0005", "taker": "0.0005"},
     "variational": {"maker": "0.0005", "taker": "0.0005"}
   },
-  "leverage": 1,
-  "poll_seconds": 2,
-  "max_quote_age_seconds": 5,
-  "max_request_seconds": 3,
-  "maker_timeout_seconds": 5,
-  "max_hold_seconds": 3600,
-  "stop_loss_usd": "25"
+  "short_leverage": 1,
+  "long_leverage": 1,
+  "tick_seconds": 0.5,
+  "order_timeout_seconds": 20,
+  "requote_interval_seconds": 2,
+  "market_freshness_seconds": 15,
+  "max_transport_lag_seconds": 3,
+  "future_tolerance_seconds": 2,
+  "repair_cooldown_seconds": 3,
+  "variational_poll_seconds": 2,
+  "stop_loss_usd": null
 }

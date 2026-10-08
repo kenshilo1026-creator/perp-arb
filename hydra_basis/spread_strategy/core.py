@@ -1,19 +1,32 @@
+"""Config, pricing math and the durable order ledger for the spread strategy.
+
+The trading lifecycle follows Gate CrossEx's ``auto`` strategy: enter while the
+entry spread is wide, take profit while the exit spread is narrow, repeat until
+stopped. Exposure is derived from this strategy's own recorded fills.
+"""
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import json
 import time
-from dataclasses import asdict, dataclass, field
-from decimal import Decimal
+import uuid
+from dataclasses import asdict, dataclass, field, fields
+from decimal import ROUND_CEILING, ROUND_FLOOR, Decimal
 from pathlib import Path
-from typing import Protocol
 
 from hydra_basis.risk_management.persistence import atomic_write_json
 
 BPS = Decimal("10000")
 ZERO = Decimal("0")
+ONE = Decimal("1")
+EPSILON = Decimal("1e-12")
 VENUES = {"aster", "hyperliquid", "variational"}
+# Variational orders go through the browser extension and block until filled,
+# so they cannot rest as a cancellable post-only quote.
+MAKER_VENUES = {"aster", "hyperliquid"}
+TERMINAL_STATES = {"FILLED", "CANCELED", "REJECTED", "EXPIRED"}
+LEGACY_KEYS = {"poll_seconds", "max_quote_age_seconds", "max_request_seconds",
+               "maker_timeout_seconds", "max_hold_seconds"}
 
 
 def number(value) -> Decimal:
@@ -23,40 +36,62 @@ def number(value) -> Decimal:
     return result
 
 
+def now_ms() -> int:
+    return int(time.time() * 1000)
+
+
+def round_step(value: Decimal, step: Decimal | None, direction: str) -> Decimal:
+    if not step or step <= 0:
+        return value
+    units = (value / step).to_integral_value(rounding=ROUND_CEILING if direction == "up" else ROUND_FLOOR)
+    return units * step
+
+
 @dataclass(frozen=True)
 class Config:
     symbol: str
     short_venue: str
     long_venue: str
-    maker_venue: str
+    # Maximum matched position (base units) and the size of each order.
     total_quantity: Decimal
     clip_quantity: Decimal
     entry_bps: Decimal
     take_profit_bps: Decimal
     # Rates are fractions, e.g. 0.0005 means 0.05%. No venue fee assumptions.
     fees: dict[str, dict[str, Decimal]]
+    execution_method: str = "maker_taker"
+    maker_venue: str | None = None
     min_profit_bps: Decimal = Decimal("5")
     slippage_buffer_bps: Decimal = Decimal("5")
     funding_budget_bps: Decimal = Decimal("5")
-    leverage: int = 1
-    poll_seconds: float = 2.0
-    max_quote_age_seconds: float = 5.0
-    max_request_seconds: float = 3.0
-    maker_timeout_seconds: float = 5.0
-    max_hold_seconds: float = 3600.0
-    stop_loss_usd: Decimal = Decimal("25")
-    execution_method: str = "maker_taker"
+    short_leverage: int = 1
+    long_leverage: int = 1
+    tick_seconds: float = 0.5
+    order_timeout_seconds: float = 20.0
+    requote_interval_seconds: float = 2.0
+    market_freshness_seconds: float = 15.0
+    max_transport_lag_seconds: float = 3.0
+    future_tolerance_seconds: float = 2.0
+    repair_cooldown_seconds: float = 3.0
+    variational_poll_seconds: float = 2.0
+    # Optional emergency exit; None disables it (the original has no such exit).
+    stop_loss_usd: Decimal | None = None
 
     def __post_init__(self):
         if not self.symbol or self.symbol != self.symbol.strip().upper():
             raise ValueError("symbol must be a canonical uppercase symbol")
         if not {self.short_venue, self.long_venue} <= VENUES:
             raise ValueError("supported venues: aster, hyperliquid, variational")
-        if self.short_venue == self.long_venue or self.maker_venue not in self.venues:
-            raise ValueError("choose different venues and a maker from the pair")
+        if self.short_venue == self.long_venue:
+            raise ValueError("choose two different venues")
         if self.execution_method not in {"maker_taker", "taker_taker"}:
             raise ValueError("execution_method must be maker_taker or taker_taker")
-        for name in ("total_quantity", "clip_quantity", "stop_loss_usd"):
+        if self.execution_method == "maker_taker":
+            if self.maker_venue not in self.venues:
+                raise ValueError("maker_venue must be one of the pair")
+            if self.maker_venue not in MAKER_VENUES:
+                raise ValueError("variational cannot rest post-only quotes; use it as the taker leg")
+        for name in ("total_quantity", "clip_quantity"):
             if number(getattr(self, name)) <= 0:
                 raise ValueError(f"{name} must be positive")
         if self.clip_quantity > self.total_quantity:
@@ -64,14 +99,19 @@ class Config:
         for name in ("min_profit_bps", "slippage_buffer_bps", "funding_budget_bps"):
             if number(getattr(self, name)) < 0:
                 raise ValueError(f"{name} must not be negative")
+        if number(self.entry_bps) <= 0:
+            raise ValueError("entry_bps must be greater than zero")
         if number(self.entry_bps) <= number(self.take_profit_bps):
             raise ValueError("take_profit_bps must be below entry_bps")
-        if not isinstance(self.leverage, int) or isinstance(self.leverage, bool) or self.leverage < 1:
-            raise ValueError("leverage must be a positive integer")
-        for name in ("poll_seconds", "max_quote_age_seconds", "max_request_seconds",
-                     "maker_timeout_seconds", "max_hold_seconds"):
-            if number(getattr(self, name)) <= 0:
-                raise ValueError(f"{name} must be positive")
+        if self.stop_loss_usd is not None and number(self.stop_loss_usd) <= 0:
+            raise ValueError("stop_loss_usd must be positive or null")
+        for name in ("short_leverage", "long_leverage"):
+            value = getattr(self, name)
+            if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+                raise ValueError(f"{name} must be a positive integer")
+        for item in fields(self):
+            if item.name.endswith("_seconds") and number(getattr(self, item.name)) <= 0:
+                raise ValueError(f"{item.name} must be positive")
         for venue in self.venues:
             for role in ("maker", "taker"):
                 rate = number(self.fees[venue][role])
@@ -83,249 +123,225 @@ class Config:
         return (self.short_venue, self.long_venue)
 
     @property
-    def taker_venue(self):
-        return self.long_venue if self.maker_venue == self.short_venue else self.short_venue
+    def maker_taker(self) -> bool:
+        return self.execution_method == "maker_taker"
+
+    @property
+    def maker_leg(self) -> str:
+        return "short" if self.maker_venue == self.short_venue else "long"
+
+    def venue_of(self, leg: str) -> str:
+        return self.short_venue if leg == "short" else self.long_venue
+
+    def leverage_of(self, venue: str) -> int:
+        return self.short_leverage if venue == self.short_venue else self.long_leverage
 
     def fee_rate(self, venue: str) -> Decimal:
-        # Existing GTC adapters do not guarantee post-only: budget the worse role.
-        return max(number(self.fees[venue]["maker"]), number(self.fees[venue]["taker"]))
+        # Post-only quotes earn the maker rate; every other order takes liquidity.
+        role = "maker" if self.maker_taker and venue == self.maker_venue else "taker"
+        return number(self.fees[venue][role])
 
-    def fingerprint(self) -> str:
-        return hashlib.sha256(json.dumps(asdict(self), default=str, sort_keys=True).encode()).hexdigest()
+    def identity(self) -> str:
+        # Thresholds may change between runs; the venue pair and symbol may not.
+        key = f"{self.symbol}:{self.short_venue}:{self.long_venue}"
+        return hashlib.sha256(key.encode()).hexdigest()[:16]
 
     @classmethod
     def load(cls, path: Path):
         payload = json.loads(path.read_text(encoding="utf-8-sig"))
+        legacy = payload.pop("leverage", None)
+        if legacy is not None:
+            payload.setdefault("short_leverage", legacy)
+            payload.setdefault("long_leverage", legacy)
+        unsupported = sorted(LEGACY_KEYS & payload.keys())
+        if unsupported:
+            raise ValueError(f"config keys no longer supported: {', '.join(unsupported)}")
         for key in ("total_quantity", "clip_quantity", "entry_bps", "take_profit_bps",
-                    "min_profit_bps", "slippage_buffer_bps", "funding_budget_bps", "stop_loss_usd"):
+                    "min_profit_bps", "slippage_buffer_bps", "funding_budget_bps"):
             if key in payload:
                 payload[key] = number(payload[key])
+        if payload.get("stop_loss_usd") is not None:
+            payload["stop_loss_usd"] = number(payload["stop_loss_usd"])
         payload["fees"] = {v: {role: number(rate) for role, rate in rates.items()}
                            for v, rates in payload["fees"].items()}
         return cls(**payload)
 
 
-@dataclass(frozen=True)
-class Quote:
-    bid: Decimal
-    ask: Decimal
-    received_ms: int
-    source_ms: int | None = None
-    request_seconds: float = 0.0
+# ---------------------------------------------------------------------------
+# Pricing. "short" is the leg sold on entry, "long" the leg bought on entry.
+# Entry spread: (short bid - long ask) / long ask; exit: (short ask - long bid) / long bid.
+# ---------------------------------------------------------------------------
 
-    def validate(self, *, now_ms: int, config: Config):
-        if not ZERO < number(self.bid) <= number(self.ask):
-            raise ValueError("invalid bid/ask")
-        limit_ms = config.max_quote_age_seconds * 1000
-        if not 0 <= now_ms - self.received_ms <= limit_ms:
-            raise ValueError("stale or future receipt timestamp")
-        if self.source_ms is not None and not -2000 <= now_ms - self.source_ms <= limit_ms:
-            raise ValueError("stale or future exchange timestamp")
-        if not 0 <= self.request_seconds <= config.max_request_seconds:
-            raise ValueError("quote request too slow")
+def spread_bps(short_price: Decimal, long_price: Decimal) -> Decimal:
+    return (number(short_price) - number(long_price)) / number(long_price) * BPS
+
+
+def entry_ratio_required(c: Config) -> Decimal:
+    """Minimum short/long price ratio passing both the raw and the net entry gate.
+
+    Net edge reserves a round trip of fees, the target exit spread, funding and
+    slippage: (r-1)*B - (r + 1 + tp/B)*fS*B - 2*fL*B - tp - slip - funding >= min.
+    """
+    fs, fl = c.fee_rate(c.short_venue), c.fee_rate(c.long_venue)
+    tp = c.take_profit_bps
+    raw = ONE + c.entry_bps / BPS
+    net = (c.min_profit_bps + BPS + (ONE + tp / BPS) * fs * BPS + 2 * fl * BPS + tp
+           + c.slippage_buffer_bps + c.funding_budget_bps) / ((ONE - fs) * BPS)
+    return max(raw, net)
+
+
+def entry_allowed(c: Config, short: Decimal, long: Decimal) -> bool:
+    return short / long >= entry_ratio_required(c)
+
+
+@dataclass
+class Leg:
+    quantity: str = "0"   # signed: negative short, positive long
+    average: str = "0"    # average cost of the open quantity
+    realized: str = "0"   # gross realized price PnL (USD)
+
+    def apply(self, signed_quantity: Decimal, price: Decimal):
+        held, avg = number(self.quantity), number(self.average)
+        after = held + signed_quantity
+        if held == 0 or (held > 0) == (signed_quantity > 0):
+            avg = (avg * abs(held) + price * abs(signed_quantity)) / abs(after)
+        else:
+            closed = min(abs(held), abs(signed_quantity))
+            direction = ONE if held > 0 else -ONE
+            self.realized = str(number(self.realized) + closed * (price - avg) * direction)
+            if after == 0:
+                avg = ZERO
+            elif (after > 0) != (held > 0):
+                avg = price  # flipped through zero: the remainder opened at this fill
+        self.quantity, self.average = str(after), str(avg)
+
+
+def matched_quantity(short: Leg, long: Leg) -> Decimal:
+    s, l = number(short.quantity), number(long.quantity)
+    if s >= 0 or l <= 0:
+        return ZERO
+    return min(-s, l)
+
+
+def imbalance(short: Leg, long: Leg) -> Decimal:
+    return number(short.quantity) + number(long.quantity)
+
+
+def exit_net_per_unit(c: Config, short: Leg, long: Leg, s: Decimal, l: Decimal) -> Decimal:
+    """Net per unit if both legs close at (s, l), after opening/closing fees and reserves."""
+    return _exit_base(c, short, long) - s * (ONE + c.fee_rate(c.short_venue)) + l * (ONE - c.fee_rate(c.long_venue))
+
+
+def _exit_base(c: Config, short: Leg, long: Leg) -> Decimal:
+    fs, fl = c.fee_rate(c.short_venue), c.fee_rate(c.long_venue)
+    sa, la = number(short.average), number(long.average)
+    reserve = la * (c.funding_budget_bps + c.slippage_buffer_bps + c.min_profit_bps) / BPS
+    return sa * (ONE - fs) - la * (ONE + fl) - reserve
+
+
+def exit_allowed(c: Config, short: Leg, long: Leg, s: Decimal, l: Decimal) -> bool:
+    return spread_bps(s, l) <= c.take_profit_bps and exit_net_per_unit(c, short, long, s, l) >= 0
+
+
+def maker_boundary(c: Config, intent: str, taker_price: Decimal, short: Leg, long: Leg) -> Decimal:
+    """Worst maker price that still satisfies every gate against the taker's price."""
+    fs, fl = c.fee_rate(c.short_venue), c.fee_rate(c.long_venue)
+    if intent == "entry":
+        ratio = entry_ratio_required(c)
+        return taker_price * ratio if c.maker_leg == "short" else taker_price / ratio
+    k = ONE + c.take_profit_bps / BPS
+    base = _exit_base(c, short, long)
+    if c.maker_leg == "short":   # buy back the short at s; long sells at taker bid
+        return min(taker_price * k, (base + taker_price * (ONE - fl)) / (ONE + fs))
+    return max(taker_price / k, (taker_price * (ONE + fs) - base) / (ONE - fl))  # sell the long at l
+
+
+# ---------------------------------------------------------------------------
+# Durable ledger
+# ---------------------------------------------------------------------------
+
+@dataclass
+class Order:
+    id: str
+    venue: str
+    leg: str            # short | long
+    side: str           # BUY | SELL
+    purpose: str        # quote_entry | quote_exit | taker_entry | taker_exit | repair | stop
+    quantity: str
+    reduce_only: bool
+    price: str | None = None          # limit price for quotes
+    reference_price: str | None = None  # quote used at decision time (taker orders)
+    state: str = "PENDING_SUBMIT"     # PENDING_SUBMIT | OPEN | UNKNOWN | terminal
+    executed_quantity: str = "0"
+    average_price: str | None = None
+    average_estimated: bool = False
+    remote: dict | None = None        # adapter order result used for status/cancel
+    clip: str | None = None
+    created_ms: int = field(default_factory=now_ms)
+    updated_ms: int = field(default_factory=now_ms)
+    error: str | None = None
+
+    @property
+    def terminal(self) -> bool:
+        return self.state in TERMINAL_STATES
+
+    @property
+    def signed_direction(self) -> Decimal:
+        return ONE if self.side == "BUY" else -ONE
 
 
 @dataclass
 class State:
-    fingerprint: str
+    identity: str
     mode: str
     strategy_id: str
-    phase: str = "WAITING"
-    quantity: str = "0"
-    entered_quantity: str = "0"
-    short_average: str = "0"
-    long_average: str = "0"
-    entry_fees_remaining: str = "0"
-    realized_gross_usd: str = "0"
-    estimated_trading_fees_usd: str = "0"
-    first_entry_ms: int | None = None
-    exit_reason: str | None = None
-    pending: dict | None = None
-    error: str | None = None
-    fills: list[dict] = field(default_factory=list)
+    status: str = "RUNNING"   # RUNNING | STOPPING | STOPPED | PAUSED
+    short: Leg = field(default_factory=Leg)
+    long: Leg = field(default_factory=Leg)
+    fees_usd: str = "0"
+    orders: list[Order] = field(default_factory=list)
+    reason: str | None = None
+
+    def leg(self, name: str) -> Leg:
+        return self.short if name == "short" else self.long
+
+    def open_orders(self) -> list[Order]:
+        return [order for order in self.orders if not order.terminal]
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, payload: dict) -> "State":
+        payload = dict(payload)
+        payload["short"] = Leg(**payload.get("short", {}))
+        payload["long"] = Leg(**payload.get("long", {}))
+        payload["orders"] = [Order(**item) for item in payload.get("orders", [])]
+        return cls(**payload)
 
 
 class StateStore:
+    KEEP_TERMINAL = 200
+
     def __init__(self, path: Path):
         self.path = path
 
     def load(self, config: Config, *, live: bool) -> State:
         mode = "live" if live else "paper"
         if not self.path.exists():
-            import uuid
-            return State(config.fingerprint(), mode, f"spread-{uuid.uuid4().hex}")
+            return State(config.identity(), mode, f"spread-{uuid.uuid4().hex}")
         # Corrupt state must never be silently replaced with an empty strategy.
-        state = State(**json.loads(self.path.read_text(encoding="utf-8")))
-        if state.fingerprint != config.fingerprint() or state.mode != mode:
-            raise ValueError("state config/mode mismatch; use a separate state file")
-        if state.pending is not None or state.phase == "PAUSED":
-            raise RuntimeError("strategy requires manual order/position reconciliation; automatic replay refused")
-        if state.phase not in {"WAITING", "HOLDING", "EXITING", "DONE"}:
-            raise ValueError("invalid strategy phase")
-        for name in ("quantity", "entered_quantity", "short_average", "long_average",
-                     "entry_fees_remaining", "estimated_trading_fees_usd"):
-            if number(getattr(state, name)) < 0:
-                raise ValueError("invalid negative state field")
-        if number(state.quantity) > number(state.entered_quantity) or number(state.entered_quantity) > config.total_quantity:
-            raise ValueError("state quantity exceeds strategy capacity")
-        if number(state.quantity) > 0 and (not state.first_entry_ms or
-                number(state.short_average) <= 0 or number(state.long_average) <= 0):
-            raise ValueError("held quantity missing entry accounting")
-        if state.phase in {"HOLDING", "EXITING"} and number(state.quantity) <= 0:
-            raise ValueError("active state requires positive held quantity")
-        if state.phase in {"WAITING", "DONE"} and number(state.quantity) != 0:
-            raise ValueError("flat state cannot own a position")
-        if state.phase == "EXITING" and state.exit_reason not in {"take_profit", "max_hold", "stop_loss"}:
-            raise ValueError("exit state requires a valid latched reason")
+        state = State.from_dict(json.loads(self.path.read_text(encoding="utf-8")))
+        if state.identity != config.identity() or state.mode != mode:
+            raise ValueError("state belongs to another symbol/venue pair or mode; use a separate state file")
+        if state.status not in {"RUNNING", "STOPPING", "STOPPED", "PAUSED"}:
+            raise ValueError("invalid strategy status")
         return state
 
     def save(self, state: State):
-        atomic_write_json(self.path, asdict(state))
-
-
-class Broker(Protocol):
-    async def reconcile(self, state: State) -> None: ...
-    async def quotes(self, quantity: Decimal) -> dict[str, Quote]: ...
-    async def execute(self, intent: str, quantity: Decimal, state: State,
-                      force: bool = False) -> dict: ...
-    async def sync_registry(self, state: State) -> None: ...
-
-
-def spread_bps(short_price: Decimal, long_price: Decimal) -> Decimal:
-    return (number(short_price) - number(long_price)) / number(long_price) * BPS
-
-
-def executable_prices(config: Config, quotes: dict[str, Quote], intent: str,
-                      *, maker: bool = False) -> tuple[Decimal, Decimal]:
-    short, long = quotes[config.short_venue], quotes[config.long_venue]
-    if intent == "entry":
-        return (short.ask if maker and config.maker_venue == config.short_venue else short.bid,
-                long.bid if maker and config.maker_venue == config.long_venue else long.ask)
-    return (short.bid if maker and config.maker_venue == config.short_venue else short.ask,
-            long.ask if maker and config.maker_venue == config.long_venue else long.bid)
-
-
-def entry_net_bps(config: Config, short: Decimal, long: Decimal) -> Decimal:
-    # Conservative target estimate: reserve four fees, including price scaling.
-    exit_short = long * (1 + max(ZERO, config.take_profit_bps) / BPS)
-    fees = ((short + exit_short) * config.fee_rate(config.short_venue)
-            + long * 2 * config.fee_rate(config.long_venue)) / long * BPS
-    return (spread_bps(short, long) - config.take_profit_bps - fees
-            - config.slippage_buffer_bps - config.funding_budget_bps)
-
-
-def projected_exit_net(config: Config, state: State, short: Decimal,
-                       long: Decimal, quantity: Decimal) -> Decimal:
-    held = number(state.quantity)
-    gross = quantity * (number(state.short_average) - short + long - number(state.long_average))
-    opening_fees = number(state.entry_fees_remaining) * quantity / held
-    closing_fees = quantity * (short * config.fee_rate(config.short_venue)
-                              + long * config.fee_rate(config.long_venue))
-    reserve = quantity * number(state.long_average) * (
-        config.funding_budget_bps + config.slippage_buffer_bps) / BPS
-    return gross - opening_fees - closing_fees - reserve
-
-
-def entry_allowed(config: Config, short: Decimal, long: Decimal) -> bool:
-    return (spread_bps(short, long) >= config.entry_bps
-            and entry_net_bps(config, short, long) >= config.min_profit_bps)
-
-
-def exit_allowed(config: Config, state: State, short: Decimal, long: Decimal,
-                 quantity: Decimal) -> bool:
-    return (spread_bps(short, long) <= config.take_profit_bps
-            and projected_exit_net(config, state, short, long, quantity)
-            >= quantity * number(state.long_average) * config.min_profit_bps / BPS)
-
-
-class Strategy:
-    def __init__(self, config: Config, broker: Broker, store: StateStore, *, live: bool,
-                 now_ms=None):
-        self.config, self.broker, self.store = config, broker, store
-        self.state = store.load(config, live=live)
-        self.now_ms = now_ms or (lambda: int(time.time() * 1000))
-        self._lock = asyncio.Lock()
-
-    async def step(self) -> dict:
-        async with self._lock:
-            s, c = self.state, self.config
-            if s.phase in {"DONE", "PAUSED"}:
-                return {"phase": s.phase, "error": s.error}
-            try:
-                await self.broker.reconcile(s)
-                await self.broker.sync_registry(s)
-                held = number(s.quantity)
-                quantity = min(c.clip_quantity, held if s.phase == "EXITING" else
-                               max(held, c.total_quantity - number(s.entered_quantity)))
-                books = await self.broker.quotes(quantity)
-                now = self.now_ms()
-                for venue in c.venues:
-                    books[venue].validate(now_ms=now, config=c)
-                entry = executable_prices(c, books, "entry")
-                exit_prices = executable_prices(c, books, "exit")
-                event = {"phase": s.phase, "entry_bps": str(spread_bps(*entry)),
-                         "exit_bps": str(spread_bps(*exit_prices)), "quantity": s.quantity}
-                if held > 0:
-                    timeout = now - s.first_entry_ms >= c.max_hold_seconds * 1000
-                    loss = projected_exit_net(c, s, *exit_prices, held) <= -c.stop_loss_usd
-                    if timeout or loss or exit_allowed(c, s, *exit_prices, held):
-                        s.phase = "EXITING"
-                        s.exit_reason = s.exit_reason or ("max_hold" if timeout else "stop_loss" if loss else "take_profit")
-                        self.store.save(s)
-                # Exit latches permanently; no further entry after the first exit.
-                if s.phase == "EXITING":
-                    force = s.exit_reason != "take_profit"
-                    if force or exit_allowed(c, s, *exit_prices, held):
-                        await self._execute("exit", min(c.clip_quantity, held), force=force)
-                elif number(s.entered_quantity) < c.total_quantity and entry_allowed(c, *entry):
-                    await self._execute("entry", min(c.clip_quantity, c.total_quantity - number(s.entered_quantity)))
-                return {**event, "phase": s.phase, "quantity": s.quantity, "exit_reason": s.exit_reason}
-            except BaseException as exc:
-                s.phase, s.error = "PAUSED", str(exc)
-                self.store.save(s)
-                raise
-
-    async def _execute(self, intent: str, quantity: Decimal, *, force: bool = False):
-        if quantity <= 0:
-            raise RuntimeError("invalid zero clip")
-        s, c = self.state, self.config
-        # Durable intent before any remote action. A crash never replays it.
-        s.pending = {"intent": intent, "quantity": str(quantity), "force": force,
-                     "started_ms": self.now_ms()}
-        self.store.save(s)
-        result = await self.broker.execute(intent, quantity, s, force)
-        s.pending["result"] = result
-        self.store.save(s)
-        if result.get("skipped") and result.get("ok"):
-            s.pending = None
-            self.store.save(s)
-            return
-        if not result.get("ok") or not result.get("hedge_verified"):
-            raise RuntimeError("both fills must be verified before updating the strategy")
-        filled = number(result["quantity"])
-        short, long = number(result["short_price"]), number(result["long_price"])
-        if not ZERO < filled <= quantity or min(short, long) <= 0:
-            raise RuntimeError("invalid confirmed fill")
-        fees = filled * (short * c.fee_rate(c.short_venue) + long * c.fee_rate(c.long_venue))
-        held = number(s.quantity)
-        if intent == "entry":
-            total = held + filled
-            s.short_average = str((number(s.short_average) * held + short * filled) / total)
-            s.long_average = str((number(s.long_average) * held + long * filled) / total)
-            s.quantity = str(total)
-            s.entered_quantity = str(number(s.entered_quantity) + filled)
-            s.entry_fees_remaining = str(number(s.entry_fees_remaining) + fees)
-            s.first_entry_ms = s.first_entry_ms or self.now_ms()
-            s.phase = "HOLDING"
-        else:
-            s.realized_gross_usd = str(number(s.realized_gross_usd) + filled * (
-                number(s.short_average) - short + long - number(s.long_average)))
-            s.entry_fees_remaining = str(number(s.entry_fees_remaining) * (held - filled) / held)
-            s.quantity = str(held - filled)
-            s.phase = "DONE" if held == filled else "EXITING"
-        s.estimated_trading_fees_usd = str(number(s.estimated_trading_fees_usd) + fees)
-        s.fills.append({"intent": intent, "quantity": str(filled), "short_price": str(short),
-                        "long_price": str(long), "estimated_fee_usd": str(fees), "ts_ms": self.now_ms()})
-        s.pending = None
-        self.store.save(s)
-        await self.broker.sync_registry(s)
+        # Exposure lives in the leg totals, so old terminal orders can be pruned.
+        terminal = [order for order in state.orders if order.terminal]
+        if len(terminal) > self.KEEP_TERMINAL:
+            drop = {order.id for order in terminal[: len(terminal) - self.KEEP_TERMINAL]}
+            state.orders = [order for order in state.orders if order.id not in drop]
+        atomic_write_json(self.path, state.to_dict())

@@ -227,6 +227,12 @@ class HyperliquidExecutionAdapter:
         return {"status": status, "terminal": status in {"FILLED", "CANCELED", "REJECTED"},
                 "filled_quantity": str(original - remaining), "order_id": order_id, "raw": data}
 
+    async def get_available_margin(self) -> Decimal:
+        state = await self._fetch_clearinghouse_state()
+        if not isinstance(state, dict) or state.get("withdrawable") is None:
+            raise RuntimeError(f"hyperliquid withdrawable balance unavailable: {state}")
+        return Decimal(str(state["withdrawable"]))
+
     async def get_open_position(self, *, symbol: str, market_type: str) -> dict | None:
         if market_type != "perp":
             raise RuntimeError("hyperliquid live position query only supports perp")
@@ -334,7 +340,7 @@ class HyperliquidExecutionAdapter:
 
     async def place_limit_order(
         self, *, symbol: str, side: str, amount: str, clip_usd: float, price: str,
-        reduce_only: bool = False,
+        reduce_only: bool = False, post_only: bool = False,
     ) -> dict:
         asset_index = await self.ensure_isolated_margin(symbol)
         is_buy = side.strip().upper() == "BUY"
@@ -343,7 +349,8 @@ class HyperliquidExecutionAdapter:
             is_buy=is_buy,
             price=float(price),
             size=float(amount),
-            tif="Gtc",
+            # Alo (add liquidity only) is post-only: a crossing order is rejected.
+            tif="Alo" if post_only else "Gtc",
             reduce_only=reduce_only,
         )
         data = await self._post_order(action)

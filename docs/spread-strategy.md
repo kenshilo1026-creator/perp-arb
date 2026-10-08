@@ -1,151 +1,197 @@
 # Cross-venue perpetual spread strategy
 
-An independent Python implementation of the paired spread-convergence workflow
-reviewed in [Gate CrossEx](https://github.com/your-quantguy/gate-crossex). It uses
-this project's Aster, Hyperliquid and Variational adapters directly; it does not
-use a Gate account, Gate SDK, or CrossEx shared margin. No source from that
-repository is imported into this implementation.
+An independent Python implementation of the `auto` spread strategy in
+[Gate CrossEx](https://github.com/your-quantguy/gate-crossex), using this
+project's Aster, Hyperliquid and Variational adapters. It does not use a Gate
+account, Gate SDK or CrossEx shared margin, and imports no source from that
+repository.
 
 ## Run
 
-From the project root, using the project's existing Python environment:
-
 ```powershell
-python scripts/run_spread_strategy.py --config configs/spread_strategy.example.json --max-ticks 10
+python scripts/run_spread_strategy.py --config configs/spread_strategy.example.json --max-seconds 60
 ```
 
-The default is **paper mode**: public quotes, immediate simulated fills, no
-authenticated adapter construction, no orders, no writes to the position
-registry. These fills do not model maker queue priority, depth, or slippage and
-are not evidence of realized profit. State is retained even after `--max-ticks`.
-
-Edit a copy of the example configuration before enabling live execution. Its
-fees are placeholders, not claims about any venue/account's actual fees. Small
-example quantities also need checking against each venue's minimum and lot size.
+The default is **paper mode**: live public quotes, simulated venues, no
+credentials, no orders, no position-registry writes. Paper market orders fill in
+full at the top of book; a paper post-only quote fills at its limit once the
+opposite best price reaches it. Neither models depth, queue position or latency,
+so paper results are not evidence of realizable profit.
 
 ```powershell
 python scripts/run_spread_strategy.py --config configs/my_spread_strategy.json --live
 ```
 
-Only `--live` enables actual orders and loads the project's existing `.env`.
-The command does not install dependencies or change credential configuration.
-This implementation has been tested with deterministic exchange simulators;
-real venue order submission has not been exercised by its automated tests.
+Only `--live` sends orders and loads the project's `.env`. Edit a copy of the
+example first: its fees are placeholders, and quantities must satisfy each
+venue's minimums (checked at startup).
 
-For a Variational pair, set either `short_venue` or `long_venue` to
-`variational`, and choose one of those venues as `maker_venue`. The command
-starts the existing browser broker on 127.0.0.1:8768 and portfolio/fill feed on
-127.0.0.1:8766, then waits for the project's extension and portfolio stream.
-Use the existing browser extension setup. Another broker already occupying
-these ports must be stopped first. Fees for both chosen venues are required.
+The strategy runs until Ctrl+C, a pause, or an optional stop-loss. Ctrl+C
+cancels resting quotes, hedges any residual imbalance, and leaves the hedged
+position open; the next run resumes it.
+
+## Lifecycle (as in the original `auto` strategy)
+
+Every `tick_seconds` (0.5 s):
+
+1. Settle order updates: poll resting quotes and record new fills.
+2. Repair any hedge imbalance (see below).
+3. Trade:
+   * `taker_taker`: if the entry spread passes, send both legs as market orders
+     (`min(clip, remaining capacity)`); otherwise, if holding and the exit
+     spread passes, send both reduce-only exit legs (`min(clip, matched)`).
+   * `maker_taker`: keep an entry quote resting while capacity remains, and an
+     exit quote resting while a position is held. Both can rest at once.
+
+Entry and take-profit stay armed together: after a take profit the strategy
+re-enters whenever the entry spread reopens. There is no one-shot cycle and no
+completion state.
+
+### Spreads
+
+* Entry: `(short bid - long ask) / long ask * 10000` must be `>= entry_bps`.
+* Exit: `(short ask - long bid) / long bid * 10000` must be `<= take_profit_bps`.
+
+### Net-profit gate (kept from the earlier version; not in the original)
+
+Entry also requires the estimated net edge to reach `min_profit_bps` after a
+round trip of fees, the target exit spread, `funding_budget_bps` and
+`slippage_buffer_bps`. Exit also requires the net per unit to reach
+`min_profit_bps`, using the actual average entry costs of both legs. The fee
+budget uses the maker rate for the maker venue in `maker_taker` mode (quotes
+are post-only) and the taker rate everywhere else.
+
+### Maker quotes
+
+The quote rests at the worst maker price that still passes every gate against
+the taker venue's current price (the "boundary"), rounded to the venue tick.
+When the maker venue's best price already beats the boundary, it joins that
+best price instead. A sell is never priced below the best ask and a buy never
+above the best bid, so the post-only order cannot cross.
+
+The quote is re-placed when the desired price moves by at least one tick and
+`requote_interval_seconds` have passed since it was placed. Quotes are
+post-only (Aster `GTX`, Hyperliquid `Alo`). A post-only order that would
+have crossed is treated as harmless and re-quoted on a later tick.
+
+Variational cannot be the maker venue: its browser orders block until filled
+and cannot rest as a cancellable quote. Use it as the taker leg.
+
+### Hedge repair
+
+Exposure comes from this strategy's own recorded fills (the state file), as in
+the original. When the two legs differ, a market order repairs the gap:
+
+* after an entry fill, the smaller (lagging) leg is topped up;
+* after a take-profit fill, the larger leg is reduced (reduce-only). The
+  original always tops up the smaller leg, which after a maker exit fill would
+  reopen the leg that just closed. This implementation does not.
+
+If a top-up is below the venue minimums, the excess leg is trimmed instead.
+Failed repairs retry every `repair_cooldown_seconds`, and after three failures
+the strategy pauses.
+
+### Failures (as in the original)
+
+* A rejected submission backs off for `2 s * 2^min(4, failures)`, capped at
+  60 s; a rate-limit error waits at least 30 s.
+* If both entry legs are rejected for margin or balance, the strategy pauses.
+* After five consecutive failed submissions, the strategy pauses.
+* An order whose outcome cannot be resolved within `order_timeout_seconds`
+  pauses the strategy immediately. Unknown orders are never resubmitted.
+
+A pause cancels resting quotes and stops trading; open positions stay open.
+
+## Market data
+
+* Aster: `bookTicker` WebSocket, source timestamp from the event.
+* Hyperliquid: `l2Book` WebSocket, source timestamp from the book.
+* Variational: REST `metadata/stats` every `variational_poll_seconds`, priced
+  at the clip's USD size tier. It has no source timestamp, so freshness uses
+  local receipt time.
+
+A venue's quote is unusable when its connection is down, the quote is older
+than `market_freshness_seconds` (15 s), it is more than
+`future_tolerance_seconds` (2 s) in the future, or source-to-receipt lag
+exceeds `max_transport_lag_seconds` (3 s). Nothing triggers without fresh
+quotes from both venues. Disconnected streams reconnect with backoff.
+
+## Startup checks
+
+* Every remembered non-terminal order must be proven terminal. Quotes are
+  cancelled, and other orders are queried. An order left `PENDING_SUBMIT`
+  (crash during dispatch) or unresolvable blocks startup.
+* Order sizes: the first clip and any smaller final remainder must meet each
+  venue's minimum size, lot step and minimum notional (Aster `exchangeInfo`,
+  Hyperliquid `szDecimals` and a 10 USD minimum). Variational publishes no
+  such rules and is not validated.
+* Margin (live): each venue's available balance must cover the remaining
+  capacity's notional divided by that leg's leverage, plus 10%.
+* No other strategy may own either venue-symbol in the position registry.
 
 ## Configuration
 
-* `total_quantity` / `clip_quantity`: base-token units, not USD; both legs target
-  the same actual quantity. Symbols must represent the same underlying contract
-  units on both venues. An alias alone cannot validate economic equivalence.
-* `entry_bps`: `(short bid - long ask) / long ask * 10000`. For example 40 = 0.4%.
-* `take_profit_bps`: `(original short ask - original long bid) / long bid * 10000`.
-  This must be below the entry threshold. Entry and exit use different bid/ask sides.
-* `execution_method`: `maker_taker` or `taker_taker`. In maker mode, a fresh pair
-  quote gates every maker dispatch; the limit joins the passive top of the book.
-  A known terminal zero fill returns to monitoring. Partial maker fills hedge
-  only the confirmed quantity. Repricing is intentionally disabled within a
-  clip: after the configured timeout, the existing executor cancels/reconciles
-  it and the next strategy tick reevaluates both venues. GTC is not guaranteed
-  post-only. No economic veto is applied after a maker fill: its counterpart
-  must be hedged even if the spread has moved.
-* `fees`: fractions (`0.0005` = 0.05%), explicitly supplied per venue and role.
-  Because the adapters use GTC, this strategy reserves the worse maker/taker
-  rate for both sides of both opening and closing. It does not fetch account
-  fee tiers or fee rebates automatically.
-* `min_profit_bps`: minimum estimated net edge; not merely the gross spread.
-  Entry reserves a round trip, the target residual spread, funding budget and
-  slippage buffer. Exit uses the actual recorded entry average prices and
-  allocated opening fees, estimated close fees, and the same reserves.
-* `funding_budget_bps`: a conservative assumed net funding cost for the cycle.
-  It is not a feed of actual funding payments or a promise that funding is bounded.
-* `slippage_buffer_bps`: additional estimated cost allowance. Current public
-  quotes and this buffer are not a depth-based execution guarantee.
-* `max_hold_seconds` / `stop_loss_usd`: latch a risk exit; subsequent clips use
-  confirmed market orders with `reduce_only` regardless of the profit gate.
-  An unavailable quote, uncertain fill or failed reconciliation pauses instead
-  of blindly sending orders. These controls cannot guarantee a maximum loss.
-* `max_quote_age_seconds` / `max_request_seconds`: reject stale timestamps and
-  slow quote requests. Hyperliquid source timestamps are checked. Aster's
-  legacy `lastUpdateId` is not treated as a timestamp; Aster and Variational
-  currently use local receipt/request timing, which cannot prove the freshness
-  of upstream data. Variational quotes are refetched at the clip's estimated
-  USD size tier. Aster/Hyperliquid top-of-book reads do not model full depth.
+| Key | Meaning |
+|---|---|
+| `total_quantity` | Maximum matched position, base units |
+| `clip_quantity` | Size of each order/quote, base units |
+| `entry_bps`, `take_profit_bps` | Spread triggers; take profit must be below entry |
+| `execution_method` | `maker_taker` (needs `maker_venue`) or `taker_taker` |
+| `fees` | Fractions per venue and role (`0.0005` = 0.05%) |
+| `min_profit_bps`, `funding_budget_bps`, `slippage_buffer_bps` | Net-profit gate reserves |
+| `short_leverage`, `long_leverage` | Per-leg leverage (isolated margin) |
+| `tick_seconds` | Evaluation interval (0.5) |
+| `order_timeout_seconds` | Wait for a market order outcome (20) |
+| `requote_interval_seconds` | Minimum quote age before repricing (2) |
+| `market_freshness_seconds`, `future_tolerance_seconds`, `max_transport_lag_seconds` | Quote freshness (15 / 2 / 3) |
+| `repair_cooldown_seconds` | Wait between failed repair attempts (3) |
+| `variational_poll_seconds` | Variational quote polling (2) |
+| `stop_loss_usd` | Optional, default `null` (off), see below |
 
-Entry is allowed only if both the raw entry threshold and estimated net edge
-pass. Therefore an example threshold of 40 bps may still reject a 40 bps quote
-when fees and reserves would leave insufficient profit.
+Thresholds and sizes may change between runs. The symbol and venue pair are
+fixed per state file.
 
-## State, ownership and recovery
+### Optional stop-loss
 
-The command runs one lifecycle:
+The original has no risk exit, and neither does this one by default. When
+`stop_loss_usd` is set and the gross unrealized PnL of the matched position at
+current exit prices falls to `-stop_loss_usd`, the strategy cancels quotes,
+closes everything with reduce-only market clips regardless of spread, and
+stops permanently (`STOPPED`).
 
-```text
-WAITING -> HOLDING -> EXITING -> DONE
-                    errors -> PAUSED
-```
+The larger cross-venue risk is not the spread but one leg being liquidated on
+its own isolated-margin venue while the other leg profits. Keep leverage low,
+and keep the project's risk supervisor running: this strategy publishes both
+legs to the position registry for its margin top-ups.
 
-The first exit permanently latches: no more entry clips after that transition,
-even if the spread widens again. Start a deliberate new cycle with a new state
-file only after the old cycle has completed and its positions are flat.
+## State and recovery
 
-State defaults to `data/spread_strategies/<config hash>.<mode>.json`. `--state`
-can specify another file. Config changes and paper/live changes cannot reuse
-the same state. The saved record includes weighted actual entry averages,
-confirmed quantity, entry/exit fills, estimated trading fees, gross realized
-price PnL, the exit reason and any pending order intent. Estimated fees and
-funding reserves are not actual cashflow accounting.
+State defaults to `data/spread_strategies/<symbol+venues hash>.<mode>.json`.
+It holds the per-leg exposure and average cost, gross realized PnL, estimated
+fees and recent orders. An order is saved as `PENDING_SUBMIT` before dispatch.
+A per-symbol OS lock prevents two instances on one symbol.
 
-Before remote dispatch the intent is atomically persisted. If the process dies
-with a pending intent, the next run refuses automatic replay. A normal known
-HOLDING/EXITING state can resume only after remote positions and open orders
-reconcile. Corrupt state/registry also fails closed. A per-symbol OS lock
-prevents concurrent instances of this command using different state filenames.
+When paused (`status: PAUSED`, with `reason`):
 
-Live mode requires exclusive ownership of the selected venue-symbol positions:
-flat at initial startup, or exactly the saved short/long quantity on resume.
-It refuses unrelated positions, other registered strategies, and open orders.
-Variational's open-order check uses the extension's existing read-only browser
-table lookup, which depends on its active page/extension state. Do not manually
-trade the same venue-symbol pair while the bot runs. Existing legacy order
-commands do not participate in this new command's process lock.
+1. Inspect both venues' positions and open orders.
+2. For each unresolved order the bot names, settle it with the verified fill:
+   `--settle-order <id>=<qty>[@<avg price>]` (`<qty>` may be 0).
+3. Restart with `--resume`.
 
-Successful fills update the existing position registry under the new strategy
-ID, preserving margin-topup metadata. The existing risk supervisor may close
-positions independently; the next tick then pauses on a position mismatch.
-There is no cross-process transaction with that supervisor, so avoid running
-conflicting close workflows on the same position simultaneously.
-
-Ctrl+C between clips retains resumable state and does not close open positions.
-An interrupt during dispatch retains the pending intent and pauses. For PAUSED
-or pending states, inspect actual positions and all remote orders, settle/cancel
-unknown orders, and reconcile the state and registry manually before restarting.
-Do not delete state as a shortcut while positions or orders remain open.
-
-Missing actual fill averages also pauses, even when position deltas confirm
-fills. Submitted limit prices are never substituted for actual averages.
-Hyperliquid maker fills are queried by order ID from `userFills`; missing or
-truncated fill history prevents automatic accounting. Market retry fills are
-weighted across their confirmed quantities.
+The bot does not see manual trades on the venues. Do not trade the same
+venue-symbol by hand while it holds a position. If you must, flatten both
+venues and start a new state file.
 
 ## Verification
 
 ```powershell
-python -m pytest tests/test_spread_strategy.py tests/test_order_service.py tests/test_execution_engine.py tests/test_spread_monitor.py -q
+python -m pytest tests/test_spread_strategy.py -q
 ```
 
-Tests cover bid/ask direction, fees/funding reserves, partial fills, permanent
-exit latching, restart protection, durable intent, concurrent ticks, maker price
-guards, all three venue routes, the real existing clip executor with simulated
-adapters, reduce-only exits, unknown outcomes, and read-only reconciliation APIs.
-
-Read-only API references used for the additional adapter methods:
-
-* [Aster open orders](https://asterdex.github.io/aster-api-website/futures-v3/account&trades/#current-all-open-orders-user_data)
-* [Hyperliquid info endpoint: openOrders and userFills](https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/info-endpoint)
+Tests cover spread and boundary math, Hyperliquid price rules, size checks,
+order-status parsing, feed freshness, the taker cycle with re-entry, quote
+placement, requoting, partial fills, direction-aware hedge repair, backoff and
+pause rules, unknown-outcome handling, restart recovery, manual settlement,
+margin preflight, Variational settlement and registry publication. Live order
+submission against the real venues has not been exercised by the automated
+tests.

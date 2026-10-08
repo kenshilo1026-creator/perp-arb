@@ -1,431 +1,531 @@
-import asyncio
-from dataclasses import replace
-from decimal import Decimal as D
 import json
-from pathlib import Path
 import tempfile
-import time
 import unittest
-from unittest.mock import AsyncMock, patch
+from decimal import Decimal as D
+from pathlib import Path
 
-from hydra_basis.spread_strategy.core import (
-    Config, Quote, State, StateStore, Strategy, entry_allowed, entry_net_bps,
-    executable_prices, projected_exit_net, spread_bps,
-)
-from hydra_basis.spread_strategy.broker import (
-    LiveBroker, PaperBroker, GuardedMaker, QuoteSource, actual_average, confirmed_average,
-)
 from hydra_basis.risk_management.registry import PositionRegistry
+from hydra_basis.spread_strategy.broker import (
+    PaperRejection, PaperVenue, definitive_rejection, parse_status, submit_market, sync_registry,
+)
+from hydra_basis.spread_strategy.core import (
+    Config, Leg, Order, State, StateStore, entry_allowed, entry_ratio_required, exit_allowed,
+    maker_boundary, spread_bps,
+)
+from hydra_basis.spread_strategy.engine import Engine
+from hydra_basis.spread_strategy.feeds import MarketFeed
+from hydra_basis.spread_strategy.instruments import Instrument
+
+ZERO_FEES = {v: {"maker": D("0"), "taker": D("0")} for v in ("aster", "hyperliquid", "variational")}
+INSTRUMENTS = {
+    "aster": Instrument("aster", tick_size=D("0.01"), lot_size=D("0.001"), min_size=D("0.001"),
+                        min_notional=D("5")),
+    "hyperliquid": Instrument("hyperliquid", lot_size=D("0.0001"), min_size=D("0.0001"),
+                              min_notional=D("10"), sz_decimals=4),
+    "variational": Instrument("variational"),
+}
 
 
 def config(**kwargs):
     defaults = dict(symbol="ETH", short_venue="aster", long_venue="hyperliquid",
-                    maker_venue="aster", total_quantity=D("2"), clip_quantity=D("1"),
-                    entry_bps=D("40"), take_profit_bps=D("10"),
-                    fees={v: {"maker": D("0"), "taker": D("0")} for v in ("aster", "hyperliquid")},
-                    slippage_buffer_bps=D("0"), funding_budget_bps=D("0"))
+                    execution_method="taker_taker", total_quantity=D("0.02"), clip_quantity=D("0.01"),
+                    entry_bps=D("40"), take_profit_bps=D("10"), fees=ZERO_FEES,
+                    min_profit_bps=D("0"), slippage_buffer_bps=D("0"), funding_budget_bps=D("0"))
     return Config(**(defaults | kwargs))
 
 
-class Source:
+class Clock:
     def __init__(self):
-        self.values = {"aster": ("101", "101.1"), "hyperliquid": ("99.9", "100")}
-        self.quantities = []
+        self.t = 1_700_000_000_000
 
-    async def pair(self, quantity):
-        self.quantities.append(quantity)
-        return {venue: Quote(D(bid), D(ask), int(time.time() * 1000))
-                for venue, (bid, ask) in self.values.items()}
+    def __call__(self):
+        return self.t
+
+    def advance(self, ms):
+        self.t += ms
+
+
+class Harness:
+    def __init__(self, tmp, venues=None, live=False, **kwargs):
+        self.config = config(**kwargs)
+        self.clock = Clock()
+        self.feed = MarketFeed(self.config, clock=self.clock)
+        self.store = StateStore(Path(tmp) / "state.json")
+        self.state = self.store.load(self.config, live=live)
+        self.adapters = venues or {v: PaperVenue(v, self.feed) for v in self.config.venues}
+        self.events = []
+        self.exposures = []
+        self.engine = Engine(self.config, self.state, self.store, self.feed, self.adapters, INSTRUMENTS,
+                             live=live, on_exposure=lambda s: self.exposures.append(s.short.quantity),
+                             clock=self.clock, log=self.events.append)
+
+    def books(self, aster, hyperliquid):
+        for venue, (bid, ask) in (("aster", aster), ("hyperliquid", hyperliquid)):
+            self.feed.update(venue, D(bid), D(ask), source_ms=self.clock(), received_ms=self.clock())
+
+    def wide(self):
+        self.books(("2010", "2010.5"), ("1999.5", "2000"))
 
     def converged(self):
-        self.values = {"aster": ("100", "100.05"), "hyperliquid": ("100", "100.01")}
+        self.books(("2000", "2000.5"), ("2000", "2000.5"))
 
+    def legs(self):
+        return D(self.state.short.quantity), D(self.state.long.quantity)
 
-class Broker(PaperBroker):
-    def __init__(self, config, source):
-        super().__init__(config, source)
-        self.calls = []
-        self.fraction = D("1")
-        self.fail = False
-        self.skip = False
-
-    async def execute(self, intent, quantity, state, force=False):
-        self.calls.append((intent, quantity, force))
-        if self.fail:
-            raise RuntimeError("unknown hedge outcome")
-        if self.skip:
-            return {"ok": True, "skipped": True}
-        return await super().execute(intent, quantity * self.fraction, state, force)
+    def events_named(self, name):
+        return [event for event in self.events if event["event"] == name]
 
 
 class CoreTests(unittest.TestCase):
-    def test_bid_ask_direction_and_percent_units(self):
-        c = config()
-        quotes = {"aster": Quote(D("101"), D("102"), 1),
-                  "hyperliquid": Quote(D("99"), D("100"), 1)}
-        self.assertEqual(executable_prices(c, quotes, "entry"), (D("101"), D("100")))
-        self.assertEqual(executable_prices(c, quotes, "exit"), (D("102"), D("99")))
+    def test_spread_direction_and_units(self):
         self.assertEqual(spread_bps(D("101"), D("100")), D("100"))
+        c = config()
+        self.assertTrue(entry_allowed(c, D("100.4"), D("100")))
+        self.assertFalse(entry_allowed(c, D("100.39"), D("100")))
 
-    def test_fees_and_funding_prevent_gross_only_entry(self):
-        c = config(fees={v: {"maker": D("0"), "taker": D("0.001")} for v in config().venues},
+    def test_net_gate_raises_required_entry_ratio(self):
+        c = config(fees={v: {"maker": D("0"), "taker": D("0.001")} for v in ("aster", "hyperliquid")},
                    funding_budget_bps=D("5"))
+        self.assertGreater(entry_ratio_required(c), D("1.004"))
         self.assertFalse(entry_allowed(c, D("100.4"), D("100")))
-        self.assertLess(entry_net_bps(c, D("100.4"), D("100")), 0)
 
-    def test_validate_nonfinite_same_venue_and_fee_units(self):
-        for kwargs in ({"total_quantity": D("NaN")}, {"long_venue": "aster"},
-                       {"take_profit_bps": D("40")}, {"execution_method": "bad"},
-                       {"fees": {v: {"maker": D("1"), "taker": D("0")} for v in config().venues}}):
+    def test_maker_boundary_for_both_maker_legs(self):
+        flat = Leg()
+        short_maker = config(execution_method="maker_taker", maker_venue="aster")
+        self.assertEqual(maker_boundary(short_maker, "entry", D("2000"), flat, flat), D("2008"))
+        long_maker = config(execution_method="maker_taker", maker_venue="hyperliquid")
+        self.assertEqual(maker_boundary(long_maker, "entry", D("2008"), flat, flat), D("2000"))
+
+    def test_exit_boundary_uses_take_profit_and_entry_costs(self):
+        c = config(execution_method="maker_taker", maker_venue="aster")
+        short, long = Leg("-1", "2008"), Leg("1", "2000")
+        # Take profit (10 bps over the long bid) is stricter than break-even (8 USD of edge).
+        self.assertEqual(maker_boundary(c, "exit", D("1999.5"), short, long), D("1999.5") * D("1.001"))
+        self.assertTrue(exit_allowed(c, short, long, D("2001"), D("1999.5")))
+        losing = Leg("-1", "1990")
+        self.assertFalse(exit_allowed(c, losing, long, D("2001"), D("1999.5")))
+
+    def test_leg_average_cost_and_realized(self):
+        leg = Leg()
+        leg.apply(D("-1"), D("100"))
+        leg.apply(D("-1"), D("102"))
+        self.assertEqual(D(leg.average), D("101"))
+        leg.apply(D("1"), D("99"))
+        self.assertEqual(D(leg.realized), D("2"))
+        self.assertEqual(D(leg.quantity), D("-1"))
+
+    def test_config_validation(self):
+        for kwargs in ({"total_quantity": D("NaN")}, {"long_venue": "aster"}, {"take_profit_bps": D("40")},
+                       {"execution_method": "maker_taker", "maker_venue": None},
+                       {"execution_method": "maker_taker", "maker_venue": "variational",
+                        "long_venue": "variational"},
+                       {"short_leverage": 0}, {"stop_loss_usd": D("0")}):
             with self.assertRaises(ValueError):
                 config(**kwargs)
 
-    def test_reject_stale_future_invalid_or_slow_quotes(self):
-        c = config()
-        for quote in (Quote(D("2"), D("1"), 10000), Quote(D("1"), D("2"), 0),
-                      Quote(D("1"), D("2"), 20000), Quote(D("1"), D("2"), 10000, 0),
-                      Quote(D("1"), D("2"), 10000, None, 4)):
+    def test_load_rejects_removed_keys_and_maps_legacy_leverage(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "c.json"
+            payload = json.loads(Path("configs/spread_strategy.example.json").read_text())
+            path.write_text(json.dumps(payload | {"leverage": 3}))
+            loaded = Config.load(path)
+            self.assertEqual(loaded.short_leverage, 1)  # explicit per-leg values win
+            path.write_text(json.dumps(payload | {"max_hold_seconds": 10}))
             with self.assertRaises(ValueError):
-                quote.validate(now_ms=10000, config=c)
-
-    def test_accounting_uses_entry_prices_and_allocates_opening_fees(self):
-        c = config(funding_budget_bps=D("10"))
-        s = State(c.fingerprint(), "paper", "test", quantity="2", short_average="101",
-                  long_average="100", entry_fees_remaining="0.4")
-        self.assertEqual(projected_exit_net(c, s, D("100"), D("100"), D("1")), D("0.7"))
-
-    def test_actual_average_never_uses_limit_price(self):
-        self.assertIsNone(actual_average({"raw": {"price": "123"}}))
-        self.assertEqual(actual_average({"raw": {"avgPx": "100"}}), D("100"))
+                Config.load(path)
 
 
-class StrategyTests(unittest.IsolatedAsyncioTestCase):
-    def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self.tmp.cleanup)
-        self.store = StateStore(Path(self.tmp.name) / "state.json")
-        self.c = config()
-        self.source = Source()
-        self.broker = Broker(self.c, self.source)
-        self.engine = Strategy(self.c, self.broker, self.store, live=False)
+class InstrumentTests(unittest.TestCase):
+    def test_hyperliquid_price_rules(self):
+        hl = INSTRUMENTS["hyperliquid"]
+        self.assertEqual(hl.round_price(D("2345.678"), "down"), D("2345.6"))
+        self.assertEqual(hl.round_price(D("2345.61"), "up"), D("2345.7"))
+        self.assertEqual(hl.round_price(D("123456.7"), "down"), D("123456"))
 
-    async def test_complete_single_cycle_and_no_reentry(self):
-        await self.engine.step()
-        await self.engine.step()
-        self.assertEqual(self.engine.state.quantity, "2")
-        self.source.converged()
-        await self.engine.step()
-        self.assertEqual(self.engine.state.phase, "EXITING")
-        await self.engine.step()
-        self.assertEqual(self.engine.state.phase, "DONE")
-        self.source.values["aster"] = ("102", "103")
-        await self.engine.step()
-        self.assertEqual([call[0] for call in self.broker.calls], ["entry", "entry", "exit", "exit"])
-
-    async def test_partial_fill_reduces_remaining_capacity(self):
-        self.broker.fraction = D("0.4")
-        await self.engine.step()
-        self.assertEqual(D(self.engine.state.quantity), D("0.4"))
-        self.broker.fraction = D("1")
-        await self.engine.step()
-        await self.engine.step()
-        self.assertEqual(self.broker.calls[-1][1], D("0.6"))
-        self.assertEqual(D(self.engine.state.quantity), D("2"))
-
-    async def test_restart_preserves_entries_and_exit_latch(self):
-        await self.engine.step()
-        self.source.converged()
-        await self.engine.step()
-        resumed = Strategy(self.c, self.broker, self.store, live=False)
-        self.assertEqual(resumed.state.phase, "DONE")
-        await resumed.step()
-        self.assertEqual(len(self.broker.calls), 2)
-
-    async def test_restart_halfway_through_exit_never_reopens(self):
-        await self.engine.step()
-        await self.engine.step()
-        self.source.converged()
-        await self.engine.step()
-        resumed = Strategy(self.c, self.broker, self.store, live=False)
-        self.assertEqual(resumed.state.phase, "EXITING")
-        self.source.values = {"aster": ("102", "103"), "hyperliquid": ("99", "100")}
-        await resumed.step()
-        self.assertEqual(len(self.broker.calls), 3)
-        self.assertEqual(resumed.state.phase, "EXITING")
-
-    async def test_unknown_hedge_pauses_and_pending_cannot_replay(self):
-        self.broker.fail = True
-        with self.assertRaisesRegex(RuntimeError, "unknown hedge"):
-            await self.engine.step()
-        self.assertEqual(self.engine.state.phase, "PAUSED")
-        self.assertIsNotNone(self.engine.state.pending)
-        with self.assertRaisesRegex(RuntimeError, "automatic replay refused"):
-            Strategy(self.c, self.broker, self.store, live=False)
-
-    async def test_persist_intent_before_dispatch(self):
-        original = self.broker.execute
-        async def inspect_intent(*args):
-            payload = json.loads(self.store.path.read_text())
-            self.assertEqual(payload["pending"]["intent"], "entry")
-            self.assertEqual(payload["quantity"], "0")
-            return await original(*args)
-        self.broker.execute = inspect_intent
-        await self.engine.step()
-        self.assertIsNone(self.engine.state.pending)
-
-    async def test_quote_changes_before_submission_skip_without_capacity_loss(self):
-        self.broker.skip = True
-        await self.engine.step()
-        self.assertEqual(self.engine.state.quantity, "0")
-        self.assertEqual(self.engine.state.phase, "WAITING")
-        self.assertIsNone(self.engine.state.pending)
-
-    async def test_stop_loss_closes_with_force_and_cannot_add(self):
-        self.c = replace(self.c, stop_loss_usd=D("1"))
-        self.broker.config = self.c
-        self.engine = Strategy(self.c, self.broker, self.store, live=False)
-        await self.engine.step()
-        self.source.values = {"aster": ("103", "104"), "hyperliquid": ("99", "100")}
-        await self.engine.step()
-        self.assertEqual(self.broker.calls[-1], ("exit", D("1"), True))
-        self.assertEqual(self.engine.state.exit_reason, "stop_loss")
-
-    async def test_max_hold_forces_exit(self):
-        await self.engine.step()
-        self.engine.state.first_entry_ms = int(time.time() * 1000) - 3600001
-        await self.engine.step()
-        self.assertEqual(self.engine.state.exit_reason, "max_hold")
-        self.assertTrue(self.broker.calls[-1][2])
-
-    async def test_concurrent_steps_do_not_double_dispatch(self):
-        c = replace(self.c, total_quantity=D("1"))
-        self.broker.config = c
-        engine = Strategy(c, self.broker, self.store, live=False)
-        await asyncio.gather(engine.step(), engine.step())
-        self.assertEqual(len(self.broker.calls), 1)
-
-    async def test_corrupt_state_and_mode_change_are_rejected(self):
-        await self.engine.step()
-        with self.assertRaisesRegex(ValueError, "mode mismatch"):
-            Strategy(self.c, self.broker, self.store, live=True)
-        self.store.path.write_text("{")
-        with self.assertRaises(json.JSONDecodeError):
-            Strategy(self.c, self.broker, self.store, live=False)
-
-    async def test_cost_negative_exit_waits_despite_price_threshold(self):
-        await self.engine.step()
-        # Both venues move; the spread meets the threshold but the actual paired
-        # PnL is negative. Entry/exit bps difference alone is insufficient.
-        self.source.values = {"aster": ("2000", "2001.5"), "hyperliquid": ("2000", "2002")}
-        await self.engine.step()
-        self.assertEqual(self.engine.state.phase, "HOLDING")
-        self.assertEqual(len(self.broker.calls), 1)
+    def test_size_errors(self):
+        aster = INSTRUMENTS["aster"]
+        self.assertIsNone(aster.size_error(D("0.01"), D("2000")))
+        self.assertIn("minimum_size", aster.size_error(D("0.0001"), D("2000")))
+        self.assertIn("lot", aster.size_error(D("0.0105"), D("2000")))
+        self.assertIn("notional", aster.size_error(D("0.002"), D("2000")))
 
 
-class Adapter:
-    """Deterministic exchange simulator used with the REAL clip executor."""
-    def __init__(self, source, venue):
-        self.source, self.venue = source, venue
-        self.pos = D("0")
-        self.orders = []
-        self.skip_margin_setup = False
-        self.dispatches = []
-        self.last_price = None
-        self.last_qty = None
-        self.maker_fraction = D("1")
+class StatusTests(unittest.TestCase):
+    def test_parse_venue_payloads(self):
+        hl = parse_status({"status": "FILLED", "terminal": True, "filled_quantity": "0.5"})
+        self.assertEqual((hl.filled, hl.terminal, hl.state), (D("0.5"), True, "FILLED"))
+        aster_place = parse_status({"ok": True, "order_id": 1, "raw": {"status": "NEW", "executedQty": "0"}})
+        self.assertEqual((aster_place.terminal, aster_place.state), (False, "OPEN"))
+        aster_cancel = parse_status({"ok": True, "raw": {"status": "CANCELED", "executedQty": "0.2",
+                                                         "avgPrice": "10"}})
+        self.assertEqual((aster_cancel.filled, aster_cancel.average, aster_cancel.state),
+                         (D("0.2"), D("10"), "CANCELED"))
+        variational = parse_status({"type": "ORDER_RESULT", "ok": True, "filled": True, "terminal": False,
+                                    "status": "FILLED", "details": {"fill": {"filledBaseAmount": "0.3"}}})
+        self.assertEqual((variational.filled, variational.terminal), (D("0.3"), True))
+        hl_alo = parse_status({"ok": True, "order_id": 5, "raw": {"status": "ok", "response": {}}})
+        self.assertEqual(hl_alo.state, "OPEN")
 
-    async def get_open_position(self, **kwargs):
-        return None if not self.pos else {"side": "LONG" if self.pos > 0 else "SHORT",
-                                         "quantity": str(abs(self.pos))}
+    def test_definitive_rejection(self):
+        self.assertTrue(definitive_rejection(RuntimeError("aster order 400: {'code': -2019}"), None))
+        self.assertTrue(definitive_rejection(RuntimeError("hyperliquid order error: Insufficient margin"), None))
+        self.assertFalse(definitive_rejection(RuntimeError("aster order 503: busy"), None))
+        self.assertFalse(definitive_rejection(RuntimeError("x"), {"type": "ORDER_RESULT", "ok": False,
+                                                                   "details": {"postSubmitAmbiguous": True}}))
 
-    async def list_open_orders(self, **kwargs):
-        return self.orders
 
-    async def place_limit_order(self, **kwargs):
-        return self.fill({**kwargs, "amount": str(D(kwargs["amount"]) * self.maker_fraction)}, D(kwargs["price"]))
+class FeedTests(unittest.TestCase):
+    def test_freshness_rules(self):
+        c, clock = config(), Clock()
+        feed = MarketFeed(c, clock=clock)
+        self.assertIsNone(feed.fresh("aster"))
+        feed.update("aster", D("1"), D("2"), source_ms=clock(), received_ms=clock())
+        self.assertIsNotNone(feed.fresh("aster"))
+        clock.advance(15_001)
+        self.assertIsNone(feed.fresh("aster"), "stale")
+        feed.update("aster", D("1"), D("2"), source_ms=clock() + 2_001, received_ms=clock())
+        self.assertIsNone(feed.fresh("aster"), "future")
+        feed.update("aster", D("1"), D("2"), source_ms=clock() - 3_001, received_ms=clock())
+        self.assertIsNone(feed.fresh("aster"), "transport lag")
+        feed.update("aster", D("1"), D("2"), source_ms=clock(), received_ms=clock())
+        feed.set_health("aster", False)
+        self.assertIsNone(feed.fresh("aster"), "disconnected")
+        feed.update("aster", D("2"), D("1"), source_ms=clock(), received_ms=clock())
+        self.assertIsNone(feed.fresh("aster"), "crossed")
+
+
+class RejectingVenue(PaperVenue):
+    def __init__(self, venue, feed, message="insufficient margin"):
+        super().__init__(venue, feed)
+        self.message = message
+        self.market_calls = 0
 
     async def place_market_order(self, **kwargs):
-        bid, ask = self.source.values[self.venue]
-        return self.fill(kwargs, D(ask if kwargs["side"] == "BUY" else bid))
-
-    def fill(self, kwargs, price):
-        qty = D(kwargs["amount"])
-        self.pos += qty * (1 if kwargs["side"] == "BUY" else -1)
-        self.last_price, self.last_qty = price, qty
-        self.dispatches.append(kwargs)
-        return {"ok": True, "order_id": 1, "terminal": True, "status": "FILLED",
-                "filled_quantity": str(qty), "avg_price": str(price)}
-
-    async def wait_for_order_fill(self, **kwargs):
-        if self.last_qty == 0:
-            raise RuntimeError("maker fill timeout")
-        return {"ok": True, "filled_quantity": str(self.last_qty), "avg_price": str(self.last_price)}
-
-    async def cancel_order(self, **kwargs):
-        return await self.get_order_execution()
-
-    async def get_order_execution(self, **kwargs):
-        return {"ok": True, "terminal": True, "status": "CANCELED",
-                "filled_quantity": str(self.last_qty), "avg_price": str(self.last_price)}
+        self.market_calls += 1
+        raise PaperRejection(self.message)
 
 
-class LiveIntegrationTests(unittest.IsolatedAsyncioTestCase):
-    def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self.tmp.cleanup)
-        self.c = config(total_quantity=D("1"))
-        self.source = Source()
-        self.adapters = {v: Adapter(self.source, v) for v in self.c.venues}
-        self.registry_path = Path(self.tmp.name) / "registry.json"
-        self.broker = LiveBroker(self.c, self.source, self.adapters, self.registry_path)
-        self.store = StateStore(Path(self.tmp.name) / "state.json")
-        self.engine = Strategy(self.c, self.broker, self.store, live=True)
+class TakerTakerTests(unittest.IsolatedAsyncioTestCase):
+    async def test_cycles_entry_exit_and_reenters(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            h = Harness(tmp)
+            h.wide()
+            await h.engine.start()
+            await h.engine.step()
+            await h.engine.step()
+            self.assertEqual(h.legs(), (D("-0.02"), D("0.02")))
+            await h.engine.step()  # at capacity: no further entry
+            self.assertEqual(h.legs(), (D("-0.02"), D("0.02")))
+            h.converged()
+            await h.engine.step()
+            await h.engine.step()
+            self.assertEqual(h.legs(), (D("0"), D("0")))
+            self.assertGreater(D(h.state.short.realized) + D(h.state.long.realized), 0)
+            h.wide()
+            await h.engine.step()  # no exit latch: the strategy re-enters
+            self.assertEqual(h.legs(), (D("-0.01"), D("0.01")))
+            self.assertEqual(h.state.status, "RUNNING")
 
-    async def test_real_executor_opens_hedges_and_reduce_only_closes(self):
-        await self.engine.step()
-        self.assertEqual(self.adapters["aster"].pos, D("-1"))
-        self.assertEqual(self.adapters["hyperliquid"].pos, D("1"))
-        legs = PositionRegistry.load(self.registry_path).legs_for_strategy(self.engine.state.strategy_id)
-        self.assertEqual(len(legs), 2)
-        self.assertTrue(all(leg.status == "open" for leg in legs))
-        self.source.converged()
-        await self.engine.step()
-        self.assertEqual(self.engine.state.phase, "DONE")
-        for adapter in self.adapters.values():
-            self.assertEqual(adapter.pos, D("0"))
-            self.assertTrue(adapter.dispatches[-1]["reduce_only"])
-        self.assertTrue(all(leg.status == "closed" for leg in
-                            PositionRegistry.load(self.registry_path).legs_for_strategy(self.engine.state.strategy_id)))
+    async def test_stale_market_does_not_trade(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            h = Harness(tmp)
+            h.wide()
+            await h.engine.start()
+            h.clock.advance(16_000)
+            await h.engine.step()
+            self.assertEqual(h.legs(), (D("0"), D("0")))
 
-    async def test_foreign_positions_or_open_orders_block_dispatch(self):
-        for mismatch in ("position", "orders"):
-            self.adapters["aster"].pos = D("1") if mismatch == "position" else D("0")
-            self.adapters["aster"].orders = [{"order_id": 99}] if mismatch == "orders" else []
+    async def test_one_leg_rejection_backs_off_then_repairs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            h = Harness(tmp)
+            hl = RejectingVenue("hyperliquid", h.feed)
+            h.adapters["hyperliquid"] = hl
+            h.wide()
+            await h.engine.start()
+            await h.engine.step()
+            self.assertEqual(h.legs(), (D("-0.01"), D("0")))
+            self.assertEqual(h.engine.failure_count, 1)
+            self.assertEqual(h.engine.cooldown_until, h.clock() + 4_000)
+            self.assertEqual(h.state.status, "RUNNING", "one accepted leg: margin rejection does not pause")
+            # Hedge repair retries the lagging leg, then pauses after three attempts.
+            h.adapters["hyperliquid"] = hl
+            for _ in range(3):
+                h.clock.advance(3_001)
+                h.wide()
+                await h.engine.step()
+            h.clock.advance(3_001)
+            h.wide()
+            await h.engine.step()
+            self.assertEqual(h.state.status, "PAUSED")
+            self.assertIn("after 3 attempts", h.state.reason)
+
+    async def test_one_leg_exit_rejection_closes_the_other_leg(self):
+        class ExitRejecting(PaperVenue):
+            reject = False
+
+            async def place_market_order(self, **kwargs):
+                if self.reject and kwargs.get("reduce_only"):
+                    self.reject = False
+                    raise PaperRejection("venue busy")
+                return await super().place_market_order(**kwargs)
+        with tempfile.TemporaryDirectory() as tmp:
+            h = Harness(tmp, total_quantity=D("0.01"))
+            hl = ExitRejecting("hyperliquid", h.feed)
+            h.adapters["hyperliquid"] = hl
+            h.wide()
+            await h.engine.start()
+            await h.engine.step()
+            hl.reject = True
+            h.converged()
+            await h.engine.step()  # short closes, long exit rejected
+            self.assertEqual(h.legs(), (D("0"), D("0.01")))
+            h.clock.advance(4_001)
+            h.converged()
+            await h.engine.step()
+            self.assertEqual(h.legs(), (D("0"), D("0")))
+            self.assertEqual(h.state.orders[-1].side, "SELL")
+
+    async def test_entry_margin_rejection_on_both_legs_pauses(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            h = Harness(tmp)
+            h.wide()
+            for venue in h.config.venues:
+                h.adapters[venue] = RejectingVenue(venue, h.feed)
+            await h.engine.start()
+            await h.engine.step()
+            self.assertEqual(h.state.status, "PAUSED")
+            self.assertIn("insufficient margin", h.state.reason)
+
+    async def test_five_consecutive_failures_pause_with_exponential_backoff(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            h = Harness(tmp)
+            h.wide()
+            for venue in h.config.venues:
+                h.adapters[venue] = RejectingVenue(venue, h.feed, message="venue busy")
+            await h.engine.start()
+            waits = []
+            for _ in range(5):
+                before = h.clock()
+                await h.engine.step()
+                waits.append(h.engine.cooldown_until - before)
+                h.clock.advance(61_000)
+                h.wide()
+            self.assertEqual(waits, [4_000, 8_000, 16_000, 32_000, 32_000])
+            self.assertEqual(h.state.status, "PAUSED")
+
+    async def test_unknown_outcome_pauses(self):
+        class Silent(PaperVenue):
+            async def place_market_order(self, **kwargs):
+                raise RuntimeError("connection reset")
+        with tempfile.TemporaryDirectory() as tmp:
+            h = Harness(tmp, order_timeout_seconds=0.01)
+            h.adapters["aster"] = Silent("aster", h.feed)
+            h.wide()
+            await h.engine.start()
+            await h.engine.step()
+            self.assertEqual(h.state.status, "PAUSED")
+            self.assertTrue(any(o.state == "UNKNOWN" for o in h.state.orders))
             with self.assertRaises(RuntimeError):
-                await self.broker.reconcile(self.engine.state)
-        self.assertFalse(self.adapters["aster"].dispatches)
+                await Harness(tmp).engine.start(resume=True)  # unknown order blocks restart
+            restarted = Harness(tmp)
+            restarted.wide()
+            unknown = next(o for o in restarted.state.orders if o.state == "UNKNOWN")
+            restarted.engine.settle_order(unknown.id, D("0.01"), D("2010"))
+            await restarted.engine.start(resume=True)
+            self.assertEqual(restarted.state.status, "RUNNING")
+            self.assertEqual(restarted.legs(), (D("-0.01"), D("0.01")))
 
-    async def test_guard_refuses_maker_if_spread_disappears(self):
-        self.source.converged()
-        maker = GuardedMaker(self.adapters["aster"], self.broker, "entry", D("1"), self.engine.state, False)
-        with self.assertRaisesRegex(RuntimeError, "spread changed"):
-            await maker.place_limit_order(symbol="ETH", side="SELL", amount="1", price="101", clip_usd=100)
-        self.assertFalse(self.adapters["aster"].dispatches)
+    async def test_optional_stop_loss_closes_and_stops(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            h = Harness(tmp, stop_loss_usd=D("1"))
+            h.wide()
+            await h.engine.start()
+            await h.engine.step()
+            await h.engine.step()
+            h.books(("2100", "2100.5"), ("1999.5", "2000"))  # spread blows out: -1.8 USD
+            await h.engine.step()
+            self.assertEqual(h.state.status, "STOPPING")
+            for _ in range(3):
+                await h.engine.step()
+            self.assertEqual(h.state.status, "STOPPED")
+            self.assertEqual(h.legs(), (D("0"), D("0")))
 
-    async def test_taker_taker_uses_confirmed_market_fills(self):
-        c = replace(self.c, execution_method="taker_taker")
-        self.broker.config = c
-        engine = Strategy(c, self.broker, self.store, live=True)
-        await engine.step()
-        self.assertEqual(engine.state.quantity, "1")
-        self.source.converged()
-        await engine.step()
-        self.assertEqual(engine.state.phase, "DONE")
-        self.assertEqual(engine.state.short_average, "101")
 
-    async def test_forced_exit_uses_reduce_only_market_orders(self):
-        await self.engine.step()
-        self.engine.state.first_entry_ms = int(time.time() * 1000) - 3600001
-        await self.engine.step()
-        self.assertEqual(self.engine.state.phase, "DONE")
-        self.assertEqual(self.engine.state.exit_reason, "max_hold")
-        self.assertTrue(all(adapter.dispatches[-1]["reduce_only"] for adapter in self.adapters.values()))
+class MakerTakerTests(unittest.IsolatedAsyncioTestCase):
+    def harness(self, tmp, **kwargs):
+        return Harness(tmp, execution_method="maker_taker", maker_venue="aster", **kwargs)
 
-    async def test_partial_hedge_prices_are_weighted(self):
-        payload = {"attempts": [
-            {"result": {"terminal": True, "filled_quantity": "0.4", "avg_price": "100"}},
-            {"result": {"terminal": True, "filled_quantity": "0.6", "avg_price": "102"}}]}
-        self.assertEqual(await confirmed_average(object(), "ETH", payload, D("1")), D("101.2"))
+    async def test_quote_rests_at_boundary_then_fills_and_hedges(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            h = self.harness(tmp)
+            h.books(("2000", "2000.5"), ("1999.5", "2000"))
+            await h.engine.start()
+            await h.engine.step()
+            quote = h.engine.quotes()["entry"]
+            # Spread not reached at the top of book: rest at long ask * 1.004.
+            self.assertEqual((quote.side, D(quote.price)), ("SELL", D("2008")))
+            self.assertEqual(h.legs(), (D("0"), D("0")))
+            h.books(("2008.5", "2009"), ("1999.5", "2000"))  # buyers reach the quote
+            await h.engine.step()
+            self.assertEqual(h.legs(), (D("-0.01"), D("0.01")))
+            repair = [o for o in h.state.orders if o.purpose == "repair"]
+            self.assertEqual((repair[0].venue, repair[0].side), ("hyperliquid", "BUY"))
 
-    async def test_real_executor_partial_maker_hedges_only_actual_fill(self):
-        self.adapters["aster"].maker_fraction = D("0.4")
-        await self.engine.step()
-        self.assertEqual(D(self.engine.state.quantity), D("0.4"))
-        self.assertEqual(self.adapters["hyperliquid"].dispatches[0]["amount"], "0.4")
-        self.assertEqual(self.adapters["aster"].pos + self.adapters["hyperliquid"].pos, 0)
+    async def test_joins_top_of_book_when_spread_already_satisfied(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            h = self.harness(tmp)
+            h.books(("2010", "2010.5"), ("1999.5", "2000"))
+            await h.engine.start()
+            await h.engine.step()
+            self.assertEqual(D(h.engine.quotes()["entry"].price), D("2010.5"))
 
-    async def test_terminal_unfilled_maker_returns_to_monitoring(self):
-        self.adapters["aster"].maker_fraction = D("0")
-        await self.engine.step()
-        self.assertEqual(self.engine.state.phase, "WAITING")
-        self.assertIsNone(self.engine.state.pending)
-        self.assertFalse(self.adapters["hyperliquid"].dispatches)
+    async def test_requotes_on_drift_only_after_interval(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            h = self.harness(tmp)
+            h.books(("2000", "2000.5"), ("1999.5", "2000"))
+            await h.engine.start()
+            await h.engine.step()
+            first = h.engine.quotes()["entry"]
+            h.clock.advance(1_000)
+            h.books(("2000", "2000.5"), ("2000.5", "2001"))
+            await h.engine.step()
+            self.assertIs(h.engine.quotes()["entry"], first, "inside the requote interval")
+            h.clock.advance(1_001)
+            h.books(("2000", "2000.5"), ("2000.5", "2001"))
+            await h.engine.step()
+            second = h.engine.quotes()["entry"]
+            self.assertEqual(first.state, "CANCELED")
+            self.assertEqual(D(second.price), D("2009.01"))  # 2001 * 1.004 rounded up to tick
 
-    async def test_variational_pair_routing_uses_same_executor(self):
-        for short, long, maker in (("variational", "aster", "variational"),
-                                   ("aster", "variational", "aster"),
-                                   ("hyperliquid", "variational", "variational")):
-            source = Source()
-            source.values = {short: ("101", "101.1"), long: ("99.9", "100")}
-            c = config(short_venue=short, long_venue=long, maker_venue=maker,
-                       total_quantity=D("1"),
-                       fees={v: {"maker": D("0"), "taker": D("0")} for v in (short, long)})
-            adapters = {v: Adapter(source, v) for v in c.venues}
-            broker = LiveBroker(c, source, adapters, Path(self.tmp.name) / f"{short}-{long}.registry.json")
-            engine = Strategy(c, broker, StateStore(Path(self.tmp.name) / f"{short}-{long}.json"), live=True)
-            await engine.step()
-            self.assertEqual(adapters[short].pos, D("-1"))
-            self.assertEqual(adapters[long].pos, D("1"))
+    async def test_exit_quote_after_entry_and_reentry(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            h = self.harness(tmp, total_quantity=D("0.01"))
+            h.books(("2000", "2000.5"), ("1999.5", "2000"))
+            await h.engine.start()
+            await h.engine.step()
+            h.books(("2008.5", "2009"), ("1999.5", "2000"))
+            await h.engine.step()
+            h.clock.advance(1_001)
+            await h.engine.step()
+            exit_quote = h.engine.quotes()["exit"]
+            self.assertTrue(exit_quote.reduce_only)
+            self.assertEqual(D(exit_quote.price), D("2001.49"))  # 1999.5 * 1.001 rounded down
+            self.assertNotIn("entry", h.engine.quotes(), "max position reached")
+            h.books(("2000.5", "2001"), ("2000", "2000.5"))  # sellers reach the exit bid
+            await h.engine.step()
+            self.assertEqual(h.legs(), (D("0"), D("0")))
+            hedge = [o for o in h.state.orders if o.purpose == "repair"][-1]
+            # The exit hedge closes the long; it must not reopen the short that just closed.
+            self.assertEqual((hedge.venue, hedge.side, hedge.reduce_only), ("hyperliquid", "SELL", True))
+            h.clock.advance(1_001)
+            h.books(("2000", "2000.5"), ("1999.5", "2000"))
+            await h.engine.step()
+            self.assertIn("entry", h.engine.quotes(), "re-armed after take profit")
 
-    async def test_missing_actual_fill_prices_preserve_pending_and_pause(self):
-        with patch("hydra_basis.spread_strategy.broker.execute_single_clip_with_sides", new=AsyncMock(
-            return_value={"ok": True, "hedge_verified": True, "executed_quantity": "1",
-                          "maker_result": {"price": "101"}, "hedge_result": {"price": "100"}})):
-            # Acknowledged results without position movement are insufficient.
+    async def test_partial_fill_hedges_only_filled_quantity(self):
+        class Partial(PaperVenue):
+            def _match(self):
+                book = self.feed.fresh(self.venue)
+                for order in self.orders.values():
+                    if order["status"] == "NEW" and order["side"] == "SELL" and book.bid >= order["price"]:
+                        half = order["quantity"] / 2
+                        if order["executedQty"] < half:
+                            self._fill("SELL", half)
+                            order["executedQty"] = half
+        with tempfile.TemporaryDirectory() as tmp:
+            h = self.harness(tmp)
+            h.adapters["aster"] = Partial("aster", h.feed)
+            h.books(("2000", "2000.5"), ("1999.5", "2000"))
+            await h.engine.start()
+            await h.engine.step()
+            h.books(("2008.5", "2009"), ("1999.5", "2000"))
+            await h.engine.step()
+            self.assertEqual(h.legs(), (D("-0.005"), D("0.005")))
+            self.assertEqual(h.engine.quotes()["entry"].state, "OPEN", "remainder keeps resting")
+
+    async def test_post_only_cross_is_not_a_failure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            h = self.harness(tmp)
+            h.books(("2000", "2000.5"), ("1999.5", "2000"))
+            await h.engine.start()
+            h.feed.update("aster", D("2009"), D("2010"), source_ms=h.clock(), received_ms=h.clock())
+            original = h.engine.desired_maker_price
+            h.engine.desired_maker_price = lambda intent: (D("2008"), "SELL")  # stale decision
+            await h.engine.step()
+            h.engine.desired_maker_price = original
+            expired = [o for o in h.state.orders if o.state == "EXPIRED"]
+            self.assertEqual(len(expired), 1)
+            self.assertEqual(h.engine.failure_count, 0)
+
+    async def test_restart_cancels_remembered_quote_and_refuses_pending_submit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            h = self.harness(tmp)
+            h.books(("2000", "2000.5"), ("1999.5", "2000"))
+            await h.engine.start()
+            await h.engine.step()
+            quote = h.engine.quotes()["entry"]
+            restarted = Engine(h.config, h.store.load(h.config, live=False), h.store, h.feed, h.adapters,
+                               INSTRUMENTS, live=False, clock=h.clock, log=lambda e: None)
+            await restarted.start()
+            self.assertEqual(restarted.state.orders[-1].id, quote.id)
+            self.assertEqual(restarted.state.orders[-1].state, "CANCELED")
+            restarted.state.orders.append(Order(id="x", venue="aster", leg="short", side="SELL",
+                                                purpose="taker_entry", quantity="0.01", reduce_only=False))
+            restarted.save()
+            again = Engine(h.config, h.store.load(h.config, live=False), h.store, h.feed, h.adapters,
+                           INSTRUMENTS, live=False, clock=h.clock, log=lambda e: None)
             with self.assertRaises(RuntimeError):
-                await self.engine.step()
-        self.assertEqual(self.engine.state.phase, "PAUSED")
-        self.assertIsNotNone(self.engine.state.pending)
-
-    async def test_corrupt_registry_never_adopts_or_overwrites(self):
-        self.registry_path.write_text("{")
-        with self.assertRaises(json.JSONDecodeError):
-            await self.broker.reconcile(self.engine.state)
-        self.assertEqual(self.registry_path.read_text(), "{")
+                await again.start()
 
 
-class AdapterReadTests(unittest.IsolatedAsyncioTestCase):
-    async def test_aster_open_order_query_is_symbol_scoped(self):
-        from hydra_basis.execution_engine.aster_adapter import AsterExecutionAdapter
-        adapter = AsterExecutionAdapter.__new__(AsterExecutionAdapter)
-        adapter._resolve_raw_symbol = AsyncMock(return_value="ETHUSDT")
-        adapter.build_signed_params = lambda payload: payload
-        adapter._get_signed_query = AsyncMock(return_value=[])
-        self.assertEqual(await adapter.list_open_orders(symbol="ETH"), [])
-        adapter._get_signed_query.assert_awaited_once_with(
-            f"{adapter.BASE_URL}/fapi/v3/openOrders", {"symbol": "ETHUSDT"})
+class PreflightTests(unittest.IsolatedAsyncioTestCase):
+    async def test_minimum_notional_blocks_start(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            h = Harness(tmp, total_quantity=D("0.004"), clip_quantity=D("0.004"))
+            h.wide()
+            with self.assertRaises(RuntimeError):
+                await h.engine.start()  # 0.004 * 2000 = 8 USD < Hyperliquid's 10 USD
 
-    async def test_hyperliquid_filters_open_orders_and_weights_same_oid_fills(self):
-        from hydra_basis.execution_engine.hyperliquid_adapter import HyperliquidExecutionAdapter
-        adapter = HyperliquidExecutionAdapter.__new__(HyperliquidExecutionAdapter)
-        adapter.account_address = "test-account"
-        with patch("hydra_basis.execution_engine.hyperliquid_adapter.fetch_json", new=AsyncMock(
-            return_value=[{"coin": "ETH", "oid": 7}, {"coin": "BTC", "oid": 8}])):
-            self.assertEqual(await adapter.list_open_orders(symbol="ETH"), [{"coin": "ETH", "oid": 7}])
-        with patch("hydra_basis.execution_engine.hyperliquid_adapter.fetch_json", new=AsyncMock(
-            return_value=[{"coin": "ETH", "oid": 7, "sz": "0.4", "px": "100"},
-                          {"coin": "ETH", "oid": 7, "sz": "0.6", "px": "102"},
-                          {"coin": "ETH", "oid": 8, "sz": "5", "px": "10"}])):
-            self.assertEqual(await adapter.get_fill_average_price(symbol="ETH", order_result={"order_id": 7},
-                                                                  quantity=D("1")), D("101.2"))
+    async def test_live_margin_preflight(self):
+        class Poor(PaperVenue):
+            async def get_available_margin(self):
+                return D("10")
+        with tempfile.TemporaryDirectory() as tmp:
+            h = Harness(tmp, live=True)
+            h.adapters["aster"] = Poor("aster", h.feed)
+            h.wide()
+            with self.assertRaises(RuntimeError) as raised:
+                await h.engine.start()
+            self.assertIn("insufficient aster margin", str(raised.exception))
 
-    async def test_variational_open_order_check_is_read_only_symbol_scope(self):
-        from hydra_basis.execution_engine.variational_browser import VariationalBrowserExecutionAdapter
-        adapter = VariationalBrowserExecutionAdapter.__new__(VariationalBrowserExecutionAdapter)
-        adapter.has_open_order = AsyncMock(return_value=True)
-        orders = await adapter.list_open_orders(symbol="ETH")
-        self.assertTrue(orders)
-        adapter.has_open_order.assert_awaited_once_with(order_result={}, symbol="ETH", side="", amount="")
 
-    async def test_size_tier_quote_and_aster_update_id_not_mistaken_for_timestamp(self):
-        c = config()
-        async def fetch(_session, *, venue, symbol, clip_usd):
-            return {"bid": 100, "ask": 100, "ts_ms": 9999999999 if venue == "aster" else int(time.time() * 1000)}
-        with patch("hydra_basis.spread_strategy.broker.fetch_orderbook_snapshot", new=AsyncMock(side_effect=fetch)) as mocked:
-            quotes = await QuoteSource(c, None).pair(D("2"))
-            self.assertIsNone(quotes["aster"].source_ms)
-            self.assertIsNotNone(quotes["hyperliquid"].source_ms)
-            self.assertEqual([call.kwargs["clip_usd"] for call in mocked.await_args_list], [1.0, 1.0, 200.0, 200.0])
+class VariationalSettlementTests(unittest.IsolatedAsyncioTestCase):
+    async def test_market_fill_settles_from_position_delta(self):
+        class Browser:
+            def __init__(self):
+                self.position = D("0")
+
+            async def get_open_position(self, *, symbol, market_type):
+                return None if self.position == 0 else {"side": "LONG", "quantity": str(self.position)}
+
+            async def place_market_order(self, **kwargs):
+                self.position += D(kwargs["amount"])
+                return {"type": "ORDER_RESULT", "ok": True, "filled": True, "terminal": False,
+                        "status": "FILLED", "details": {"fill": {"filledBaseAmount": kwargs["amount"]}}}
+        result = await submit_market(Browser(), symbol="ETH", side="BUY", quantity=D("0.01"),
+                                     reduce_only=False, reference_price=D("2000"), timeout_seconds=1)
+        self.assertEqual((result.state, result.filled, result.average), ("FILLED", D("0.01"), None))
+
+
+class RegistryTests(unittest.TestCase):
+    def test_sync_publishes_both_legs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "registry.json"
+            state = State("id", "live", "spread-1", short=Leg("-0.02", "2010"), long=Leg("0.02", "2000"))
+            sync_registry(path, config(), state)
+            legs = PositionRegistry.load(path).legs_for_strategy("spread-1")
+            self.assertEqual({(leg.venue, leg.side, leg.quantity) for leg in legs},
+                             {("aster", "SHORT", "0.02"), ("hyperliquid", "LONG", "0.02")})
 
 
 if __name__ == "__main__":

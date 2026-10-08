@@ -411,6 +411,13 @@ class AsterExecutionAdapter:
         return result
 
 
+    async def get_available_margin(self) -> Decimal:
+        params = self.build_signed_params({})
+        data = await self._get_signed_query(f"{self.BASE_URL}/fapi/v3/account", params)
+        if not isinstance(data, dict) or data.get("availableBalance") is None:
+            raise RuntimeError(f"aster account availableBalance unavailable: {data}")
+        return Decimal(str(data["availableBalance"]))
+
     async def get_order_execution(self, *, order_result: dict, symbol: str) -> dict:
         order_id = order_result.get("order_id") or order_result.get("orderId")
         if order_id is None:
@@ -465,7 +472,7 @@ class AsterExecutionAdapter:
 
     async def place_limit_order(
         self, *, symbol: str, side: str, amount: str, clip_usd: float, price: str,
-        reduce_only: bool = False,
+        reduce_only: bool = False, post_only: bool = False,
     ) -> dict:
         raw_symbol = await self._resolve_raw_symbol(symbol)
         quantity = await self._format_quantity(symbol, amount, market=False)
@@ -475,7 +482,8 @@ class AsterExecutionAdapter:
             "symbol": raw_symbol,
             "side": side.upper(),
             "type": "LIMIT",
-            "timeInForce": "GTC",
+            # GTX is post-only: an order that would cross expires instead of taking.
+            "timeInForce": "GTX" if post_only else "GTC",
             "quantity": quantity,
             "price": price,
             **({"reduceOnly": "true"} if reduce_only else {}),

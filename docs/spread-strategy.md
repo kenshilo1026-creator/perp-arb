@@ -2,7 +2,9 @@
 
 An independent Python implementation of the `auto` spread strategy in
 [Gate CrossEx](https://github.com/your-quantguy/gate-crossex), using this
-project's Aster, Hyperliquid and Variational adapters. It does not use a Gate
+project's Aster, Hyperliquid, Lighter, MEXC and Variational adapters. To scan
+all venues and run several symbols automatically, see the
+[dispatcher](spread-dispatcher.md). It does not use a Gate
 account, Gate SDK or CrossEx shared margin, and imports no source from that
 repository.
 
@@ -71,7 +73,7 @@ above the best bid, so the post-only order cannot cross.
 
 The quote is re-placed when the desired price moves by at least one tick and
 `requote_interval_seconds` have passed since it was placed. Quotes are
-post-only (Aster `GTX`, Hyperliquid `Alo`). A post-only order that would
+post-only (Aster `GTX`, Hyperliquid `Alo`, Lighter `POST_ONLY`, MEXC order type 2). A post-only order that would
 have crossed is treated as harmless and re-quoted on a later tick.
 
 Variational cannot be the maker venue: its browser orders block until filled
@@ -106,6 +108,10 @@ A pause cancels resting quotes and stops trading; open positions stay open.
 
 * Aster: `bookTicker` WebSocket, source timestamp from the event.
 * Hyperliquid: `l2Book` WebSocket, source timestamp from the book.
+* Lighter: `ticker` WebSocket, source timestamp from the message.
+* MEXC: `sub.depth.full` WebSocket (the ticker channel runs 1–3 s behind).
+  Quantities are converted to whole contracts; registry quantities for MEXC
+  legs are written in contracts, the unit the risk supervisor reads.
 * Variational: REST `metadata/stats` every `variational_poll_seconds`, priced
   at the clip's USD size tier. It has no source timestamp, so freshness uses
   local receipt time.
@@ -123,7 +129,8 @@ quotes from both venues. Disconnected streams reconnect with backoff.
   (crash during dispatch) or unresolvable blocks startup.
 * Order sizes: the first clip and any smaller final remainder must meet each
   venue's minimum size, lot step and minimum notional (Aster `exchangeInfo`,
-  Hyperliquid `szDecimals` and a 10 USD minimum). Variational publishes no
+  Hyperliquid `szDecimals` and a 10 USD minimum, Lighter `orderBookDetails`,
+  MEXC contract size, minimum volume and volume step). Variational publishes no
   such rules and is not validated.
 * Margin (live): each venue's available balance must cover the remaining
   capacity's notional divided by that leg's leverage, plus 10%.
@@ -146,6 +153,7 @@ quotes from both venues. Disconnected streams reconnect with backoff.
 | `market_freshness_seconds`, `future_tolerance_seconds`, `max_transport_lag_seconds` | Quote freshness (15 / 2 / 3) |
 | `repair_cooldown_seconds` | Wait between failed repair attempts (3) |
 | `variational_poll_seconds` | Variational quote polling (2) |
+| `order_poll_seconds` | Per-venue minimum seconds between order-status polls (`{"lighter": 3}`; others 0.5) |
 | `stop_loss_usd` | Optional, default `null` (off), see below |
 
 Thresholds and sizes may change between runs. The symbol and venue pair are

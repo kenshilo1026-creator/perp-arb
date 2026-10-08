@@ -499,12 +499,16 @@ class LighterExecutionAdapter:
 
         raise RuntimeError("lighter account snapshot returned no accounts")
 
-    async def _send_order(self, request: dict, market_config: dict, *, reduce_only: bool, immediate: bool) -> dict:
+    async def _send_order(self, request: dict, market_config: dict, *, reduce_only: bool, immediate: bool,
+                          post_only: bool = False) -> dict:
         client = self._get_client()
         identity = {"client_order_index": request["client_order_index"],
                     "market_index": request["market_index"], "base_amount": request["base_amount"],
                     "base_amount_multiplier": market_config["base_amount_multiplier"]}
         options = {"time_in_force": client.ORDER_TIME_IN_FORCE_GOOD_TILL_TIME}
+        if post_only:
+            # A post-only order that would cross is cancelled by the exchange, never filled as taker.
+            options = {"time_in_force": client.ORDER_TIME_IN_FORCE_POST_ONLY}
         if immediate:
             options = {"time_in_force": client.ORDER_TIME_IN_FORCE_IMMEDIATE_OR_CANCEL,
                        "order_expiry": client.DEFAULT_IOC_EXPIRY}
@@ -555,6 +559,7 @@ class LighterExecutionAdapter:
         amount: str,
         price: str,
         reduce_only: bool,
+        post_only: bool = False,
     ) -> dict[str, object]:
         if not reduce_only:
             await self.ensure_isolated_margin(symbol)
@@ -571,7 +576,8 @@ class LighterExecutionAdapter:
             min_base_amount=market_config.get("min_base_amount"),
             min_quote_amount=market_config.get("min_quote_amount"),
         )
-        return await self._send_order(request, market_config, reduce_only=reduce_only, immediate=False)
+        return await self._send_order(request, market_config, reduce_only=reduce_only, immediate=False,
+                                      post_only=post_only)
 
     async def place_market_order(self, *, symbol: str, side: str, amount: str, clip_usd: float, reduce_only: bool = False) -> dict[str, object]:
         return await self._submit_market_order(
@@ -582,7 +588,8 @@ class LighterExecutionAdapter:
         )
 
     async def place_limit_order(
-        self, *, symbol: str, side: str, amount: str, clip_usd: float, price: str, reduce_only: bool = False
+        self, *, symbol: str, side: str, amount: str, clip_usd: float, price: str, reduce_only: bool = False,
+        post_only: bool = False,
     ) -> dict[str, object]:
         return await self._submit_limit_order(
             symbol=symbol,
@@ -590,7 +597,15 @@ class LighterExecutionAdapter:
             amount=amount,
             price=price,
             reduce_only=reduce_only,
+            post_only=post_only,
         )
+
+    async def get_available_margin(self) -> Decimal:
+        snapshot = await self._fetch_account_snapshot()
+        accounts = snapshot.get("accounts") if isinstance(snapshot, dict) else None
+        if not accounts or accounts[0].get("available_balance") is None:
+            raise RuntimeError("lighter available_balance unavailable")
+        return Decimal(str(accounts[0]["available_balance"]))
 
     async def wait_for_order_fill(
         self,

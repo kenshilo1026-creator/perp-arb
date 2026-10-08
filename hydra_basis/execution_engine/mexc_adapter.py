@@ -22,6 +22,7 @@ _SIDE_CLOSE_LONG = 4   # SELL to close long
 
 # MEXC futures order types
 _TYPE_LIMIT = 1
+_TYPE_POST_ONLY = 2  # maker only: cancelled instead of taking liquidity
 _TYPE_MARKET = 5
 
 
@@ -207,9 +208,23 @@ class MexcExecutionAdapter:
             )
         return positions
 
+    async def get_available_margin(self) -> Decimal:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                f"{self.BASE_URL}/api/v1/private/account/asset/USDT",
+                headers=self._signed_headers(""),
+            ) as resp:
+                data = await resp.json()
+                if resp.status != 200 or not data.get("success"):
+                    raise RuntimeError(f"mexc account asset {resp.status}: {data}")
+        asset = data.get("data") or {}
+        if asset.get("availableBalance") is None:
+            raise RuntimeError(f"mexc availableBalance unavailable: {data}")
+        return Decimal(str(asset["availableBalance"]))
+
     async def place_limit_order(
         self, *, symbol: str, side: str, amount: str, clip_usd: float, price: str,
-        reduce_only: bool = False,
+        reduce_only: bool = False, post_only: bool = False,
     ) -> dict:
         contract_sym = mexc_contract_symbol(symbol)
         data = await self._post_order({
@@ -218,7 +233,7 @@ class MexcExecutionAdapter:
             "vol": float(amount),
             "leverage": self.leverage,
             "side": mexc_close_side(side) if reduce_only else self._side(side),
-            "type": _TYPE_LIMIT,
+            "type": _TYPE_POST_ONLY if post_only else _TYPE_LIMIT,
             "openType": self.open_type,
             "positionId": 0,
             "externalOid": "",

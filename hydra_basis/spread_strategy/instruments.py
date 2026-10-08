@@ -6,10 +6,10 @@ from decimal import ROUND_CEILING, ROUND_FLOOR, Decimal
 
 from hydra_basis.adapters.base import fetch_json
 from hydra_basis.execution_engine.aster_adapter import ASTER_EXECUTION_SUFFIXES
+from hydra_basis.execution_engine.hyperliquid_adapter import hyperliquid_price_to_wire
 from hydra_basis.spread_strategy.core import ZERO, round_step
 
 HYPERLIQUID_MIN_NOTIONAL = Decimal("10")
-HYPERLIQUID_MAX_PERP_DECIMALS = 6
 
 
 @dataclass(frozen=True)
@@ -21,6 +21,8 @@ class Instrument:
     min_notional: Decimal | None = None
     # Hyperliquid: prices have at most 5 significant figures and (6 - szDecimals) decimals.
     sz_decimals: int | None = None
+    # MEXC orders and positions count contracts of this many base units each.
+    contract_size: Decimal | None = None
 
     @property
     def validated(self) -> bool:
@@ -31,7 +33,9 @@ class Instrument:
 
     def round_price(self, price: Decimal, direction: str) -> Decimal:
         if self.sz_decimals is not None:
-            return _hyperliquid_price(price, self.sz_decimals, direction)
+            # Same rule the adapter applies on the wire, so a quote is never re-rounded.
+            rounding = ROUND_CEILING if direction == "up" else ROUND_FLOOR
+            return Decimal(hyperliquid_price_to_wire(price, sz_decimals=self.sz_decimals, rounding=rounding))
         return round_step(price, self.tick_size, direction)
 
     def price_tolerance(self, price: Decimal) -> Decimal:
@@ -52,26 +56,15 @@ class Instrument:
         return None
 
 
-def _hyperliquid_price(price: Decimal, sz_decimals: int, direction: str) -> Decimal:
-    rounding = ROUND_CEILING if direction == "up" else ROUND_FLOOR
-    max_decimals = max(0, HYPERLIQUID_MAX_PERP_DECIMALS - sz_decimals)
-    value = price.quantize(Decimal(1).scaleb(-max_decimals), rounding=rounding)
-    # Integer prices are always valid; otherwise keep at most 5 significant figures.
-    if value != value.to_integral_value():
-        digits = value.adjusted() + 1
-        if digits < 5:
-            places = 5 - digits
-            value = value.quantize(Decimal(1).scaleb(-min(places, max_decimals)), rounding=rounding)
-        else:
-            value = value.quantize(Decimal(1), rounding=rounding)
-    return value
-
-
 async def fetch_instrument(session, venue: str, symbol: str) -> Instrument:
     if venue == "aster":
         return await _aster(session, symbol)
     if venue == "hyperliquid":
         return await _hyperliquid(session, symbol)
+    if venue == "lighter":
+        return await _lighter(session, symbol)
+    if venue == "mexc":
+        return await _mexc(session, symbol)
     # Variational publishes no lot/notional rules; it is used only as a taker leg.
     return Instrument(venue)
 
@@ -113,3 +106,38 @@ async def _hyperliquid(session, symbol: str) -> Instrument:
     lot = Decimal(1).scaleb(-sz_decimals)
     return Instrument("hyperliquid", lot_size=lot, min_size=lot,
                       min_notional=HYPERLIQUID_MIN_NOTIONAL, sz_decimals=sz_decimals)
+
+
+async def _lighter(session, symbol: str) -> Instrument:
+    data = await fetch_json(session, "GET", "https://mainnet.zklighter.elliot.ai/api/v1/orderBookDetails")
+    row = next((item for item in data.get("order_book_details", [])
+                if str(item.get("symbol", "")).upper() == symbol.upper()), None)
+    if row is None or str(row.get("status", "active")).lower() != "active":
+        raise RuntimeError(f"symbol not tradable on lighter: {symbol}")
+    return Instrument(
+        "lighter",
+        tick_size=Decimal(1).scaleb(-int(row["supported_price_decimals"])),
+        lot_size=Decimal(1).scaleb(-int(row["supported_size_decimals"])),
+        min_size=Decimal(str(row.get("min_base_amount") or "0")),
+        min_notional=Decimal(str(row.get("min_quote_amount") or "0")) or None,
+    )
+
+
+async def _mexc(session, symbol: str) -> Instrument:
+    from hydra_basis.adapters.mexc import mexc_contract_symbol
+    contract = mexc_contract_symbol(symbol)
+    data = await fetch_json(session, "GET", "https://contract.mexc.com/api/v1/contract/detail",
+                            params={"symbol": contract})
+    row = data.get("data") or {}
+    if isinstance(row, list):
+        row = row[0] if row else {}
+    if row.get("symbol") != contract or row.get("state") != 0 or not row.get("apiAllowed", True):
+        raise RuntimeError(f"symbol not tradable via mexc api: {symbol}")
+    size = Decimal(str(row["contractSize"]))
+    return Instrument(
+        "mexc",
+        tick_size=Decimal(str(row["priceUnit"])),
+        lot_size=Decimal(str(row.get("volUnit") or 1)) * size,
+        min_size=Decimal(str(row.get("minVol") or 1)) * size,
+        contract_size=size,
+    )

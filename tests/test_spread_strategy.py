@@ -1,4 +1,4 @@
-import json
+﻿import json
 import tempfile
 import unittest
 from decimal import Decimal as D
@@ -16,7 +16,7 @@ from hydra_basis.spread_strategy.engine import Engine
 from hydra_basis.spread_strategy.feeds import MarketFeed
 from hydra_basis.spread_strategy.instruments import Instrument
 
-ZERO_FEES = {v: {"maker": D("0"), "taker": D("0")} for v in ("aster", "hyperliquid", "variational")}
+ZERO_FEES = {v: {"maker": D("0"), "taker": D("0")} for v in ("aster", "hyperliquid", "lighter", "mexc", "variational")}
 INSTRUMENTS = {
     "aster": Instrument("aster", tick_size=D("0.01"), lot_size=D("0.001"), min_size=D("0.001"),
                         min_notional=D("5")),
@@ -527,6 +527,15 @@ class RegistryTests(unittest.TestCase):
             self.assertEqual({(leg.venue, leg.side, leg.quantity) for leg in legs},
                              {("aster", "SHORT", "0.02"), ("hyperliquid", "LONG", "0.02")})
 
+    def test_mexc_registry_quantity_is_in_contracts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "registry.json"
+            state = State("id", "live", "spread-2", short=Leg("-0.12", "771"), long=Leg("0.12", "769"))
+            sync_registry(path, config(short_venue="mexc", long_venue="lighter"), state, {"mexc": D("0.01")})
+            legs = {leg.venue: leg.quantity for leg in PositionRegistry.load(path).legs_for_strategy("spread-2")}
+            self.assertEqual(legs, {"mexc": "12", "lighter": "0.12"})
+
 
 if __name__ == "__main__":
     unittest.main()
+

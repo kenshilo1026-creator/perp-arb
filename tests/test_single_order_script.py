@@ -97,6 +97,41 @@ class SingleOrderScriptTests(unittest.TestCase):
         self.assertEqual(hyperliquid_float_to_wire(1782.61875), "1782.6")
         self.assertEqual(hyperliquid_float_to_wire(0.012345678), "0.012346")
 
+    def test_hyperliquid_wire_never_uses_scientific_notation(self) -> None:
+        from decimal import ROUND_CEILING, ROUND_FLOOR
+        from hydra_basis.execution_engine.hyperliquid_adapter import (
+            hyperliquid_price_to_wire, hyperliquid_size_to_wire,
+        )
+
+        # Integer prices are valid at any magnitude (BTC); %.5g used to send "1e+05".
+        self.assertEqual(hyperliquid_price_to_wire(100000.0), "100000")
+        self.assertEqual(hyperliquid_price_to_wire(101234.56, rounding=ROUND_CEILING), "101235")
+        self.assertEqual(hyperliquid_price_to_wire(101234.56, rounding=ROUND_FLOOR), "101234")
+        # Decimals are capped by 6 - szDecimals as well as by five significant figures.
+        self.assertEqual(hyperliquid_price_to_wire("0.00012345678", sz_decimals=0), "0.000123")
+        self.assertEqual(hyperliquid_price_to_wire("2345.678", sz_decimals=4, rounding=ROUND_FLOOR), "2345.6")
+        # Sizes round down to szDecimals and are never formatted with an exponent.
+        self.assertEqual(hyperliquid_size_to_wire("0.123456", sz_decimals=4), "0.1234")
+        self.assertEqual(hyperliquid_size_to_wire("250000", sz_decimals=0), "250000")
+        with self.assertRaises(RuntimeError):
+            hyperliquid_size_to_wire("0.00001", sz_decimals=4)
+
+    def test_hyperliquid_market_order_wire_uses_asset_size_decimals(self) -> None:
+        import asyncio
+        from unittest.mock import AsyncMock
+        from hydra_basis.execution_engine.hyperliquid_adapter import HyperliquidExecutionAdapter
+
+        adapter = object.__new__(HyperliquidExecutionAdapter)
+        adapter.slippage_bps = 50.0
+        adapter.ensure_isolated_margin = AsyncMock(return_value=0)
+        adapter._get_sz_decimals = AsyncMock(return_value=5)
+        adapter._get_mid_price = AsyncMock(return_value=100000.0)
+        adapter._post_order = AsyncMock(return_value={"status": "ok", "response": {"data": {"statuses": [
+            {"filled": {"totalSz": "0.00123", "avgPx": "100010", "oid": 1}}]}}})
+        asyncio.run(adapter.place_market_order(symbol="BTC", side="BUY", amount="0.001234", clip_usd=123))
+        order = adapter._post_order.await_args.args[0]["orders"][0]
+        self.assertEqual((order["p"], order["s"]), ("100500", "0.00123"))
+
     def test_build_variational_adapter_uses_embedded_broker_url(self) -> None:
         adapter = build_variational_adapter("ws://127.0.0.1:9999")
 

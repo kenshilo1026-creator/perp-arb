@@ -2,10 +2,8 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-from contextlib import AsyncExitStack, contextmanager
-import hashlib
+from contextlib import AsyncExitStack
 import json
-import os
 import time
 from decimal import Decimal
 from pathlib import Path
@@ -19,43 +17,15 @@ except ModuleNotFoundError:
 ensure_project_root_on_path()
 
 from hydra_basis.spread_strategy.broker import (
-    PaperVenue, assert_registry_owner, build_adapters, sync_registry,
+    PaperVenue, assert_registry_owner, build_adapters, registry_units, sync_registry,
 )
 from hydra_basis.spread_strategy.core import Config, StateStore
 from hydra_basis.spread_strategy.engine import Engine
 from hydra_basis.spread_strategy.feeds import MarketFeed
 from hydra_basis.spread_strategy.instruments import fetch_instrument
+from hydra_basis.spread_strategy.locks import lock_path, symbol_lock
 
 STATUS_EVERY_SECONDS = 10.0
-
-
-@contextmanager
-def symbol_lock(path: Path):
-    """OS lock releases on crash; never delete a lock another process holds."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a+b") as handle:
-        if path.stat().st_size == 0:
-            handle.write(b"0")
-            handle.flush()
-        handle.seek(0)
-        if os.name == "nt":
-            import msvcrt
-            try:
-                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
-            except OSError as exc:
-                raise RuntimeError("another spread strategy owns this symbol") from exc
-            try:
-                yield
-            finally:
-                handle.seek(0)
-                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
-        else:
-            import fcntl
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-            try:
-                yield
-            finally:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
 def parser():
@@ -85,9 +55,8 @@ async def run(args):
     config = Config.load(args.config)
     mode = "live" if args.live else "paper"
     state_path = args.state or Path("data/spread_strategies") / f"{config.identity()}.{mode}.json"
-    # Different config/state filenames cannot start parallel strategies on a symbol.
-    lock_path = Path("data/spread_strategies") / f"{hashlib.sha256(config.symbol.encode()).hexdigest()[:16]}.{mode}.lock"
-    with symbol_lock(lock_path):
+    # Different config/state filenames (or the dispatcher) cannot trade the same symbol in parallel.
+    with symbol_lock(lock_path(config.symbol, mode)):
         store = StateStore(state_path)
         state = store.load(config, live=args.live)
         if state.status == "STOPPED":
@@ -113,12 +82,13 @@ async def run(args):
                     await server.wait_for_extension(timeout_seconds=30)
                     await server.wait_for_portfolio(timeout_seconds=15)
                     broker_url = server.ws_url
-                adapters = build_adapters(config, broker_url)
+                adapters = build_adapters(config, instruments, feed=feed, broker_url=broker_url)
                 for adapter in adapters.values():
                     warm_up = getattr(adapter, "warm_up", None)
                     if callable(warm_up):
                         await warm_up()
-                on_exposure = lambda current: sync_registry(args.registry, config, current)
+                units = registry_units(instruments)
+                on_exposure = lambda current: sync_registry(args.registry, config, current, units)
             else:
                 adapters = {venue: PaperVenue(venue, feed) for venue in config.venues}
             await wait_for_market(feed)

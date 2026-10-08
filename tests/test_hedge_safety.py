@@ -421,6 +421,7 @@ class HyperliquidFillTests(unittest.IsolatedAsyncioTestCase):
         adapter = object.__new__(HyperliquidExecutionAdapter)
         adapter.slippage_bps = 50
         adapter.ensure_isolated_margin = AsyncMock(return_value=0)
+        adapter._get_sz_decimals = AsyncMock(return_value=0)
         adapter._get_mid_price = AsyncMock(return_value=0.1)
         adapter._post_order = AsyncMock(return_value={
             "response": {"data": {"statuses": [{"filled": {

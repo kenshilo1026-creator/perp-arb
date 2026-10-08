@@ -20,10 +20,10 @@ BPS = Decimal("10000")
 ZERO = Decimal("0")
 ONE = Decimal("1")
 EPSILON = Decimal("1e-12")
-VENUES = {"aster", "hyperliquid", "variational"}
+VENUES = {"aster", "hyperliquid", "lighter", "mexc", "variational"}
 # Variational orders go through the browser extension and block until filled,
 # so they cannot rest as a cancellable post-only quote.
-MAKER_VENUES = {"aster", "hyperliquid"}
+MAKER_VENUES = {"aster", "hyperliquid", "lighter", "mexc"}
 TERMINAL_STATES = {"FILLED", "CANCELED", "REJECTED", "EXPIRED"}
 LEGACY_KEYS = {"poll_seconds", "max_quote_age_seconds", "max_request_seconds",
                "maker_timeout_seconds", "max_hold_seconds"}
@@ -74,6 +74,8 @@ class Config:
     future_tolerance_seconds: float = 2.0
     repair_cooldown_seconds: float = 3.0
     variational_poll_seconds: float = 2.0
+    # Minimum seconds between order-status polls per venue (Lighter's REST limits are tight).
+    order_poll_seconds: dict[str, float] = field(default_factory=lambda: {"lighter": 3.0})
     # Optional emergency exit; None disables it (the original has no such exit).
     stop_loss_usd: Decimal | None = None
 
@@ -81,7 +83,7 @@ class Config:
         if not self.symbol or self.symbol != self.symbol.strip().upper():
             raise ValueError("symbol must be a canonical uppercase symbol")
         if not {self.short_venue, self.long_venue} <= VENUES:
-            raise ValueError("supported venues: aster, hyperliquid, variational")
+            raise ValueError(f"supported venues: {', '.join(sorted(VENUES))}")
         if self.short_venue == self.long_venue:
             raise ValueError("choose two different venues")
         if self.execution_method not in {"maker_taker", "taker_taker"}:
@@ -110,8 +112,11 @@ class Config:
             if not isinstance(value, int) or isinstance(value, bool) or value < 1:
                 raise ValueError(f"{name} must be a positive integer")
         for item in fields(self):
-            if item.name.endswith("_seconds") and number(getattr(self, item.name)) <= 0:
+            if item.name.endswith("_seconds") and item.name != "order_poll_seconds" \
+                    and number(getattr(self, item.name)) <= 0:
                 raise ValueError(f"{item.name} must be positive")
+        if any(number(value) <= 0 for value in self.order_poll_seconds.values()):
+            raise ValueError("order_poll_seconds must be positive")
         for venue in self.venues:
             for role in ("maker", "taker"):
                 rate = number(self.fees[venue][role])
@@ -133,6 +138,9 @@ class Config:
     def venue_of(self, leg: str) -> str:
         return self.short_venue if leg == "short" else self.long_venue
 
+    def poll_seconds(self, venue: str) -> float:
+        return float(self.order_poll_seconds.get(venue, 0.5))
+
     def leverage_of(self, venue: str) -> int:
         return self.short_leverage if venue == self.short_venue else self.long_leverage
 
@@ -146,9 +154,16 @@ class Config:
         key = f"{self.symbol}:{self.short_venue}:{self.long_venue}"
         return hashlib.sha256(key.encode()).hexdigest()[:16]
 
+    def to_dict(self) -> dict:
+        return json.loads(json.dumps(asdict(self), default=str))
+
     @classmethod
     def load(cls, path: Path):
-        payload = json.loads(path.read_text(encoding="utf-8-sig"))
+        return cls.from_dict(json.loads(path.read_text(encoding="utf-8-sig")))
+
+    @classmethod
+    def from_dict(cls, payload: dict):
+        payload = dict(payload)
         legacy = payload.pop("leverage", None)
         if legacy is not None:
             payload.setdefault("short_leverage", legacy)
@@ -164,6 +179,8 @@ class Config:
             payload["stop_loss_usd"] = number(payload["stop_loss_usd"])
         payload["fees"] = {v: {role: number(rate) for role, rate in rates.items()}
                            for v, rates in payload["fees"].items()}
+        if "order_poll_seconds" in payload:
+            payload["order_poll_seconds"] = {v: float(s) for v, s in payload["order_poll_seconds"].items()}
         return cls(**payload)
 
 

@@ -56,12 +56,15 @@ async def _post_hyperliquid_info(session, payload: dict):
     raise RuntimeError("hyperliquid info request failed without an error")
 
 
+async def fetch_hyperliquid_meta(session) -> list[dict]:
+    """Return ALL perp asset rows (name, szDecimals, ...) in raw order, including delisted."""
+    data = await _post_hyperliquid_info(session, {"type": "meta"})
+    return list(data.get("universe") or [])
+
+
 async def fetch_hyperliquid_universe(session) -> list[str]:
     """Return ALL assets in raw order (including delisted) so indices match Hyperliquid's API."""
-    payload = {"type": "meta"}
-    data = await _post_hyperliquid_info(session, payload)
-    universe = data.get("universe") or []
-    return [str(row.get("name") or "").upper() for row in universe]
+    return [str(row.get("name") or "").upper() for row in await fetch_hyperliquid_meta(session)]
 
 
 async def list_symbols(session) -> set[str]:

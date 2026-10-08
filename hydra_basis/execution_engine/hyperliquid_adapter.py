@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 import time
-from decimal import Decimal
+from decimal import ROUND_CEILING, ROUND_DOWN, ROUND_FLOOR, ROUND_HALF_EVEN, Decimal
 
 import aiohttp
 import msgpack
@@ -15,7 +15,7 @@ from eth_account.messages import encode_typed_data
 from eth_hash.auto import keccak
 
 from hydra_basis.adapters.base import fetch_json
-from hydra_basis.adapters.hyperliquid import fetch_hyperliquid_universe
+from hydra_basis.adapters.hyperliquid import fetch_hyperliquid_meta
 from hydra_basis.execution_engine.order_fill import poll_until_filled
 from hydra_basis.execution_engine.hedge_safety import wait_for_terminal_order
 
@@ -74,8 +74,48 @@ def _sign_l1_action(
     return {"r": hex(signed.r), "s": hex(signed.s), "v": signed.v}
 
 
+HYPERLIQUID_MAX_PERP_DECIMALS = 6
+HYPERLIQUID_MAX_SIGNIFICANT_FIGURES = 5
+
+
+def _decimal_to_wire(value: Decimal) -> str:
+    # Fixed-point only: the exchange does not accept scientific notation.
+    text = format(value.normalize(), "f")
+    return "0" if text == "-0" else text
+
+
+def hyperliquid_price_to_wire(price, *, sz_decimals: int | None = None,
+                              rounding: str = ROUND_HALF_EVEN) -> str:
+    """Perp price rule: integers are always valid; otherwise at most 5 significant
+    figures and at most (6 - szDecimals) decimals."""
+    value = Decimal(str(price))
+    if not value.is_finite() or value <= 0:
+        raise RuntimeError(f"invalid hyperliquid price: {price}")
+    if value == value.to_integral_value():
+        return _decimal_to_wire(value)
+    integer_digits = value.adjusted() + 1
+    if integer_digits >= HYPERLIQUID_MAX_SIGNIFICANT_FIGURES:
+        return _decimal_to_wire(value.quantize(Decimal(1), rounding=rounding))
+    places = HYPERLIQUID_MAX_SIGNIFICANT_FIGURES - integer_digits
+    if sz_decimals is not None:
+        places = min(places, max(0, HYPERLIQUID_MAX_PERP_DECIMALS - sz_decimals))
+    return _decimal_to_wire(value.quantize(Decimal(1).scaleb(-places), rounding=rounding))
+
+
+def hyperliquid_size_to_wire(size, *, sz_decimals: int | None = None) -> str:
+    """Sizes are rounded down to the asset's szDecimals; never up past the request."""
+    value = Decimal(str(size))
+    if not value.is_finite() or value <= 0:
+        raise RuntimeError(f"invalid hyperliquid size: {size}")
+    if sz_decimals is not None:
+        value = value.quantize(Decimal(1).scaleb(-sz_decimals), rounding=ROUND_DOWN)
+        if value <= 0:
+            raise RuntimeError(f"hyperliquid size {size} is below the {sz_decimals}-decimal lot size")
+    return _decimal_to_wire(value)
+
+
 def hyperliquid_float_to_wire(x: float) -> str:
-    return f"{x:.5g}"
+    return hyperliquid_price_to_wire(x)
 
 
 def extract_hyperliquid_order_id(data: dict, *, fill_type: str) -> int | None:
@@ -111,17 +151,32 @@ class HyperliquidExecutionAdapter:
         self.default_leverage = leverage if leverage is not None else int(os.getenv("HYPERLIQUID_LEVERAGE", "1"))
         self.skip_margin_setup = skip_margin_setup
         self._universe: list[str] | None = None
+        self._sz_decimals: dict[str, int] | None = None
         self._isolated_asset_indices: set[int] = set()
 
+    async def _load_meta(self) -> None:
+        async with aiohttp.ClientSession() as session:
+            rows = await fetch_hyperliquid_meta(session)
+        self._universe = [str(row.get("name") or "").upper() for row in rows]
+        self._sz_decimals = {str(row.get("name") or "").upper(): int(row["szDecimals"])
+                             for row in rows if row.get("szDecimals") is not None}
+
     async def _get_asset_index(self, symbol: str) -> int:
-        if self._universe is None:
-            async with aiohttp.ClientSession() as session:
-                self._universe = await fetch_hyperliquid_universe(session)
+        if getattr(self, "_universe", None) is None:
+            await self._load_meta()
         sym = symbol.upper()
         try:
             return self._universe.index(sym)
         except ValueError:
             raise RuntimeError(f"hyperliquid symbol not found: {symbol}")
+
+    async def _get_sz_decimals(self, symbol: str) -> int:
+        if getattr(self, "_sz_decimals", None) is None:
+            await self._load_meta()
+        sz_decimals = self._sz_decimals.get(symbol.upper())
+        if sz_decimals is None:
+            raise RuntimeError(f"hyperliquid szDecimals not found: {symbol}")
+        return sz_decimals
 
     async def _get_mid_price(self, symbol: str) -> float:
         async with aiohttp.ClientSession() as session:
@@ -320,18 +375,20 @@ class HyperliquidExecutionAdapter:
         *,
         asset_index: int,
         is_buy: bool,
-        price: float,
-        size: float,
+        price,
+        size,
         tif: str,
         reduce_only: bool = False,
+        sz_decimals: int | None = None,
+        price_rounding: str = ROUND_HALF_EVEN,
     ) -> dict:
         return {
             "type": "order",
             "orders": [{
                 "a": asset_index,
                 "b": is_buy,
-                "p": hyperliquid_float_to_wire(price),
-                "s": hyperliquid_float_to_wire(size),
+                "p": hyperliquid_price_to_wire(price, sz_decimals=sz_decimals, rounding=price_rounding),
+                "s": hyperliquid_size_to_wire(size, sz_decimals=sz_decimals),
                 "r": reduce_only,
                 "t": {"limit": {"tif": tif}},
             }],
@@ -347,8 +404,9 @@ class HyperliquidExecutionAdapter:
         action = self._build_action(
             asset_index=asset_index,
             is_buy=is_buy,
-            price=float(price),
-            size=float(amount),
+            price=price,
+            size=amount,
+            sz_decimals=await self._get_sz_decimals(symbol),
             # Alo (add liquidity only) is post-only: a crossing order is rejected.
             tif="Alo" if post_only else "Gtc",
             reduce_only=reduce_only,
@@ -420,14 +478,16 @@ class HyperliquidExecutionAdapter:
         mid = await self._get_mid_price(symbol)
         slippage = self.slippage_bps / 10000
         price = mid * (1 + slippage) if is_buy else mid * (1 - slippage)
-        size = float(amount)
         action = self._build_action(
             asset_index=asset_index,
             is_buy=is_buy,
             price=price,
-            size=size,
+            size=amount,
             tif="Ioc",
             reduce_only=reduce_only,
+            sz_decimals=await self._get_sz_decimals(symbol),
+            # Round the IOC limit away from the market so slippage protection is kept.
+            price_rounding=ROUND_CEILING if is_buy else ROUND_FLOOR,
         )
         data = await self._post_order(action)
         statuses = data.get("response", {}).get("data", {}).get("statuses", [])
@@ -471,9 +531,11 @@ class HyperliquidExecutionAdapter:
             asset_index=asset_index,
             is_buy=is_buy,
             price=price,
-            size=float(quantity),
+            size=quantity,
             tif="Ioc",
             reduce_only=True,
+            sz_decimals=await self._get_sz_decimals(symbol),
+            price_rounding=ROUND_CEILING if is_buy else ROUND_FLOOR,
         )
         data = await self._post_order(action)
         order_id = extract_hyperliquid_order_id(data, fill_type="filled")

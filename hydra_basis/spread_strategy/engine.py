@@ -54,6 +54,7 @@ class Engine:
         self.last_repair_at = 0
         self.last_quote_at = 0
         self._dust_logged: Decimal | None = None
+        self._polled_at: dict[str, int] = {}
 
     # ------------------------------------------------------------------ helpers
 
@@ -263,9 +264,13 @@ class Engine:
     # ------------------------------------------------------------------ order updates
 
     async def refresh_orders(self):
+        now = self.clock()
         for order in self.state.open_orders():
             if order.state != "OPEN" or not order.remote:
                 continue
+            if now - self._polled_at.get(order.id, 0) < self.config.poll_seconds(order.venue) * 1000:
+                continue
+            self._polled_at[order.id] = now
             query = getattr(self.adapters[order.venue], "get_order_execution", None)
             if not callable(query):
                 continue
@@ -332,7 +337,7 @@ class Engine:
         results = await asyncio.gather(*(
             submit_market(self.adapters[venue], symbol=c.symbol, side=side, quantity=quantity,
                           reduce_only=reduce_only, reference_price=price,
-                          timeout_seconds=c.order_timeout_seconds)
+                          timeout_seconds=c.order_timeout_seconds, poll_seconds=c.poll_seconds(venue))
             for leg, venue, side, price in legs))
         for order, result in zip(orders, results):
             self.apply_execution(order, result)
@@ -508,7 +513,8 @@ class Engine:
         self.log("hedge_repair", leg=leg, side=side, quantity=str(quantity), residual=str(residual), trim=trim)
         result = await submit_market(self.adapters[order.venue], symbol=c.symbol, side=side,
                                      quantity=quantity, reduce_only=reduce_only, reference_price=price,
-                                     timeout_seconds=c.order_timeout_seconds)
+                                     timeout_seconds=c.order_timeout_seconds,
+                                     poll_seconds=c.poll_seconds(order.venue))
         self.apply_execution(order, result)
         if result.state == "UNKNOWN":
             await self.pause("hedge repair outcome unresolved; reconcile the venue order manually")

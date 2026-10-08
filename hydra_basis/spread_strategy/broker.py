@@ -19,7 +19,7 @@ STATUS_ALIASES = {"CANCELLED": "CANCELED"}
 TERMINAL = {"FILLED", "CANCELED", "REJECTED", "EXPIRED"}
 FILL_KEYS = ("filled_quantity", "executedQty", "executed_qty", "filledQty", "filled_qty",
              "filledBaseAmount", "cumQty", "totalSz")
-AVERAGE_KEYS = ("avg_price", "avgPrice", "averagePrice", "avgPx", "fill_price", "fillPrice")
+AVERAGE_KEYS = ("avg_price", "avgPrice", "averagePrice", "avgPx", "dealAvgPrice", "fill_price", "fillPrice")
 MARGIN_ERROR = re.compile(r"margin|balance|insufficient", re.IGNORECASE)
 RATE_LIMIT_ERROR = re.compile(r"\b429\b|-1003|too many|rate limit", re.IGNORECASE)
 POST_ONLY_CROSS = re.compile(r"post only|post-only|would have immediately matched|-5022", re.IGNORECASE)
@@ -43,6 +43,17 @@ def _decimal(value) -> Decimal | None:
     return result if result.is_finite() else None
 
 
+def _average(payload: dict) -> Decimal | None:
+    average = next((value for key in AVERAGE_KEYS
+                    if (value := _decimal(payload.get(key))) is not None and value > 0), None)
+    if average is None:
+        # Lighter orders report cumulative base and quote amounts instead of an average.
+        base, quote = _decimal(payload.get("filled_base_amount")), _decimal(payload.get("filled_quote_amount"))
+        if base and quote:
+            average = quote / base
+    return average
+
+
 def parse_status(payload) -> OrderStatus:
     """Read an adapter order payload; only top-level fields, ``raw`` and a Variational fill."""
     if not isinstance(payload, dict):
@@ -50,8 +61,9 @@ def parse_status(payload) -> OrderStatus:
     status = str(payload.get("status") or payload.get("orderStatus") or "").upper()
     status = STATUS_ALIASES.get(status, status)
     filled = next((value for key in FILL_KEYS if (value := _decimal(payload.get(key))) is not None), None)
-    average = next((value for key in AVERAGE_KEYS
-                    if (value := _decimal(payload.get(key))) is not None and value > 0), None)
+    average = _average(payload)
+    if average is None and isinstance(payload.get("raw"), dict):
+        average = _average(payload["raw"])
     fill = (payload.get("details") or {}).get("fill") if isinstance(payload.get("details"), dict) else None
     if isinstance(fill, dict) and filled is None:
         filled = _decimal(fill.get("filledBaseAmount"))
@@ -79,6 +91,10 @@ def definitive_rejection(exc: BaseException, result) -> bool:
     if re.search(r"aster order 4\d\d", message) or re.search(r"hyperliquid exchange 4\d\d", message):
         return True
     if "hyperliquid order error" in message or "hyperliquid order rejected" in message:
+        return True
+    # MEXC answers HTTP 200 with success=false for a rejected order; Lighter's signer
+    # returns an error (instead of raising) when the transaction was not accepted.
+    if re.search(r"mexc order (200|4\d\d):", message) or "lighter create_order failed" in message:
         return True
     if "no extension command client connected" in message:
         return True
@@ -141,7 +157,8 @@ async def submit_market(adapter, *, symbol: str, side: str, quantity: Decimal, r
             return Execution(status.filled or ZERO, status.average, "UNKNOWN", result,
                              error or "order outcome unresolved before timeout")
         await asyncio.sleep(poll_seconds)
-        if callable(query) and isinstance(result, dict) and (result.get("order_id") or result.get("orderId")):
+        if callable(query) and isinstance(result, dict) and any(
+                result.get(key) is not None for key in ("order_id", "orderId", "client_order_index")):
             try:
                 status = parse_status(await query(order_result=result, symbol=symbol))
             except Exception as exc:
@@ -170,8 +187,13 @@ async def place_quote(adapter, *, symbol: str, side: str, quantity: Decimal, pri
 # Paper venue
 # ---------------------------------------------------------------------------
 
-class PaperRejection(RuntimeError):
+class OrderRejected(RuntimeError):
+    """Raised before anything reaches a venue: the order certainly does not exist."""
     definitive = True
+
+
+class PaperRejection(OrderRejected):
+    pass
 
 
 class PaperVenue:
@@ -261,19 +283,123 @@ class PaperVenue:
 # Live adapters and position registry
 # ---------------------------------------------------------------------------
 
-def build_adapters(config: Config, broker_url: str | None = None):
-    # Lazy imports: a paper run never instantiates authenticated adapters.
-    from hydra_basis.execution_engine.aster_adapter import AsterExecutionAdapter
-    from hydra_basis.execution_engine.hyperliquid_adapter import HyperliquidExecutionAdapter
-    from hydra_basis.execution_engine.variational_browser import VariationalBrowserExecutionAdapter
-    factories = {
-        "aster": lambda venue: AsterExecutionAdapter(leverage=config.leverage_of(venue)),
-        "hyperliquid": lambda venue: HyperliquidExecutionAdapter(leverage=config.leverage_of(venue)),
-        "variational": lambda venue: VariationalBrowserExecutionAdapter(
-            broker_url=broker_url or "http://127.0.0.1:8768/",
-            fill_timeout_seconds=config.order_timeout_seconds),
-    }
-    return {venue: factories[venue](venue) for venue in config.venues}
+class MexcUnits:
+    """Strategy quantities are base units; MEXC orders and positions count contracts.
+
+    Kept local to this strategy: other project flows call the MEXC adapter directly.
+    """
+
+    def __init__(self, adapter, contract_size: Decimal):
+        if contract_size <= 0:
+            raise ValueError("mexc contract size must be positive")
+        self.adapter, self.contract_size = adapter, contract_size
+
+    def _contracts(self, amount) -> str:
+        contracts = number(amount) / self.contract_size
+        if contracts != contracts.to_integral_value() or contracts <= 0:
+            raise OrderRejected(f"mexc quantity {amount} is not a whole number of "
+                                 f"{self.contract_size}-unit contracts")
+        return str(int(contracts))
+
+    def _base(self, payload):
+        if not isinstance(payload, dict):
+            return payload
+        payload = dict(payload)
+        for key in ("filled_quantity", "dealVol"):
+            if payload.get(key) is not None:
+                payload[key] = str(number(payload[key]) * self.contract_size)
+        if isinstance(payload.get("raw"), dict):
+            payload["raw"] = self._base(payload["raw"])
+        return payload
+
+    async def place_market_order(self, *, symbol, side, amount, clip_usd, reduce_only=False):
+        return await self.adapter.place_market_order(symbol=symbol, side=side, amount=self._contracts(amount),
+                                                     clip_usd=clip_usd, reduce_only=reduce_only)
+
+    async def place_limit_order(self, *, symbol, side, amount, clip_usd, price, reduce_only=False,
+                                post_only=False):
+        return await self.adapter.place_limit_order(symbol=symbol, side=side, amount=self._contracts(amount),
+                                                    clip_usd=clip_usd, price=price, reduce_only=reduce_only,
+                                                    post_only=post_only)
+
+    async def get_order_execution(self, *, order_result, symbol):
+        return self._base(await self.adapter.get_order_execution(order_result=order_result, symbol=symbol))
+
+    async def cancel_order(self, *, order_result, symbol, side, amount):
+        return self._base(await self.adapter.cancel_order(order_result=order_result, symbol=symbol, side=side,
+                                                          amount=self._contracts(amount)))
+
+    async def get_open_position(self, *, symbol, market_type):
+        position = await self.adapter.get_open_position(symbol=symbol, market_type=market_type)
+        if position is None:
+            return None
+        return {**position, "quantity": str(number(position["quantity"]) * self.contract_size)}
+
+    async def get_available_margin(self):
+        return await self.adapter.get_available_margin()
+
+
+def build_venue_adapter(venue: str, *, leverage: int, order_timeout_seconds: float,
+                        broker_url: str | None = None, orderbook_loader=None):
+    """One authenticated adapter per venue. Lazy imports: paper runs never construct one."""
+    if venue == "aster":
+        from hydra_basis.execution_engine.aster_adapter import AsterExecutionAdapter
+        return AsterExecutionAdapter(leverage=leverage)
+    if venue == "hyperliquid":
+        from hydra_basis.execution_engine.hyperliquid_adapter import HyperliquidExecutionAdapter
+        return HyperliquidExecutionAdapter(leverage=leverage)
+    if venue == "lighter":
+        from hydra_basis.execution_engine.lighter_adapter import LighterExecutionAdapter
+        from hydra_basis.execution_engine.lighter_live import (
+            build_lighter_client_factory_from_env, fetch_lighter_market_config, fetch_lighter_orderbook_live,
+        )
+        configs: dict[str, dict] = {}
+
+        async def market_config(symbol):
+            if symbol not in configs:
+                configs[symbol] = await fetch_lighter_market_config(symbol)
+            return configs[symbol]
+        return LighterExecutionAdapter(
+            signer_client_factory=build_lighter_client_factory_from_env(),
+            market_config_loader=market_config,
+            orderbook_loader=orderbook_loader or (lambda symbol: fetch_lighter_orderbook_live(symbol)),
+            leverage=leverage)
+    if venue == "mexc":
+        from hydra_basis.execution_engine.mexc_adapter import MexcExecutionAdapter
+        return MexcExecutionAdapter(leverage=leverage)
+    if venue == "variational":
+        from hydra_basis.execution_engine.variational_browser import VariationalBrowserExecutionAdapter
+        return VariationalBrowserExecutionAdapter(broker_url=broker_url or "http://127.0.0.1:8768/",
+                                                  fill_timeout_seconds=order_timeout_seconds)
+    raise ValueError(f"unsupported venue {venue}")
+
+
+def feed_orderbook_loader(feed):
+    """Lighter sizes its IOC limit from the book; use the strategy's live quote when fresh."""
+    async def load(symbol):
+        from hydra_basis.execution_engine.lighter_live import fetch_lighter_orderbook_live
+        book = feed.fresh("lighter")
+        if book is None:
+            return await fetch_lighter_orderbook_live(symbol)
+        return {"bid": float(book.bid), "ask": float(book.ask), "ts_ms": book.received_ms}
+    return load
+
+
+def strategy_adapter(venue: str, adapter, instrument):
+    """Per-symbol view of a venue adapter in base units."""
+    if venue == "mexc":
+        return MexcUnits(adapter, instrument.contract_size)
+    return adapter
+
+
+def build_adapters(config: Config, instruments: dict, *, feed, broker_url: str | None = None):
+    adapters = {}
+    for venue in config.venues:
+        adapter = build_venue_adapter(venue, leverage=config.leverage_of(venue),
+                                      order_timeout_seconds=config.order_timeout_seconds,
+                                      broker_url=broker_url, orderbook_loader=feed_orderbook_loader(feed))
+        adapters[venue] = strategy_adapter(venue, adapter, instruments[venue])
+    return adapters
 
 
 def load_registry(path: Path) -> PositionRegistry:
@@ -293,15 +419,25 @@ def assert_registry_owner(path: Path, config: Config, state: State):
             raise RuntimeError(f"another registered strategy owns {venue} {config.symbol}")
 
 
-def sync_registry(path: Path, config: Config, state: State):
-    """Publish the strategy's per-leg exposure for the existing risk supervisor."""
+def registry_units(instruments: dict) -> dict[str, Decimal]:
+    """Venues whose adapters report positions in contracts rather than base units."""
+    return {venue: inst.contract_size for venue, inst in instruments.items() if inst.contract_size}
+
+
+def sync_registry(path: Path, config: Config, state: State, contract_sizes: dict[str, Decimal] | None = None):
+    """Publish the strategy's per-leg exposure for the existing risk supervisor.
+
+    Quantities are written in each adapter's native unit (MEXC: contracts), because the
+    supervisor reconciles them against ``get_open_position`` and closes with them.
+    """
     registry = load_registry(path)
     changed = False
     for name in ("short", "long"):
         venue, held = config.venue_of(name), number(state.leg(name).quantity)
         side = "SHORT" if held < 0 or (held == 0 and name == "short") else "LONG"
+        native = abs(held) / (contract_sizes or {}).get(venue, ONE)
         leg = PositionLeg(state.strategy_id, f"{state.strategy_id}:{venue}:{name}", venue, config.symbol,
-                          "perp", side, format(abs(held).normalize(), "f"),
+                          "perp", side, format(native.normalize(), "f"),
                           status="open" if held != 0 else "closed")
         existing = next((item for item in registry.legs_for_strategy(state.strategy_id)
                          if item.leg_id == leg.leg_id), None)

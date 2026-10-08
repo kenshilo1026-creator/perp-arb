@@ -1,0 +1,43 @@
+{
+  "venues": ["aster", "hyperliquid", "lighter", "mexc"],
+  "max_groups": 5,
+  "group_notional_usd": "100",
+  "clip_notional_usd": "50",
+  "execution_method": "taker_taker",
+  "maker_preference": ["hyperliquid", "aster", "lighter", "mexc"],
+  "leverage": {"aster": 1, "hyperliquid": 1, "lighter": 1, "mexc": 1, "variational": 1},
+  "fees": {
+    "aster": {"maker": "0.0001", "taker": "0.00035"},
+    "hyperliquid": {"maker": "0.00015", "taker": "0.00045"},
+    "lighter": {"maker": "0", "taker": "0"},
+    "mexc": {"maker": "0", "taker": "0.0002"},
+    "variational": {"maker": "0", "taker": "0"}
+  },
+  "entry_bps": "40",
+  "take_profit_bps": "10",
+  "min_profit_bps": "5",
+  "slippage_buffer_bps": "5",
+  "funding_budget_bps": "5",
+  "confirm_seconds": 3,
+  "max_book_spread_bps": "20",
+  "max_price_deviation_pct": "1",
+  "max_abs_funding_rate_pct": "0.1",
+  "symbol_allowlist": [],
+  "symbol_blocklist": [],
+  "reject_cooldown_seconds": 600,
+  "idle_retire_seconds": 1800,
+  "scan_seconds": 1,
+  "status_seconds": 30,
+  "strategy": {
+    "tick_seconds": 0.5,
+    "order_timeout_seconds": 20,
+    "requote_interval_seconds": 2,
+    "market_freshness_seconds": 15,
+    "max_transport_lag_seconds": 3,
+    "future_tolerance_seconds": 2,
+    "repair_cooldown_seconds": 3,
+    "variational_poll_seconds": 2,
+    "order_poll_seconds": {"lighter": 3},
+    "stop_loss_usd": null
+  }
+}

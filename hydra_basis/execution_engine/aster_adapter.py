@@ -301,6 +301,14 @@ class AsterExecutionAdapter:
         })
         return await self._get_signed_query(f"{self.BASE_URL}/fapi/v3/order", params)
 
+    async def list_open_orders(self, *, symbol: str) -> list[dict]:
+        raw_symbol = await self._resolve_raw_symbol(symbol)
+        params = self.build_signed_params({"symbol": raw_symbol})
+        orders = await self._get_signed_query(f"{self.BASE_URL}/fapi/v3/openOrders", params)
+        if not isinstance(orders, list):
+            raise RuntimeError("aster open-order list unavailable")
+        return orders
+
     async def _fetch_position_risk(self) -> list[dict]:
         params = self.build_signed_params({})
         data = await self._get_signed_query(f"{self.BASE_URL}/fapi/v3/positionRisk", params)

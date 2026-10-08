@@ -326,6 +326,12 @@ class VariationalBrowserExecutionAdapter:
         details = result.get("details") or {}
         return bool(result.get("exists", details.get("exists", False)))
 
+    async def list_open_orders(self, *, symbol: str) -> list[dict]:
+        # The extension's checkOnly lookup falls back to symbol matching, with
+        # no order-id/side/size filter; this only reads the open-orders table.
+        exists = await self.has_open_order(order_result={}, symbol=symbol, side="", amount="")
+        return [{"symbol": symbol, "source": "browser_check_only"}] if exists else []
+
     async def get_limit_price_preview(self, *, symbol: str) -> str:
         mapped = self._map_symbol(symbol)
         request_id = str(uuid.uuid4())

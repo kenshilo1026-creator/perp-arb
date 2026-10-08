@@ -173,6 +173,34 @@ class HyperliquidExecutionAdapter:
                 },
             )
 
+    async def list_open_orders(self, *, symbol: str) -> list[dict]:
+        async with aiohttp.ClientSession() as session:
+            orders = await fetch_json(session, "POST", HYPERLIQUID_INFO_URL,
+                                      json={"type": "openOrders", "user": self.account_address})
+        if not isinstance(orders, list):
+            raise RuntimeError("hyperliquid open-order list unavailable")
+        if any(not isinstance(item, dict) or "coin" not in item for item in orders):
+            raise RuntimeError("malformed hyperliquid open orders")
+        return [item for item in orders if str(item["coin"]).upper() == symbol.upper()]
+
+    async def get_fill_average_price(self, *, symbol: str, order_result: dict,
+                                     quantity: Decimal) -> Decimal | None:
+        order_id = order_result.get("order_id") or order_result.get("oid")
+        if order_id is None:
+            return None
+        async with aiohttp.ClientSession() as session:
+            fills = await fetch_json(session, "POST", HYPERLIQUID_INFO_URL,
+                                     json={"type": "userFills", "user": self.account_address})
+        if not isinstance(fills, list):
+            raise RuntimeError("hyperliquid fills unavailable")
+        selected = [item for item in fills if str(item.get("oid")) == str(order_id)
+                    and str(item.get("coin", "")).upper() == symbol.upper()]
+        filled = sum((Decimal(str(item["sz"])) for item in selected), Decimal("0"))
+        if filled != quantity:
+            return None
+        return sum((Decimal(str(item["sz"])) * Decimal(str(item["px"]))
+                    for item in selected), Decimal("0")) / quantity
+
     async def get_order_execution(self, *, order_result: dict, symbol: str) -> dict:
         order_id = order_result.get("order_id") or order_result.get("orderId") or order_result.get("oid")
         if order_id is None:

@@ -350,7 +350,8 @@ async def build_spot_perp_preview(params: OpenParams) -> Preview:
         batch_count=batch_count,
         maker_spread_pct=float(plan.perp_spread_pct),
         taker_spread_pct=float(plan.spot_spread_pct),
-        requires_confirm=plan.maker_taker_price_gap_pct > SPOT_PERP_MAX_PRE_TRADE_PRICE_GAP,
+        requires_confirm=(plan.maker_venue != "aster" and
+                          plan.maker_taker_price_gap_pct > SPOT_PERP_MAX_PRE_TRADE_PRICE_GAP),
         exec_mode=params.exec_mode,
     )
 

@@ -19,6 +19,7 @@ from hydra_basis.execution_engine.aster_adapter import AsterExecutionAdapter
 import aiohttp
 
 from hydra_basis.execution_engine.executor import execute_single_clip, execute_single_clip_with_sides, passive_limit_price_from_orderbook, execution_sides_for_signal
+from hydra_basis.execution_engine.maker_price_guard import MakerPriceGuard
 from hydra_basis.execution_engine.order_service import Deps, progress_printer, run_batched_execution
 from hydra_basis.execution_engine.order_fill import extract_filled_quantity
 from hydra_basis.execution_engine.market_data import fetch_orderbook_snapshot
@@ -180,6 +181,9 @@ async def check_pre_trade_price_gap(
     taker_book: dict[str, float | int],
 ) -> bool:
     """Returns True if user overrode the gap check (skip executor-level check too)."""
+    if maker_venue == "aster":
+        # Dispatch and resting orders use the directional 0.2% maker guard.
+        return False
     maker_mid = orderbook_mid(maker_book)
     taker_mid = orderbook_mid(taker_book)
     if maker_mid <= 0 or taker_mid <= 0:
@@ -466,6 +470,15 @@ async def execute_close_position_plan(
 
     taker_side = plan.side_by_venue[plan.taker_venue]
     taker_adapter = adapters[plan.taker_venue]
+    async def guard_books() -> tuple[dict, dict]:
+        books = await fetch_close_orderbooks(symbol=symbol, venues=venues, clip_usd=plan.clip_usd)
+        return books[plan.maker_venue], books[plan.taker_venue]
+
+    maker_guard = MakerPriceGuard(
+        fetch_books=guard_books,
+        tick_size=lambda: adapters[plan.maker_venue].get_price_tick_size(symbol),
+        maker_side=maker_side, taker_side=taker_side,
+    ) if plan.maker_venue == "aster" else None
     taker_pre_hook = None
     prepare_fn = getattr(taker_adapter, "prepare_market_order", None)
     if plan.taker_venue == "variational" and callable(prepare_fn):
@@ -501,6 +514,7 @@ async def execute_close_position_plan(
             else 0.0
         ),
         maker_price_refresher=close_price_refresher,
+        maker_price_guard=maker_guard,
         taker_pre_hook=taker_pre_hook,
         maker_reduce_only=True,
         taker_reduce_only=True,
@@ -600,6 +614,17 @@ async def execute_open_clip(
             short_venue=short_venue,
             long_venue=long_venue,
         )
+        async def guard_books() -> tuple[dict, dict]:
+            books = await fetch_close_orderbooks(
+                symbol=symbol, venues=[maker_venue, taker_venue], clip_usd=batch_clip_usd,
+            )
+            return books[maker_venue], books[taker_venue]
+
+        maker_guard = MakerPriceGuard(
+            fetch_books=guard_books,
+            tick_size=lambda: maker_adapter.get_price_tick_size(symbol),
+            maker_side=maker_side, taker_side=taker_side,
+        ) if maker_venue == "aster" else None
         use_maker_orderbook = None if maker_venue == "variational" else maker_book
 
         async def _refresh_open_maker_price() -> str:
@@ -655,6 +680,7 @@ async def execute_open_clip(
                 else 0.0
             ),
             maker_price_refresher=open_price_refresher,
+            maker_price_guard=maker_guard,
             taker_pre_hook=taker_pre_hook,
             max_execution_price_gap_pct=float("inf") if gap_overridden else MAX_PRE_TRADE_PRICE_GAP,
         )

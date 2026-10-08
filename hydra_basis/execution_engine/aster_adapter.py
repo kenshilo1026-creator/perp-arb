@@ -175,6 +175,16 @@ class AsterExecutionAdapter:
         step_size = await self._quantity_step_size(symbol, market=market)
         return format_aster_step_quantity(quantity, step_size)
 
+    async def get_price_tick_size(self, symbol: str) -> str:
+        raw_symbol = await self._resolve_raw_symbol(symbol)
+        metadata = (await self._load_exchange_info_by_symbol())[raw_symbol]
+        for item in metadata.get("filters", []):
+            if item.get("filterType") == "PRICE_FILTER":
+                tick = Decimal(str(item.get("tickSize", "0")))
+                if tick.is_finite() and tick > 0:
+                    return str(tick)
+        raise RuntimeError(f"aster price tickSize unavailable: {symbol}")
+
     async def _post_form(self, url: str, data: dict) -> dict:
         headers = {
             "Content-Type": "application/x-www-form-urlencoded",

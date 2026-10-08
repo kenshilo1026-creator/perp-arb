@@ -59,3 +59,41 @@ an error instead of reporting a successful batch. No maker reversal is submitted
 References: [Hyperliquid order status](https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/info-endpoint#query-order-status-by-oid-or-cloid),
 [MEXC order status](https://mexcdevelop.github.io/apidocs/contract_v1_en/#get-order-by-order-id).
 Regression tests: `tests/test_hyperliquid_mexc_fill_safety.py`.
+
+## Aster maker adverse-spread guard
+
+Aster maker orders in the perp/perp and MEXC spot/perp CLI and web execution
+flows now check the opposite leg's executable quote before dispatch and during
+the fill wait. The default adverse limit is `MAKER_TAKER_MAX_GAP = Decimal("0.002")`
+in `hydra_basis/execution_engine/maker_price_guard.py`. Favourable spreads have
+no limit. The denominator is the submitted maker price, matching the requested
+trigger `taker < maker * (1 - N)` for a maker BUY:
+
+- Maker BUY: `(maker - taker_bid) / maker <= N`.
+- Maker SELL: `(taker_ask - maker) / maker <= N`.
+
+Each quote check is bounded to three seconds, with one second between completed
+checks. A violation or unavailable quote cancels the maker before fetching a
+replacement. Terminal cumulative fills are reconciled first; any confirmed fill
+is hedged instead of placing another full-size maker. The remainder is subject
+to the same guard even while waiting for a partial fill to reach the hedge minimum.
+
+Replacement prices are the nearest valid Aster price tick to the old submitted
+price satisfying both the adverse limit and the passive side of the Aster book.
+Ordinary 60-second fill timeouts still refresh the maker quote, then apply the
+same guard. Orders use the adapter's `post_only=True` option (`GTX`), as defined
+in the [Aster V3 futures API](https://github.com/asterdex/api-docs/blob/master/V3%28Recommended%29/EN/aster-finance-futures-api-v3.md).
+The legacy absolute-gap confirmation does not override or block this guard.
+Other maker venues retain their existing behavior.
+
+For a close BUY at 0.2276, a spot SELL quote of 0.2262 and tick size 0.0001,
+the nearest allowed maker price is 0.2266. Selling the opening perp at 1.1
+against a spot buy at 0.1 is favourable and remains allowed.
+
+This is a resting-order quote control, not a guarantee on final fills: quotes
+can change during network requests and hedging can slip. Confirmed maker fills
+must still be hedged even after the price has moved outside the band. A partial
+fill below the hedge exchange's minimum can still require manual recovery if
+that exchange rejects the hedge.
+
+Offline tests: `python -m unittest discover -s tests -p test_maker_price_guard.py`.

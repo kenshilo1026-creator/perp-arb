@@ -28,6 +28,7 @@ from hydra_basis.execution_engine.market_data import (
     fetch_mexc_spot_orderbook,
     fetch_orderbook_snapshot,
 )
+from hydra_basis.execution_engine.maker_price_guard import MakerPriceGuard
 from hydra_basis.execution_engine.mexc_spot_adapter import MexcSpotExecutionAdapter
 from hydra_basis.execution_engine.order_service import Deps, progress_printer, run_batched_execution
 from hydra_basis.execution_engine.risk import compute_spread_pct
@@ -430,6 +431,17 @@ async def execute_spot_perp_plan(
     assert_maker_limit_supported(maker_adapter, plan.maker_venue)
     try:
         fresh_maker_price = await refresh_spot_perp_maker_price(plan)
+        async def guard_books() -> tuple[dict, dict]:
+            spot, perp = await fetch_plan_books(
+                symbol=plan.symbol, short_venue=plan.short_venue, clip_usd=plan.clip_usd,
+            )
+            return perp, spot
+
+        maker_guard = MakerPriceGuard(
+            fetch_books=guard_books,
+            tick_size=lambda: maker_adapter.get_price_tick_size(plan.symbol),
+            maker_side=plan.maker_side, taker_side=plan.taker_side,
+        ) if plan.maker_venue == "aster" else None
         # For close mode, treating spot as the "short venue" makes the existing
         # side mapper emit spot SELL and perp BUY.
         side_short_venue = plan.short_venue if plan.mode == "open" else MEXC_SPOT_VENUE
@@ -458,6 +470,7 @@ async def execute_spot_perp_plan(
                 else 0.0
             ),
             maker_price_refresher=lambda: refresh_spot_perp_maker_price(plan),
+            maker_price_guard=maker_guard,
             max_execution_price_gap_pct=(
                 plan.maker_taker_price_gap_pct
                 if allow_large_price_gap
@@ -589,7 +602,7 @@ async def run_spot_perp_arbitrage() -> None:
         print(f"leverage_x: {leverage}")
 
     allow_large_price_gap = False
-    if plan.maker_taker_price_gap_pct > SPOT_PERP_MAX_PRE_TRADE_PRICE_GAP:
+    if plan.maker_venue != "aster" and plan.maker_taker_price_gap_pct > SPOT_PERP_MAX_PRE_TRADE_PRICE_GAP:
         print(format_spot_perp_price_gap_alert(plan))
         if args.live:
             answer = input("> ").strip().lower()

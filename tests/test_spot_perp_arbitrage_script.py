@@ -401,7 +401,7 @@ class SpotPerpArbitrageRecordingTests(unittest.IsolatedAsyncioTestCase):
         args = SimpleNamespace(
             mode="open",
             symbol="BEAT",
-            short_venue="aster",
+            short_venue="hyperliquid",
             total_size="10",
             clip_size="10",
             leverage=1,
@@ -448,7 +448,7 @@ class SpotPerpArbitrageRecordingTests(unittest.IsolatedAsyncioTestCase):
         args = SimpleNamespace(
             mode="open",
             symbol="BEAT",
-            short_venue="aster",
+            short_venue="hyperliquid",
             total_size="10",
             clip_size="10",
             leverage=1,
@@ -557,6 +557,9 @@ class SpotPerpArbitrageRecordingTests(unittest.IsolatedAsyncioTestCase):
         events: list[str] = []
 
         class Adapter:
+            async def get_price_tick_size(self, symbol):
+                return "0.01"
+
             def __init__(self, venue: str) -> None:
                 self.venue = venue
 
@@ -615,6 +618,9 @@ class SpotPerpArbitrageRecordingTests(unittest.IsolatedAsyncioTestCase):
         events: list[str] = []
 
         class Adapter:
+            async def get_price_tick_size(self, symbol):
+                return "0.01"
+
             def __init__(self, venue: str) -> None:
                 self.venue = venue
 
@@ -629,7 +635,7 @@ class SpotPerpArbitrageRecordingTests(unittest.IsolatedAsyncioTestCase):
         plan = build_spot_perp_plan(
             symbol="BEAT",
             mode="open",
-            short_venue="aster",
+            short_venue="hyperliquid",
             quantity=Decimal("10"),
             clip_usd=100.0,
             spot_book={"bid": 9.99, "ask": 10.01, "ts_ms": 1},
@@ -661,6 +667,9 @@ class SpotPerpArbitrageRecordingTests(unittest.IsolatedAsyncioTestCase):
         events: list[str] = []
 
         class Adapter:
+            async def get_price_tick_size(self, symbol):
+                return "0.01"
+
             def __init__(self, venue: str) -> None:
                 self.venue = venue
 
@@ -722,6 +731,9 @@ class SpotPerpArbitrageRecordingTests(unittest.IsolatedAsyncioTestCase):
         fetch_calls = 0
 
         class Adapter:
+            async def get_price_tick_size(self, symbol):
+                return "0.01"
+
             def __init__(self, venue: str) -> None:
                 self.venue = venue
                 self.order_id = 0
@@ -756,7 +768,7 @@ class SpotPerpArbitrageRecordingTests(unittest.IsolatedAsyncioTestCase):
             fetch_calls += 1
             return (
                 {"bid": 9.99, "ask": 10.01, "ts_ms": fetch_calls},
-                {"bid": 9.9, "ask": 10.1 + max(0, fetch_calls - 1), "ts_ms": fetch_calls},
+                {"bid": 9.9, "ask": 11.1 if "aster:cancel" in events else 10.1, "ts_ms": fetch_calls},
             )
 
         plan = build_spot_perp_plan(
@@ -777,7 +789,7 @@ class SpotPerpArbitrageRecordingTests(unittest.IsolatedAsyncioTestCase):
             ), patch(
                 "scripts.run_spot_perp_arbitrage.fetch_plan_books",
                 new=AsyncMock(side_effect=fake_fetch_plan_books),
-            ), patch("asyncio.sleep", new=AsyncMock()):
+            ):
                 result = await execute_spot_perp_plan(
                     plan=plan,
                     leverage=1,
@@ -1614,6 +1626,9 @@ class SpotPerpArbitrageRecordingTests(unittest.IsolatedAsyncioTestCase):
         prices: list[str | None] = []
 
         class Adapter:
+            async def get_price_tick_size(self, symbol):
+                return "0.01"
+
             def __init__(self, venue: str) -> None:
                 self.venue = venue
 
@@ -1669,6 +1684,9 @@ class SpotPerpArbitrageRecordingTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_open_execution_records_live_spot_and_perp_legs(self) -> None:
         class Adapter:
+            async def get_price_tick_size(self, symbol):
+                return "0.01"
+
             def __init__(self, venue: str) -> None:
                 self.venue = venue
 
@@ -1724,6 +1742,9 @@ class SpotPerpArbitrageRecordingTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_close_execution_does_not_record_new_open_legs(self) -> None:
         class Adapter:
+            async def get_price_tick_size(self, symbol):
+                return "0.01"
+
             async def place_limit_order(self, **kwargs):
                 return {"ok": True, "filled": True, "status": "FILLED"}
 

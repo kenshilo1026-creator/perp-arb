@@ -33,6 +33,41 @@ Profit "at take profit" assumes the exit happens when the exit spread reaches
 It covers all four fills' fees at the configured rates, and excludes funding,
 slippage, depth and lot rounding.
 
+### 24-hour spread history
+
+For every opportunity at or above `history.check_bps` (30), the dispatcher
+rebuilds that pair's spread over the last `history.lookback_hours` (24) from
+per-minute prices. It reports:
+
+* the median and 90th-percentile spread;
+* the share of minutes at or above the threshold;
+* how many times the spread reached the threshold, and how many of those
+  times it later came back to the take-profit level (with the median minutes
+  that took);
+* how long the current episode has lasted, and minutes since the spread last
+  converged.
+
+Each pair gets one label:
+
+| Label | Meaning |
+|---|---|
+| 持續型 persistent | At or above the threshold at least `persistent_pct` (70%) of the time and never back to take profit: a structural gap, so a position may never take profit |
+| 反覆收斂型 reverting | Reached the threshold before and came back to take profit |
+| 瞬間型 new spike | Almost never this wide, and only just appeared |
+| 間歇型 intermittent | Anything else |
+| 資料不足 insufficient | Under `min_coverage_pct` (50%) of minutes have both prices |
+
+With `block_persistent` (default on), a launch on a persistent spread is
+rejected and the symbol is put on cooldown.
+
+Prices are 1-minute candle closes from Aster, Hyperliquid, Entropy, MEXC and
+Arcus. Lighter's candle API is not public (HTTP 403) and Variational has
+none, so the dispatcher, dry run included, records their per-minute mid
+prices to `data/spread_dispatcher/minute_mids.json.gz` (kept for 24 hours).
+Lighter pairs therefore show "insufficient" until the dispatcher has run for
+a while. The spread is close/mid based, so it reads about half a bid/ask
+spread wider on each side than the executable entry spread.
+
 Paper mode uses live public data and simulated venues, with no credentials,
 orders or registry writes. Live mode loads `.env` and builds an authenticated
 adapter for every enabled venue at startup. It exits immediately if a venue's

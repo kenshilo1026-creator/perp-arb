@@ -86,5 +86,13 @@
       "lighter": 3
     },
     "stop_loss_usd": null
+  },
+  "history": {
+    "enabled": true,
+    "check_bps": 30,
+    "lookback_hours": 24,
+    "persistent_pct": 70,
+    "min_coverage_pct": 50,
+    "block_persistent": true
   }
 }

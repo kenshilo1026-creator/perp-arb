@@ -38,6 +38,14 @@ MAX_ENGINE_ERRORS = 5
 # MEXC ticker snapshots run 1-3 s behind; acceptable for discovery only.
 SCAN_ONLY_MAX_LAG_MS = 5_000
 SUBSCRIBE_SPACING_SECONDS = 0.05
+HISTORY_DEFAULTS = {
+    "enabled": True,          # 24h spread history in the dry run and at launch
+    "check_bps": 30,          # profile opportunities at or above this spread
+    "lookback_hours": 24,
+    "persistent_pct": 70,     # >= this % of minutes above check_bps, never converged: structural
+    "min_coverage_pct": 50,   # below this, the history is "insufficient"
+    "block_persistent": True,  # refuse to launch a group on a structural spread
+}
 STRATEGY_KEYS = {"tick_seconds", "order_timeout_seconds", "requote_interval_seconds",
                  "market_freshness_seconds", "max_transport_lag_seconds", "future_tolerance_seconds",
                  "repair_cooldown_seconds", "variational_poll_seconds", "order_poll_seconds", "stop_loss_usd"}
@@ -73,6 +81,7 @@ class Settings:
     scan_seconds: float = 1.0
     status_seconds: float = 30.0
     strategy: dict = field(default_factory=dict)
+    history: dict = field(default_factory=dict)
 
     def __post_init__(self):
         if not self.venues or not set(self.venues) <= VENUES or len(set(self.venues)) < 2:
@@ -86,6 +95,10 @@ class Settings:
         unknown = set(self.strategy) - STRATEGY_KEYS
         if unknown:
             raise ValueError(f"unsupported strategy keys: {', '.join(sorted(unknown))}")
+        unknown = set(self.history) - set(HISTORY_DEFAULTS)
+        if unknown:
+            raise ValueError(f"unsupported history keys: {', '.join(sorted(unknown))}")
+        object.__setattr__(self, "history", {**HISTORY_DEFAULTS, **self.history})
         missing = [venue for venue in self.venues if venue not in self.fees]
         if missing:
             raise ValueError(f"fees missing for: {', '.join(missing)}")
@@ -671,7 +684,7 @@ class Group:
 class Dispatcher:
     def __init__(self, settings: Settings, *, live: bool, data_dir: Path, registry_path: Path,
                  store: QuoteStore | None = None, clock=now_ms, emit=None, notify=None,
-                 instrument_loader=None, adapter_factory=None):
+                 instrument_loader=None, adapter_factory=None, history=None):
         self.settings, self.live = settings, live
         self.mode = "live" if live else "paper"
         self.data_dir, self.registry_path = data_dir, registry_path
@@ -689,6 +702,15 @@ class Dispatcher:
         self.pending: set[str] = set()
         self.trade_quote_timeout_seconds = 10.0
         self.index_path = data_dir / f"dispatcher.{self.mode}.json"
+        self.history = history
+        if self.history is None and settings.history["enabled"]:
+            from hydra_basis.spread_strategy.history import MinuteRecorder, SpreadHistory
+            h = settings.history
+            self.history = SpreadHistory(
+                recorder=MinuteRecorder(data_dir / "minute_mids.json.gz"), lookback_hours=float(h["lookback_hours"]),
+                threshold_bps=float(h["check_bps"]), take_profit_bps=float(settings.take_profit_bps),
+                persistent_pct=float(h["persistent_pct"]), min_coverage_pct=float(h["min_coverage_pct"]),
+                clock=clock)
 
     # -------------------------------------------------------------- persistence
 
@@ -777,6 +799,8 @@ class Dispatcher:
 
     async def scan_once(self):
         now = self.clock()
+        if self.history is not None:
+            self.history.record_store(self.store, now)
         excluded = self.active_symbols() | {symbol for symbol, until in self.rejected_until.items() if until > now}
         found = find_opportunities(self.settings, self.store, self.health, now, exclude=excluded)
         seen = {opportunity.key for opportunity in found}
@@ -799,6 +823,7 @@ class Dispatcher:
         try:
             config = self.settings.group_config(symbol, opportunity.short_venue, opportunity.long_venue,
                                                 Decimal("1"), Decimal("1"))
+            profile = await self.check_history(opportunity)
             await self.wait_for_trade_quotes(config)
             instruments = await self.load_instruments(config)
             total, clip = size_group(self.settings, opportunity.mid, list(instruments.values()))
@@ -816,9 +841,23 @@ class Dispatcher:
         self.save_index()
         self.emit({"event": "group_started", "group": gid, "symbol": symbol, "short": config.short_venue,
                    "long": config.long_venue, "entry_bps": f"{opportunity.entry_bps:.1f}",
-                   "total": str(total), "clip": str(clip), "method": config.execution_method})
+                   "total": str(total), "clip": str(clip), "method": config.execution_method,
+                   "history": None if profile is None else {"label": profile.label, "above_pct": profile.above_pct,
+                                                            "converged": profile.converged_episodes,
+                                                            "coverage_pct": profile.coverage_pct}})
         self.notify(f"價差組啟動 {symbol}：空 {config.short_venue} / 多 {config.long_venue}，"
                     f"價差 {opportunity.entry_bps:.1f} bps，數量 {total}")
+
+    async def check_history(self, opportunity: Opportunity):
+        """24h history of this pair's spread; a structural (never-converging) spread blocks the launch."""
+        h = self.settings.history
+        if self.history is None or opportunity.entry_bps < Decimal(str(h["check_bps"])):
+            return None
+        profile = await self.history.profile(opportunity.symbol, opportunity.short_venue, opportunity.long_venue)
+        if h["block_persistent"] and profile.label == "persistent":
+            raise RuntimeError(f"24h history: spread >= {h['check_bps']} bps for {profile.above_pct}% of the time "
+                               f"and never returned to take profit; likely structural")
+        return profile
 
     def group_finished(self, group: Group):
         status = group.status
@@ -833,7 +872,7 @@ class Dispatcher:
 
     # -------------------------------------------------------------- dry run
 
-    def dry_run_report(self, *, top: int = 10) -> str:
+    async def dry_run_report(self, *, top: int = 10) -> str:
         """Opportunities and existing-group estimates; never launches, locks or trades."""
         import time as _time
         from hydra_basis.spread_strategy.core import State
@@ -845,6 +884,14 @@ class Dispatcher:
             return estimate_opportunity(config, opportunity, self.settings.group_notional_usd)
         qualifying = [estimate(o) for o in found if o.qualifies][:top]
         near = [estimate(o) for o in found if not o.qualifies][:top]
+        histories = []
+        if self.history is not None:
+            self.history.record_store(self.store, self.clock())
+            check = Decimal(str(self.settings.history["check_bps"]))
+            candidates = [o for o in found if o.entry_bps >= check][:top]
+            profiles = await asyncio.gather(*(self.history.profile(o.symbol, o.short_venue, o.long_venue)
+                                              for o in candidates))
+            histories = list(zip(candidates, profiles))
         groups = []
         if self.index_path.exists():
             saved = json.loads(self.index_path.read_text(encoding="utf-8"))["groups"]
@@ -864,7 +911,8 @@ class Dispatcher:
                 groups.append(estimate_group(gid, config, state, books))
         return format_report(now_text=_time.strftime("%Y-%m-%d %H:%M:%S"), feeds=dict(self.health),
                              take_profit_bps=self.settings.take_profit_bps, qualifying=qualifying, near=near,
-                             groups=groups)
+                             groups=groups, histories=histories,
+                             history_check_bps=self.settings.history["check_bps"])
 
     # -------------------------------------------------------------- main loop
 
@@ -895,6 +943,8 @@ class Dispatcher:
         for group in list(self.groups.values()):
             await group.shutdown()
         self.save_index()
+        if self.history is not None:
+            await self.history.close()
         for adapter in self.adapters.values():
             close = getattr(adapter, "close", None)
             if callable(close):

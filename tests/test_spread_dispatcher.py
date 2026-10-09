@@ -22,7 +22,7 @@ ZERO_FEES = {v: {"maker": D("0"), "taker": D("0")} for v in VENUES}
 def settings(**kwargs):
     defaults = dict(venues=VENUES, fees=ZERO_FEES, min_profit_bps=D("0"), slippage_buffer_bps=D("0"),
                     funding_budget_bps=D("0"), confirm_seconds=0, scan_seconds=0.01,
-                    strategy={"tick_seconds": 0.01})
+                    strategy={"tick_seconds": 0.01}, history={"enabled": False})
     return Settings(**(defaults | kwargs))
 
 
@@ -249,7 +249,7 @@ class DispatcherTests(unittest.IsolatedAsyncioTestCase):
         quote(self.store, "aster", "BBB", "100.2", "100.25", self.clock)  # 20 bps: below the 40 bps gate
         quote(self.store, "hyperliquid", "BBB", "99.95", "100", self.clock)
         d = self.dispatcher()
-        report = d.dry_run_report()
+        report = await d.dry_run_report()
         self.assertEqual(d.groups, {})
         self.assertFalse(d.index_path.exists())
         qualifying, near = report.split("[接近門檻")
@@ -262,7 +262,7 @@ class DispatcherTests(unittest.IsolatedAsyncioTestCase):
         group = next(iter(live.groups.values()))
         await until(lambda: group.engine.matched() > 0)
         await live.shutdown()
-        report = self.dispatcher().dry_run_report()
+        report = await self.dispatcher().dry_run_report()
         self.assertIn(group.id, report)
         self.assertIn("[現有倉位] 1 組", report)
 

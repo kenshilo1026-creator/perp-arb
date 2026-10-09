@@ -98,7 +98,8 @@ def _bps(value: Decimal | None) -> str:
 
 def format_report(*, now_text: str, feeds: dict[str, bool], take_profit_bps: Decimal,
                   qualifying: list[OpportunityEstimate], near: list[OpportunityEstimate],
-                  groups: list[GroupEstimate]) -> str:
+                  groups: list[GroupEstimate], histories: list | None = None,
+                  history_check_bps: float = 30) -> str:
     lines = [f"===== 乾跑報告 {now_text} | 行情 " + " ".join(
         f"{venue}:{'OK' if ok else 'DOWN'}" for venue, ok in feeds.items()) + " =====",
              f"假設：在價差收斂到止盈門檻 {take_profit_bps} bps 時平倉；只扣手續費，未計資金費率、滑價和掛單深度。", ""]
@@ -115,6 +116,25 @@ def format_report(*, now_text: str, feeds: dict[str, bool], take_profit_bps: Dec
     lines += [header, *rows(qualifying)] if qualifying else ["  （目前沒有）"]
     lines += ["", "[接近門檻，未達開倉條件] 前幾名"]
     lines += [header, *rows(near)] if near else ["  （沒有正價差）"]
+    lines += ["", f"[價差歷史 過去24小時] 現價差 ≥ {history_check_bps} bps 的機會"]
+    if histories:
+        lines.append(f"{'幣種':<10}{'做空':<12}{'做多':<12}{'現在bps':>8}{'24h中位':>8}{'p90':>7}"
+                     f"{'≥門檻時間%':>10}{'達門檻次數':>9}{'收斂次數':>8}{'收斂中位分':>9}{'本次持續分':>9}"
+                     f"{'距上次收斂分':>11}{'覆蓋%':>7}  判斷")
+        for opportunity, p in histories:
+            def num(value, fmt="{:.1f}"):
+                return "-" if value is None else fmt.format(value)
+            lines.append(f"{opportunity.symbol:<10}{opportunity.short_venue:<12}{opportunity.long_venue:<12}"
+                         f"{opportunity.entry_bps:>8.1f}{num(p.median_bps):>8}{num(p.p90_bps):>7}"
+                         f"{p.above_pct:>10.1f}{p.episodes:>9}{p.converged_episodes:>8}"
+                         f"{num(p.median_minutes_to_converge, '{:.0f}'):>9}{p.current_episode_minutes:>9}"
+                         f"{num(p.minutes_since_converged, '{:.0f}'):>11}{p.coverage_pct:>7.0f}  {p.label_text}")
+        lines.append(f"  價差以每分鐘收盤/中間價計算；「收斂」= 之後回到 ≤ {take_profit_bps} bps。"
+                     "Lighter 沒有公開K線，靠調度器運行時自行記錄，首天覆蓋率會較低。")
+        lines.append("  持續型＝幾乎整天都在門檻以上且從未收斂（結構性，開倉後可能無法止盈）；"
+                     "反覆收斂型＝曾達門檻後回到止盈位；瞬間型＝極少出現且剛剛才出現。")
+    else:
+        lines.append("  （目前沒有）")
     lines += ["", f"[現有倉位] {len(groups)} 組"]
     if groups:
         lines.append(f"{'組別':<28}{'狀態':<9}{'數量':>12}{'開倉bps':>8}{'現平倉bps':>10}"

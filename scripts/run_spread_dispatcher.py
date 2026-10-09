@@ -62,7 +62,7 @@ async def dry_run(args):
             await asyncio.sleep(10)  # let every venue's quotes arrive
             elapsed = 10.0
             while True:
-                print(dispatcher.dry_run_report(top=args.top), flush=True)
+                print(await dispatcher.dry_run_report(top=args.top), flush=True)
                 if args.max_seconds and elapsed >= args.max_seconds:
                     return
                 await asyncio.sleep(args.report_seconds)
@@ -70,6 +70,8 @@ async def dry_run(args):
         finally:
             for task in feeds:
                 task.cancel()
+            if dispatcher.history is not None:
+                await dispatcher.history.close()
 
 
 async def run(args):

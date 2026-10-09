@@ -132,6 +132,7 @@ def extract_hyperliquid_order_id(data: dict, *, fill_type: str) -> int | None:
 
 
 class HyperliquidExecutionAdapter:
+    supports_limit_ioc = True
     # Every adapter instance signing for one key (main dex and HIP-3 dexes alike)
     # shares this nonce sequence: two orders in the same millisecond must not collide.
     _nonce_lock = threading.Lock()
@@ -514,13 +515,19 @@ class HyperliquidExecutionAdapter:
 
     async def place_market_order(
         self, *, symbol: str, side: str, amount: str, clip_usd: float,
-        reduce_only: bool = False,
+        reduce_only: bool = False, limit_price: str | None = None,
     ) -> dict:
         asset_index = await self.ensure_isolated_margin(symbol)
         is_buy = side.strip().upper() == "BUY"
-        mid = await self._get_mid_price(symbol)
-        slippage = self.slippage_bps / 10000
-        price = mid * (1 + slippage) if is_buy else mid * (1 - slippage)
+        if limit_price is not None:
+            # IOC at the caller's worst acceptable price; rounding only makes it stricter.
+            price, rounding = Decimal(str(limit_price)), ROUND_FLOOR if is_buy else ROUND_CEILING
+        else:
+            mid = await self._get_mid_price(symbol)
+            slippage = self.slippage_bps / 10000
+            price = mid * (1 + slippage) if is_buy else mid * (1 - slippage)
+            # Round the IOC limit away from the market so slippage protection is kept.
+            rounding = ROUND_CEILING if is_buy else ROUND_FLOOR
         action = self._build_action(
             asset_index=asset_index,
             is_buy=is_buy,
@@ -529,8 +536,7 @@ class HyperliquidExecutionAdapter:
             tif="Ioc",
             reduce_only=reduce_only,
             sz_decimals=await self._get_sz_decimals(symbol),
-            # Round the IOC limit away from the market so slippage protection is kept.
-            price_rounding=ROUND_CEILING if is_buy else ROUND_FLOOR,
+            price_rounding=rounding,
         )
         data = await self._post_order(action)
         statuses = data.get("response", {}).get("data", {}).get("statuses", [])

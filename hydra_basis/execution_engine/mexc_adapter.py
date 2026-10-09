@@ -23,6 +23,7 @@ _SIDE_CLOSE_LONG = 4   # SELL to close long
 # MEXC futures order types
 _TYPE_LIMIT = 1
 _TYPE_POST_ONLY = 2  # maker only: cancelled instead of taking liquidity
+_TYPE_IOC = 3  # limit, immediate-or-cancel
 _TYPE_MARKET = 5
 
 
@@ -37,6 +38,7 @@ def mexc_close_side(side: str) -> int:
 
 class MexcExecutionAdapter:
     BASE_URL = "https://contract.mexc.com"
+    supports_limit_ioc = True
 
     def __init__(
         self,
@@ -288,16 +290,16 @@ class MexcExecutionAdapter:
 
     async def place_market_order(
         self, *, symbol: str, side: str, amount: str, clip_usd: float,
-        reduce_only: bool = False,
+        reduce_only: bool = False, limit_price: str | None = None,
     ) -> dict:
         contract_sym = mexc_contract_symbol(symbol)
         data = await self._post_order({
             "symbol": contract_sym,
-            "price": 0,
+            "price": float(limit_price) if limit_price is not None else 0,
             "vol": float(amount),
             "leverage": self.leverage,
             "side": mexc_close_side(side) if reduce_only else self._side(side),
-            "type": _TYPE_MARKET,
+            "type": _TYPE_IOC if limit_price is not None else _TYPE_MARKET,
             "openType": self.open_type,
             "positionId": 0,
             "externalOid": "",

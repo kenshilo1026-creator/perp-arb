@@ -72,6 +72,7 @@ def strip_aster_stable_suffix(symbol: str) -> str:
 
 class AsterExecutionAdapter:
     BASE_URL = "https://fapi.asterdex.com"
+    supports_limit_ioc = True
     # Aster rejects a nonce that has already been used by the same signer/user.
     # Adapters are recreated between batches, so nonce state must be shared
     # across instances rather than reset in __init__.
@@ -502,9 +503,20 @@ class AsterExecutionAdapter:
 
     async def place_market_order(
         self, *, symbol: str, side: str, amount: str, clip_usd: float,
-        reduce_only: bool = False,
+        reduce_only: bool = False, limit_price: str | None = None,
     ) -> dict:
         raw_symbol = await self._resolve_raw_symbol(symbol)
+        if limit_price is not None:
+            # IOC limit: fills only at limit_price or better; the rest is cancelled.
+            quantity = await self._format_quantity(symbol, amount, market=False)
+            await self.ensure_isolated_margin(symbol)
+            await self.ensure_leverage(symbol)
+            data = await self._post_order({
+                "symbol": raw_symbol, "side": side.upper(), "type": "LIMIT", "timeInForce": "IOC",
+                "quantity": quantity, "price": limit_price,
+                **({"reduceOnly": "true"} if reduce_only else {}),
+            })
+            return {"ok": True, "order_id": data.get("orderId"), "raw": data}
         quantity = await self._format_quantity(symbol, amount, market=True)
         await self.ensure_isolated_margin(symbol)
         await self.ensure_leverage(symbol)

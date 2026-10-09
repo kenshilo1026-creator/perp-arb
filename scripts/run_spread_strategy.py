@@ -64,10 +64,11 @@ async def run(args):
             return
         async with AsyncExitStack() as stack:
             session = await stack.enter_async_context(aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15)))
-            feed = MarketFeed(config)
+            instruments = {venue: await fetch_instrument(session, venue, config.symbol) for venue in config.venues}
+            feed = MarketFeed(config, contract_sizes={venue: inst.contract_size for venue, inst in instruments.items()
+                                                      if inst.contract_size})
             feed_task = asyncio.create_task(feed.run(session))
             stack.callback(feed_task.cancel)
-            instruments = {venue: await fetch_instrument(session, venue, config.symbol) for venue in config.venues}
             on_exposure = None
             if args.live:
                 from hydra_basis.env import load_environment

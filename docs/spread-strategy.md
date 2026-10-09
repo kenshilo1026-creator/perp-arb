@@ -55,6 +55,28 @@ completion state.
 * Entry: `(short bid - long ask) / long ask * 10000` must be `>= entry_bps`.
 * Exit: `(short ask - long bid) / long bid * 10000` must be `<= take_profit_bps`.
 
+### Prices: order-book depth, and IOC limits at the profit boundary
+
+Every open/close decision prices the full clip against visible depth: the
+average fill when selling into the bids or buying the asks across levels
+(Aster 10, Hyperliquid/Entropy/Lighter/Arcus 20, MEXC 5 levels; MEXC sizes
+converted from contracts). If the visible book cannot fill the clip, the
+strategy does not trade (`depth_insufficient` in the log). Variational quotes
+are already priced for the order's size tier.
+
+Normal entry and exit legs are IOC limits, not market orders. Each leg's limit
+is its worst acceptable price: the largest symmetric slip from the decision
+prices at which both legs filling at their limits still passes the gate
+(fees, take profit, funding and slippage reserves, min profit). It is rounded
+to the stricter tick. A leg either fills profitably or does not fill. A
+zero-fill IOC is a no-fill, not a failure.
+
+If only one leg fills, the hedge repair unwinds an entry: it trims the leg
+that filled, reduce-only, rather than chasing the other leg at market. Exits
+are completed. Maker-fill hedges, repairs and stop-loss exits stay market
+orders because they must complete; Variational legs are market orders too
+(no IOC limits).
+
 ### Net-profit gate (kept from the earlier version; not in the original)
 
 Entry also requires the estimated net edge to reach `min_profit_bps` after a

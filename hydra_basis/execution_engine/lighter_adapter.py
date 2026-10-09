@@ -249,6 +249,8 @@ def _lighter_snapshot_position_items(snapshot: dict[str, object]) -> list[dict]:
 
 
 class LighterExecutionAdapter:
+    supports_limit_ioc = True
+
     def __init__(
         self,
         *,
@@ -579,7 +581,21 @@ class LighterExecutionAdapter:
         return await self._send_order(request, market_config, reduce_only=reduce_only, immediate=False,
                                       post_only=post_only)
 
-    async def place_market_order(self, *, symbol: str, side: str, amount: str, clip_usd: float, reduce_only: bool = False) -> dict[str, object]:
+    async def place_market_order(self, *, symbol: str, side: str, amount: str, clip_usd: float,
+                                 reduce_only: bool = False, limit_price: str | None = None) -> dict[str, object]:
+        if limit_price is not None:
+            # IOC at the caller's worst acceptable price instead of book +/- slippage.
+            if not reduce_only:
+                await self.ensure_isolated_margin(symbol)
+            market_config = self._normalize_market_config(await self._load_market_config(symbol))
+            request = build_lighter_limit_order_request(
+                side=side, quantity=Decimal(str(amount)), price=Decimal(str(limit_price)),
+                base_amount_multiplier=market_config["base_amount_multiplier"],
+                price_multiplier=market_config["price_multiplier"], market_index=market_config["market_index"],
+                min_base_amount=market_config.get("min_base_amount"),
+                min_quote_amount=None if reduce_only else market_config.get("min_quote_amount"),
+            )
+            return await self._send_order(request, market_config, reduce_only=reduce_only, immediate=True)
         return await self._submit_market_order(
             symbol=symbol,
             side=side,

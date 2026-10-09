@@ -54,6 +54,7 @@ class Engine:
         self.last_repair_at = 0
         self.last_quote_at = 0
         self._dust_logged: Decimal | None = None
+        self._thin_logged: tuple | None = None
         self._polled_at: dict[str, int] = {}
 
     # ------------------------------------------------------------------ helpers
@@ -82,11 +83,12 @@ class Engine:
                          for o in self.non_quote_open_orders()), ZERO)
         return max(ZERO, self.config.total_quantity - self.matched() - in_flight - abs(self.imbalance()))
 
-    def executable_price(self, venue: str, side: str) -> Decimal | None:
+    def executable_price(self, venue: str, side: str, quantity: Decimal | None = None) -> Decimal | None:
+        """Top of book, or the average fill price for ``quantity`` across visible depth."""
         book = self.feed.fresh(venue)
         if book is None:
             return None
-        return book.ask if side == "BUY" else book.bid
+        return book.executable(side, quantity)
 
     def new_order(self, *, leg: str, side: str, purpose: str, quantity: Decimal, reduce_only: bool,
                   price: Decimal | None = None, reference: Decimal | None = None,
@@ -301,44 +303,93 @@ class Engine:
         books = self.feed.fresh_pair()
         if books is None:
             return
-        matched = self.matched()
-        short_bid, long_ask = books[c.short_venue].bid, books[c.long_venue].ask
-        if entry_allowed(c, short_bid, long_ask):
-            quantity = min(c.clip_quantity, self.remaining_entry_capacity())
-            if quantity > EPSILON:
-                await self.execute_taker_clip("entry", quantity, f"entry {short_bid}/{long_ask}")
+        entry_quantity = self.clip_size(min(c.clip_quantity, self.remaining_entry_capacity()))
+        if entry_quantity > EPSILON:
+            prices = self.depth_prices(books, "entry", entry_quantity)
+            if prices is not None and entry_allowed(c, *prices):
+                await self.execute_taker_clip("entry", entry_quantity, f"entry {prices[0]}/{prices[1]}", prices=prices)
                 return
+        matched = self.matched()
         if matched > EPSILON:
-            short_ask, long_bid = books[c.short_venue].ask, books[c.long_venue].bid
-            if exit_allowed(c, s.short, s.long, short_ask, long_bid):
-                await self.execute_taker_clip("exit", min(c.clip_quantity, matched),
-                                              f"exit {short_ask}/{long_bid}")
+            exit_quantity = self.clip_size(min(c.clip_quantity, matched))
+            prices = self.depth_prices(books, "exit", exit_quantity)
+            if prices is not None and exit_allowed(c, s.short, s.long, *prices):
+                await self.execute_taker_clip("exit", exit_quantity, f"exit {prices[0]}/{prices[1]}", prices=prices)
 
-    async def execute_taker_clip(self, intent: str, quantity: Decimal, condition: str, *, purpose: str | None = None):
-        c = self.config
-        for venue in c.venues:
+    def clip_size(self, quantity: Decimal) -> Decimal:
+        for venue in self.config.venues:
             quantity = self.instruments[venue].round_quantity(quantity)
+        return quantity
+
+    def depth_prices(self, books, intent: str, quantity: Decimal) -> tuple[Decimal, Decimal] | None:
+        """Average fill prices (short leg, long leg) for the whole quantity; None if the books are too thin."""
+        c = self.config
+        prices = tuple(books[c.venue_of(leg)].executable(leg_side(leg, intent), quantity) for leg in ("short", "long"))
+        if None in prices:
+            minute = self.clock() // 60_000
+            if self._thin_logged != (intent, minute):
+                self._thin_logged = (intent, minute)
+                self.log("depth_insufficient", intent=intent, quantity=str(quantity),
+                         message="visible order book cannot fill the clip; not trading")
+            return None
+        return prices
+
+    def boundary_limits(self, intent: str, short_price: Decimal, long_price: Decimal) -> tuple[Decimal, Decimal]:
+        """Worst acceptable IOC limit per leg: both legs filling at their limits still passes the
+        entry/exit gate (fees and reserves included). The slack is split evenly between the legs."""
+        c, s = self.config, self.state
+
+        def allowed(k: Decimal) -> bool:
+            if intent == "entry":
+                return entry_allowed(c, short_price * (1 - k), long_price * (1 + k))
+            return exit_allowed(c, s.short, s.long, short_price * (1 + k), long_price * (1 - k))
+
+        low, high = Decimal(0), Decimal("0.05")
+        if allowed(high):
+            low = high
+        elif allowed(low):
+            for _ in range(40):
+                middle = (low + high) / 2
+                if allowed(middle):
+                    low = middle
+                else:
+                    high = middle
+        short_inst, long_inst = self.instruments[c.short_venue], self.instruments[c.long_venue]
+        if intent == "entry":   # short SELLs (minimum price, round up), long BUYs (maximum price, round down)
+            return (short_inst.round_price(short_price * (1 - low), "up"),
+                    long_inst.round_price(long_price * (1 + low), "down"))
+        return (short_inst.round_price(short_price * (1 + low), "down"),   # short buys back
+                long_inst.round_price(long_price * (1 - low), "up"))        # long sells
+
+    async def execute_taker_clip(self, intent: str, quantity: Decimal, condition: str, *, purpose: str | None = None,
+                                 prices: tuple[Decimal, Decimal] | None = None):
+        """Both legs at once. With ``prices`` (normal entry/exit) each leg is an IOC limit at the
+        profit boundary, so it fills profitably or not at all; without (stop loss) they are market."""
+        c = self.config
+        quantity = self.clip_size(quantity)
+        limits = self.boundary_limits(intent, *prices) if prices is not None else (None, None)
         legs = []
-        for leg in ("short", "long"):
+        for index, leg in enumerate(("short", "long")):
             venue, side = c.venue_of(leg), leg_side(leg, intent)
-            price = self.executable_price(venue, side)
+            price = prices[index] if prices is not None else self.executable_price(venue, side)
             error = None if price is not None else "market data unavailable"
             error = error or self.instruments[venue].size_error(quantity, price)
             if error:
                 await self.pause(f"Order-size compliance check failed on {venue}: {error}")
                 return
-            legs.append((leg, venue, side, price))
+            legs.append((leg, venue, side, price, limits[index]))
         clip = f"clip-{uuid.uuid4().hex[:12]}"
         reduce_only = intent == "exit"
         orders = [self.new_order(leg=leg, side=side, purpose=purpose or f"taker_{intent}", quantity=quantity,
                                  reduce_only=reduce_only, reference=price, clip=clip)
-                  for leg, venue, side, price in legs]
-        self.log("clip_triggered", intent=intent, condition=condition, quantity=str(quantity))
+                  for leg, venue, side, price, limit in legs]
+        self.log("clip_triggered", intent=intent, condition=condition, quantity=str(quantity),
+                 limits=[None if limit is None else str(limit) for *_, limit in legs])
         results = await asyncio.gather(*(
             submit_market(self.adapters[venue], symbol=c.symbol, side=side, quantity=quantity,
-                          reduce_only=reduce_only, reference_price=price,
+                          reduce_only=reduce_only, reference_price=price, limit_price=limit,
                           timeout_seconds=c.order_timeout_seconds, poll_seconds=c.poll_seconds(venue))
-            for leg, venue, side, price in legs))
+            for leg, venue, side, price, limit in legs))
         for order, result in zip(orders, results):
             self.apply_execution(order, result)
         rejected = [result for result in results if result.state == "REJECTED"]
@@ -350,7 +401,8 @@ class Engine:
                                       margin_pause=intent == "entry" and len(rejected) == len(results))
         else:
             self.failure_count = 0
-        self.log("clip_settled", intent=intent, fills=[str(r.filled) for r in results],
+        event = "clip_unfilled" if all(result.filled == 0 for result in results) else "clip_settled"
+        self.log(event, intent=intent, fills=[str(r.filled) for r in results],
                  matched=str(self.matched()), imbalance=str(self.imbalance()))
 
     async def record_failure(self, errors: list[str], *, margin_pause: bool = False):
@@ -369,7 +421,7 @@ class Engine:
 
     # ------------------------------------------------------------------ maker_taker
 
-    def desired_maker_price(self, intent: str) -> tuple[Decimal, str] | None:
+    def desired_maker_price(self, intent: str, quantity: Decimal | None = None) -> tuple[Decimal, str] | None:
         c, s = self.config, self.state
         books = self.feed.fresh_pair()
         if books is None:
@@ -378,7 +430,10 @@ class Engine:
         taker_leg = "long" if maker_leg == "short" else "short"
         maker_side, taker_side = leg_side(maker_leg, intent), leg_side(taker_leg, intent)
         taker_book, maker_book = books[c.venue_of(taker_leg)], books[c.maker_venue]
-        taker_price = taker_book.ask if taker_side == "BUY" else taker_book.bid
+        # The hedge will take the quote's whole size: price it at the taker book's average.
+        taker_price = taker_book.executable(taker_side, quantity)
+        if taker_price is None:
+            return None
         boundary = maker_boundary(c, intent, taker_price, s.short, s.long)
         instrument = self.instruments[c.maker_venue]
         if maker_side == "SELL":
@@ -407,8 +462,12 @@ class Engine:
 
     async def maintain_quote(self, intent: str, quantity: Decimal):
         c = self.config
-        desired = self.desired_maker_price(intent)
+        desired = self.desired_maker_price(intent, quantity)
         if desired is None:
+            # No data, or the hedge book is too thin for this size: do not leave a quote resting.
+            existing = self.quotes().get(intent)
+            if existing is not None:
+                await self.cancel_quote(existing)
             return
         price, side = desired
         instrument = self.instruments[c.maker_venue]
@@ -482,9 +541,10 @@ class Engine:
         other = long_q if lagging == "short" else short_q
         delta = -other - held
         trim_side = "SELL" if other > 0 else "BUY"
-        if self.last_fill_closed():
-            # A take-profit fill reduced one leg. Close the other leg to match; topping up
-            # the smaller leg (the original's lagging-leg rule) would reopen what just closed.
+        if self.last_fill_trims():
+            # A take-profit fill reduced one leg: close the other to match (topping up the smaller
+            # leg, the original's rule, would reopen what just closed). A bounded taker entry that
+            # filled unevenly is unwound the same way rather than chased at market.
             leg, side, trim = excess, trim_side, True
         else:
             leg, side, trim = lagging, "BUY" if delta > 0 else "SELL", False
@@ -526,10 +586,10 @@ class Engine:
         if abs(self.imbalance()) <= EPSILON:
             self.repair_attempts = 0
 
-    def last_fill_closed(self) -> bool:
+    def last_fill_trims(self) -> bool:
         for order in reversed(self.state.orders):
             if order.purpose != "repair" and number(order.executed_quantity) > 0:
-                return order.purpose in {"quote_exit", "taker_exit", "stop"}
+                return order.purpose in {"quote_exit", "taker_exit", "stop", "taker_entry"}
         return False
 
     def repair_size_error(self, leg: str, side: str, quantity: Decimal) -> str | None:

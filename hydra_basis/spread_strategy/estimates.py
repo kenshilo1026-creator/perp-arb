@@ -30,12 +30,18 @@ class OpportunityEstimate:
     gross_at_tp: Decimal
     fees: Decimal
     net_at_tp: Decimal
+    # Entry spread at the clip size from visible depth; None when the book is too thin.
+    depth_bps: Decimal | None = None
+    depth_status: str = "n/a"
 
 
-def estimate_opportunity(config: Config, opportunity, notional_usd: Decimal) -> OpportunityEstimate:
+def estimate_opportunity(config: Config, opportunity, notional_usd: Decimal, *,
+                         depth_prices: tuple[Decimal, Decimal] | None = None,
+                         depth_status: str = "n/a") -> OpportunityEstimate:
+    """Profit at take profit; uses the depth-average entry prices when visible depth covers the clip."""
     fs, fl = config.fee_rate(config.short_venue), config.fee_rate(config.long_venue)
     tp = config.take_profit_bps / BPS
-    short_entry, long_entry = opportunity.short_bid, opportunity.long_ask
+    short_entry, long_entry = depth_prices or (opportunity.short_bid, opportunity.long_ask)
     quantity = notional_usd / long_entry
     long_exit = long_entry
     short_exit = long_exit * (ONE + tp)
@@ -45,7 +51,8 @@ def estimate_opportunity(config: Config, opportunity, notional_usd: Decimal) -> 
         opportunity.symbol, opportunity.short_venue, opportunity.long_venue, opportunity.entry_bps,
         (opportunity.short_ask - opportunity.long_bid) / opportunity.long_bid * BPS,
         (entry_ratio_required(config) - ONE) * BPS, opportunity.qualifies, opportunity.blocked_by,
-        quantity, notional_usd, gross, fees, gross - fees)
+        quantity, notional_usd, gross, fees, gross - fees,
+        None if depth_prices is None else (short_entry - long_entry) / long_entry * BPS, depth_status)
 
 
 @dataclass(frozen=True)
@@ -102,14 +109,21 @@ def format_report(*, now_text: str, feeds: dict[str, bool], take_profit_bps: Dec
                   history_check_bps: float = 30) -> str:
     lines = [f"===== 乾跑報告 {now_text} | 行情 " + " ".join(
         f"{venue}:{'OK' if ok else 'DOWN'}" for venue, ok in feeds.items()) + " =====",
-             f"假設：在價差收斂到止盈門檻 {take_profit_bps} bps 時平倉；只扣手續費，未計資金費率、滑價和掛單深度。", ""]
-    header = (f"{'幣種':<10}{'做空':<12}{'做多':<12}{'開倉bps':>8}{'門檻bps':>8}{'現平倉bps':>10}"
+             f"假設：在價差收斂到止盈門檻 {take_profit_bps} bps 時平倉；只扣手續費，未計資金費率。"
+             "「深度後bps」= 按每筆下單量吃掉掛單後的平均價差（有深度數據時毛利/淨利按此計算）；"
+             "「不足」= 可見掛單不夠成交一筆；「無數據」= 深度訂閱剛開始，下一份報告會有。", ""]
+    header = (f"{'幣種':<10}{'做空':<12}{'做多':<12}{'開倉bps':>8}{'深度後bps':>10}{'門檻bps':>8}{'現平倉bps':>10}"
               f"{'名目USD':>9}{'毛利':>9}{'手續費':>9}{'淨利':>9}")
 
+    def depth_text(e):
+        if e.depth_bps is not None:
+            return _bps(e.depth_bps)
+        return {"thin": "不足", "no_data": "無數據"}.get(e.depth_status, "-")
+
     def rows(items):
-        return [f"{e.symbol:<10}{e.short_venue:<12}{e.long_venue:<12}{_bps(e.entry_bps):>8}{_bps(e.required_bps):>8}"
-                f"{_bps(e.exit_bps_now):>10}{e.notional_usd:>9.0f}{_usd(e.gross_at_tp):>9}{_usd(e.fees):>9}"
-                f"{_usd(e.net_at_tp):>9}" + ("" if e.qualifies else f"  ({_blocked(e.blocked_by)})")
+        return [f"{e.symbol:<10}{e.short_venue:<12}{e.long_venue:<12}{_bps(e.entry_bps):>8}{depth_text(e):>10}"
+                f"{_bps(e.required_bps):>8}{_bps(e.exit_bps_now):>10}{e.notional_usd:>9.0f}{_usd(e.gross_at_tp):>9}"
+                f"{_usd(e.fees):>9}{_usd(e.net_at_tp):>9}" + ("" if e.qualifies else f"  ({_blocked(e.blocked_by)})")
                 for e in items]
 
     lines.append(f"[符合開倉條件] {len(qualifying)} 個")

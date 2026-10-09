@@ -174,8 +174,10 @@ class DataTests(unittest.IsolatedAsyncioTestCase):
         frame = {"type": "channel_data", "channel": "bbo", "id": "ETH-USD", "contents": {
             "bestBid": {"price": "2495.65", "size": "1"}, "bestAsk": {"price": "2495.66", "size": "2"},
             "timestamp": 1791526601788875}}
-        self.assertEqual(parse_arcus_bbo(frame), {"symbol": "ETH", "bid": "2495.65", "ask": "2495.66",
-                                                  "ts_ms": 1791526601788})
+        book = parse_arcus_bbo(frame)
+        self.assertEqual((book["symbol"], book["bid"], book["ask"], book["ts_ms"]),
+                         ("ETH", D("2495.65"), D("2495.66"), 1791526601788))
+        self.assertEqual((book["bids"], book["asks"]), (((D("2495.65"), D("1")),), ((D("2495.66"), D("2")),)))
         self.assertIsNone(parse_arcus_bbo({"type": "channel_data", "channel": "trades"}))
 
 

@@ -100,7 +100,8 @@ class ScannerTests(unittest.TestCase):
         runner.handle({"channel": "l2Book", "data": {"coin": "io:OAI", "time": 990, "levels": [
             [{"px": "1689.5", "sz": "1", "n": 1}], [{"px": "1689.8", "sz": "1", "n": 1}]]}})
         quote = store.get_quote("entropy", "OAI")
-        self.assertEqual((quote["bid"], quote["ask"], quote["source_ms"]), (1689.5, 1689.8, 990))
+        self.assertEqual((quote["bid"], quote["ask"], quote["source_ms"]), (D("1689.5"), D("1689.8"), 990))
+        self.assertEqual(quote["bids"], ((D("1689.5"), D("1")),))
 
 
 if __name__ == "__main__":

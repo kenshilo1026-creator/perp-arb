@@ -235,27 +235,38 @@ class TakerTakerTests(unittest.IsolatedAsyncioTestCase):
             await h.engine.step()
             self.assertEqual(h.legs(), (D("0"), D("0")))
 
-    async def test_one_leg_rejection_backs_off_then_repairs(self):
+    async def test_one_leg_rejection_backs_off_then_unwinds_the_filled_leg(self):
         with tempfile.TemporaryDirectory() as tmp:
             h = Harness(tmp)
-            hl = RejectingVenue("hyperliquid", h.feed)
-            h.adapters["hyperliquid"] = hl
+            h.adapters["hyperliquid"] = RejectingVenue("hyperliquid", h.feed)
             h.wide()
             await h.engine.start()
             await h.engine.step()
-            self.assertEqual(h.legs(), (D("-0.01"), D("0")))
             self.assertEqual(h.engine.failure_count, 1)
             self.assertEqual(h.engine.cooldown_until, h.clock() + 4_000)
             self.assertEqual(h.state.status, "RUNNING", "one accepted leg: margin rejection does not pause")
-            # Hedge repair retries the lagging leg, then pauses after three attempts.
-            h.adapters["hyperliquid"] = hl
-            for _ in range(3):
-                h.clock.advance(3_001)
-                h.wide()
-                await h.engine.step()
-            h.clock.advance(3_001)
+            self.assertEqual(h.legs(), (D("-0.01"), D("0")))
+            # Next tick: a bounded taker entry that filled one leg is unwound, not chased at market.
             h.wide()
             await h.engine.step()
+            self.assertEqual(h.legs(), (D("0"), D("0")))
+            repair = [o for o in h.state.orders if o.purpose == "repair"][-1]
+            self.assertEqual((repair.venue, repair.side, repair.reduce_only), ("aster", "BUY", True))
+
+    async def test_maker_hedge_failures_pause_after_three_attempts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            h = Harness(tmp, execution_method="maker_taker", maker_venue="aster")
+            h.adapters["hyperliquid"] = RejectingVenue("hyperliquid", h.feed)
+            h.books(("2000", "2000.5"), ("1999.5", "2000"))
+            await h.engine.start()
+            await h.engine.step()
+            h.books(("2008.5", "2009"), ("1999.5", "2000"))  # the quote fills; the hedge must follow
+            await h.engine.step()
+            self.assertEqual(h.legs(), (D("-0.01"), D("0")))
+            for _ in range(3):
+                h.clock.advance(3_001)
+                h.books(("2008.5", "2009"), ("1999.5", "2000"))
+                await h.engine.step()
             self.assertEqual(h.state.status, "PAUSED")
             self.assertIn("after 3 attempts", h.state.reason)
 
@@ -450,7 +461,7 @@ class MakerTakerTests(unittest.IsolatedAsyncioTestCase):
             await h.engine.start()
             h.feed.update("aster", D("2009"), D("2010"), source_ms=h.clock(), received_ms=h.clock())
             original = h.engine.desired_maker_price
-            h.engine.desired_maker_price = lambda intent: (D("2008"), "SELL")  # stale decision
+            h.engine.desired_maker_price = lambda intent, quantity=None: (D("2008"), "SELL")  # stale decision
             await h.engine.step()
             h.engine.desired_maker_price = original
             expired = [o for o in h.state.orders if o.state == "EXPIRED"]

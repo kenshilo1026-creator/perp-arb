@@ -22,6 +22,8 @@ FILL_KEYS = ("filled_quantity", "executedQty", "executed_qty", "filledQty", "fil
 AVERAGE_KEYS = ("avg_price", "avgPrice", "averagePrice", "avgPx", "dealAvgPrice", "fill_price", "fillPrice")
 MARGIN_ERROR = re.compile(r"margin|balance|insufficient|undercollateral", re.IGNORECASE)
 RATE_LIMIT_ERROR = re.compile(r"\b429\b|-1003|too many|rate limit", re.IGNORECASE)
+# An IOC limit that found nothing inside its price: a clean zero fill, not a failure.
+NO_FILL = re.compile(r"could not immediately match|ioc_canceled|could_not_fill|no fill", re.IGNORECASE)
 POST_ONLY_CROSS = re.compile(r"post only|post-only|post_only|would have immediately matched|would_cross|-5022",
                              re.IGNORECASE)
 
@@ -119,8 +121,12 @@ class Execution:
 
 async def submit_market(adapter, *, symbol: str, side: str, quantity: Decimal, reduce_only: bool,
                         reference_price: Decimal, timeout_seconds: float,
-                        poll_seconds: float = 0.5) -> Execution:
-    """Submit one IOC/market order and settle it; never resubmit an unknown outcome."""
+                        poll_seconds: float = 0.5, limit_price: Decimal | None = None) -> Execution:
+    """Submit one IOC/market order and settle it; never resubmit an unknown outcome.
+
+    ``limit_price`` makes it an IOC limit that fills only at that price or better
+    (venues without IOC limits, i.e. Variational, still send a market order).
+    """
     direction = ONE if side == "BUY" else -ONE
     query = getattr(adapter, "get_order_execution", None)
     # Venues without an order query (Variational) settle from the position delta.
@@ -129,11 +135,15 @@ async def submit_market(adapter, *, symbol: str, side: str, quantity: Decimal, r
                   clip_usd=float(quantity * reference_price))
     if reduce_only:
         kwargs["reduce_only"] = True
+    if limit_price is not None and getattr(adapter, "supports_limit_ioc", False):
+        kwargs["limit_price"] = format(limit_price.normalize(), "f")
     error = None
     try:
         result = await adapter.place_market_order(**kwargs)
     except Exception as exc:
         result, error = getattr(exc, "order_result", None), str(exc)
+        if NO_FILL.search(error):
+            return Execution(ZERO, None, "CANCELED", result, error)
         if definitive_rejection(exc, result):
             return Execution(ZERO, None, "REJECTED", result, error)
     deadline = time.monotonic() + timeout_seconds
@@ -203,12 +213,13 @@ class PaperRejection(OrderRejected):
 class PaperVenue:
     """Simulated venue on live public quotes.
 
-    Market orders fill in full at the current top of book. A resting post-only
-    quote fills at its limit price once the opposite best price reaches it.
-    Neither models depth, queue position or latency: paper fills are not
-    evidence of realizable profit.
+    Taker orders walk the visible book (an IOC limit stops at its price, so it can
+    fill partly or not at all). A resting post-only quote fills at its limit once
+    the opposite best price reaches it. Queue position and latency are not
+    modelled: paper fills are not evidence of realizable profit.
     """
     _ids = itertools.count(1)
+    supports_limit_ioc = True
 
     def __init__(self, venue: str, feed):
         self.venue, self.feed = venue, feed
@@ -258,13 +269,25 @@ class PaperVenue:
                                  "status": "EXPIRED" if post_only and crosses else "NEW"}
         return {"ok": True, "order_id": order_id, "raw": self._status(order_id)}
 
-    async def place_market_order(self, *, symbol, side, amount, clip_usd, reduce_only=False):
+    async def place_market_order(self, *, symbol, side, amount, clip_usd, reduce_only=False, limit_price=None):
         book, quantity = self._book(), number(amount)
         self._check_reduce_only(side, quantity, reduce_only)
-        self._fill(side, quantity)
-        price = book.ask if side == "BUY" else book.bid
+        levels = (book.asks if side == "BUY" else book.bids) or ((book.ask if side == "BUY" else book.bid, quantity),)
+        limit = None if limit_price is None else number(limit_price)
+        filled, cost = ZERO, ZERO
+        for price, size in levels:
+            if limit is not None and (price > limit if side == "BUY" else price < limit):
+                break
+            take = min(size, quantity - filled)
+            filled, cost = filled + take, cost + take * price
+            if filled >= quantity:
+                break
+        if limit is None and filled < quantity:
+            raise PaperRejection(f"paper {self.venue}: visible depth cannot fill {quantity}")
+        if filled > 0:
+            self._fill(side, filled)
         return {"ok": True, "terminal": True, "order_id": f"paper-{next(self._ids)}",
-                "filled_quantity": str(quantity), "avg_price": str(price)}
+                "filled_quantity": str(filled), **({"avg_price": str(cost / filled)} if filled else {})}
 
     async def get_order_execution(self, *, order_result, symbol):
         self._match()
@@ -316,9 +339,12 @@ class MexcUnits:
             payload["raw"] = self._base(payload["raw"])
         return payload
 
-    async def place_market_order(self, *, symbol, side, amount, clip_usd, reduce_only=False):
+    supports_limit_ioc = True
+
+    async def place_market_order(self, *, symbol, side, amount, clip_usd, reduce_only=False, limit_price=None):
         return await self.adapter.place_market_order(symbol=symbol, side=side, amount=self._contracts(amount),
-                                                     clip_usd=clip_usd, reduce_only=reduce_only)
+                                                     clip_usd=clip_usd, reduce_only=reduce_only,
+                                                     limit_price=limit_price)
 
     async def place_limit_order(self, *, symbol, side, amount, clip_usd, price, reduce_only=False,
                                 post_only=False):

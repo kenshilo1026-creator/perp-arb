@@ -25,7 +25,8 @@ from hydra_basis.spread_strategy.broker import (
     PaperVenue, assert_registry_owner, build_venue_adapter, registry_units, strategy_adapter, sync_registry,
 )
 from hydra_basis.spread_strategy.core import (
-    BPS, EPSILON, MAKER_VENUES, VENUES, ZERO, Config, StateStore, entry_ratio_required, now_ms, number,
+    BPS, EPSILON, MAKER_VENUES, VENUES, ZERO, Config, StateStore, entry_allowed, entry_ratio_required, now_ms,
+    number, spread_bps,
 )
 from hydra_basis.spread_strategy.engine import ACTIVE, Engine
 from hydra_basis.spread_strategy.feeds import StoreFeed
@@ -162,6 +163,16 @@ class QuoteStore(MarketStateStore):
         self.clock = clock
         self._live: dict[str, dict[str, dict]] = {}
         self._scan: dict[str, dict[str, dict]] = {}
+        self._depth: dict[str, dict[str, dict]] = {}
+
+    def update_depth(self, venue: str, symbol: str, bids, asks, *, source_ms: int | None):
+        """A multi-level book for a watched symbol (best first, base units)."""
+        if bids and asks:
+            self._depth.setdefault(venue, {})[str(symbol).upper()] = {
+                "bids": tuple(bids), "asks": tuple(asks), "received_ms": self.clock(), "source_ms": source_ms}
+
+    def get_depth(self, venue: str, symbol: str) -> dict | None:
+        return self._depth.get(venue, {}).get(symbol)
 
     def update_quotes(self, venue, quotes, *, timestamp_ms=None):
         super().update_quotes(venue, quotes, timestamp_ms=timestamp_ms)
@@ -172,7 +183,9 @@ class QuoteStore(MarketStateStore):
                 continue
             source = int(quote.get("ts_ms") or 0) or None
             entry = {"bid": bid, "ask": ask, "received_ms": received, "source_ms": source,
-                     "scan_only": bool(quote.get("scan_only"))}
+                     "scan_only": bool(quote.get("scan_only")),
+                     # Visible levels with sizes (top of book at least), when the venue publishes them.
+                     "bids": tuple(quote.get("bids") or ()), "asks": tuple(quote.get("asks") or ())}
             # Scan-only quotes (lagging tickers) help discovery but never drive orders.
             target = self._scan if entry["scan_only"] else self._live
             target.setdefault(venue, {})[str(symbol).upper()] = entry
@@ -316,34 +329,34 @@ def size_group(settings: Settings, mid: Decimal, instruments: list[Instrument]) 
 # ---------------------------------------------------------------------------
 
 async def _build_runners(venue: str, session, store: QuoteStore, settings: Settings, watched) -> list:
-    from hydra_basis.adapters.hyperliquid import fetch_hyperliquid_universe
+    from hydra_basis.adapters.hyperliquid import fetch_hyperliquid_meta
     from hydra_basis.adapters.lighter import fetch_lighter_market_map
-    from hydra_basis.adapters.mexc import list_symbols as list_mexc_symbols
-    from hydra_basis.spread_monitor.runtime import AsterQuoteRunner, LighterQuoteRunner
     from hydra_basis.streams.manager import AsterStreamRunner, HyperliquidStreamRunner, LighterStreamRunner
     if venue == "hyperliquid":
-        from hydra_basis.adapters.hyperliquid import fetch_hyperliquid_meta
         rows = await fetch_hyperliquid_meta(session)
         symbols = [str(row.get("name") or "").upper() for row in rows]
         active = [str(row["name"]) for row in rows if row.get("name") and not row.get("isDelisted")]
         runners = [HyperliquidStreamRunner(session, store, symbols), HyperliquidBooksRunner(session, store, active)]
+    elif venue == "entropy":
+        rows = await fetch_hyperliquid_meta(session, "io")
+        runners = [EntropyBooksRunner(session, store, [str(row["name"]) for row in rows
+                                                      if row.get("name") and not row.get("isDelisted")])]
     elif venue == "arcus":
         from hydra_basis.adapters.arcus import fetch_arcus_markets
         markets = [str(m["marketDisplayName"]) for m in await fetch_arcus_markets(session)
                    if m.get("status") == "ONLINE"]
-        runners = [ArcusRunner(session, store, markets)]
-    elif venue == "entropy":
-        from hydra_basis.adapters.hyperliquid import fetch_hyperliquid_meta
-        rows = await fetch_hyperliquid_meta(session, "io")
-        runners = [EntropyBooksRunner(session, store, [str(row["name"]) for row in rows
-                                                      if row.get("name") and not row.get("isDelisted")])]
+        runners = [ArcusRunner(session, store, markets, watched)]
     elif venue == "lighter":
-        markets = await fetch_lighter_market_map(session)
-        runners = [LighterStreamRunner(session, store), LighterQuoteRunner(session, store, markets)]
+        runners = [LighterStreamRunner(session, store),
+                   LighterRunner(session, store, await fetch_lighter_market_map(session), watched)]
     elif venue == "aster":
-        runners = [AsterStreamRunner(session, store), AsterQuoteRunner(session, store)]
+        runners = [AsterStreamRunner(session, store), AsterRunner(session, store, watched)]
     elif venue == "mexc":
-        runners = [MexcRunner(session, store, sorted(await list_mexc_symbols(session)), watched)]
+        details = await fetch_json(session, "GET", "https://contract.mexc.com/api/v1/contract/detail")
+        sizes = {str(row["baseCoin"]).upper(): Decimal(str(row["contractSize"])) for row in details.get("data") or []
+                 if row.get("state") == 0 and row.get("apiAllowed", True)
+                 and str(row.get("quoteCoin") or "").upper() == "USDT" and row.get("contractSize")}
+        runners = [MexcRunner(session, store, sizes, watched)]
     else:
         return [VariationalRunner(session, store, settings)]
     for runner in runners:
@@ -352,18 +365,42 @@ async def _build_runners(venue: str, session, store: QuoteStore, settings: Setti
 
 
 class _SubscribingRunner:
-    """WebSocket runner that subscribes gradually: bursts make venues drop the connection."""
+    """WebSocket runner that subscribes gradually (bursts make venues drop the connection) and adds
+    a depth subscription for each newly watched symbol (active groups, pending launches)."""
     url = ""
+    ping_message: dict | None = None
+    ping_seconds = 15
 
-    def __init__(self, session, store: QuoteStore):
+    def __init__(self, session, store: QuoteStore, watched=lambda: ()):
         self.session, self.store, self.ws, self._tasks = session, store, None, []
+        self.watched, self.depth_subscribed = watched, set()
 
     async def initialize(self):
         self.ws = await self.session.ws_connect(self.url, heartbeat=20)
         self._tasks.append(asyncio.create_task(self.subscribe()))
+        self._tasks.append(asyncio.create_task(self.watch_depth()))
 
     async def subscribe(self):
         raise NotImplementedError
+
+    def depth_messages(self, symbol: str) -> list[dict] | None:
+        """Messages subscribing ``symbol``'s depth; None while that is not possible yet."""
+        return []
+
+    async def watch_depth(self):
+        seconds = 0
+        while True:
+            for symbol in set(self.watched()) - self.depth_subscribed:
+                messages = self.depth_messages(symbol)
+                if messages is None:
+                    continue
+                for message in messages:
+                    await self.ws.send_json(message)
+                self.depth_subscribed.add(symbol)
+            seconds += 1
+            if self.ping_message is not None and seconds % self.ping_seconds == 0:
+                await self.ws.send_json(self.ping_message)
+            await asyncio.sleep(1)
 
     async def send_spaced(self, messages):
         for message in messages:
@@ -391,6 +428,7 @@ class _SubscribingRunner:
 
 
 class HyperliquidBooksRunner(_SubscribingRunner):
+    """l2Book for every coin: the book already carries 20 levels a side."""
     url = "wss://api.hyperliquid.xyz/ws"
     venue = "hyperliquid"
 
@@ -403,11 +441,12 @@ class HyperliquidBooksRunner(_SubscribingRunner):
                                for coin in self.coins)
 
     def handle(self, payload):
-        from hydra_basis.spread_monitor.runtime import parse_hyperliquid_l2_book
-        if payload.get("channel") == "l2Book":
-            quotes = parse_hyperliquid_l2_book(payload)
+        from hydra_basis.spread_strategy.feeds import parse_hyperliquid_book
+        book = parse_hyperliquid_book(payload)
+        if book is not None:
             # HIP-3 coins carry a dex prefix ("IO:OAI"); the strategy symbol is the part after it.
-            self.store.update_quotes(self.venue, {coin.partition(":")[2] or coin: row for coin, row in quotes.items()})
+            symbol = book["symbol"].partition(":")[2] or book["symbol"]
+            self.store.update_quotes(self.venue, {symbol: book})
 
 
 class EntropyBooksRunner(HyperliquidBooksRunner):
@@ -428,33 +467,110 @@ class EntropyBooksRunner(HyperliquidBooksRunner):
             await asyncio.sleep(60)
 
 
-class MexcRunner(_SubscribingRunner):
-    """Tickers for every symbol (scan-only) plus depth for symbols with an active group."""
-    url = "wss://contract.mexc.com/edge"
+class AsterRunner(_SubscribingRunner):
+    """All-symbol bookTicker (top of book with size) plus depth10 for watched symbols."""
+    url = "wss://fstream.asterdex.com/stream?streams=!bookTicker"
 
-    def __init__(self, session, store, symbols: list[str], watched):
-        super().__init__(session, store)
-        self.symbols, self.watched, self.depth = symbols, watched, set()
+    def __init__(self, session, store, watched=lambda: ()):
+        super().__init__(session, store, watched)
+        self.raw_by_symbol: dict[str, str] = {}
+        self._request_id = 0
+
+    async def subscribe(self):
+        return None
+
+    def depth_messages(self, symbol):
+        raw = self.raw_by_symbol.get(symbol)
+        if raw is None:
+            return None  # not seen on the ticker stream yet
+        self._request_id += 1
+        return [{"method": "SUBSCRIBE", "params": [f"{raw.lower()}@depth10@100ms"], "id": self._request_id}]
+
+    def handle(self, payload):
+        from hydra_basis.adapters.aster import normalize_aster_symbol
+        from hydra_basis.spread_strategy.feeds import parse_aster_book_ticker, parse_aster_depth
+        data = payload.get("data") or {}
+        if str(payload.get("stream", "")).endswith("@depth10@100ms"):
+            book = parse_aster_depth(data)
+            if book is not None:
+                self.store.update_depth("aster", normalize_aster_symbol(book["symbol"]), book["bids"], book["asks"],
+                                        source_ms=book["ts_ms"])
+            return
+        book = parse_aster_book_ticker(data)
+        if book is not None:
+            symbol = normalize_aster_symbol(book["symbol"])
+            if symbol:
+                self.raw_by_symbol[symbol] = book["symbol"]
+                self.store.update_quotes("aster", {symbol: book})
+
+
+class LighterRunner(_SubscribingRunner):
+    """Tickers for every market (top of book with size) plus order_book deltas for watched markets."""
+    url = "wss://mainnet.zklighter.elliot.ai/stream?readonly=true"
+
+    def __init__(self, session, store, market_map: dict[str, int], watched=lambda: ()):
+        super().__init__(session, store, watched)
+        self.market_map = market_map
+        self.symbol_by_id = {market_id: symbol for symbol, market_id in market_map.items()}
+        self.books: dict[str, object] = {}
+
+    async def subscribe(self):
+        await self.send_spaced({"type": "subscribe", "channel": f"ticker/{market_id}"}
+                               for market_id in self.market_map.values())
+
+    def depth_messages(self, symbol):
+        from hydra_basis.spread_strategy.feeds import LighterBook
+        market_id = self.market_map.get(symbol)
+        if market_id is None:
+            return []
+        self.books[symbol] = LighterBook()
+        return [{"type": "subscribe", "channel": f"order_book/{market_id}"}]
+
+    def handle(self, payload):
+        from hydra_basis.spread_strategy.feeds import to_levels
+        kind = str(payload.get("type") or "")
+        if kind == "ping":
+            self._tasks.append(asyncio.create_task(self.ws.send_json({"type": "pong"})))
+            return
+        channel = str(payload.get("channel") or "")
+        market_id = channel.partition(":")[2]
+        symbol = self.symbol_by_id.get(int(market_id)) if market_id.isdigit() else None
+        if symbol is None:
+            return
+        if kind.endswith("/order_book"):
+            book = self.books.get(symbol)
+            if book is not None and book.apply(payload):
+                bids, asks = book.levels()
+                self.store.update_depth("lighter", symbol, bids, asks, source_ms=book.ts_ms)
+            return
+        ticker = payload.get("ticker") or {}
+        bid, ask = ticker.get("b") or {}, ticker.get("a") or {}
+        if bid.get("price") is None or ask.get("price") is None or payload.get("timestamp") is None:
+            return
+        self.store.update_quotes("lighter", {symbol: {
+            "bid": bid["price"], "ask": ask["price"], "ts_ms": int(payload["timestamp"]),
+            "bids": to_levels([bid]), "asks": to_levels([ask])}})
+
+
+class MexcRunner(_SubscribingRunner):
+    """Tickers for every symbol (scan-only: no sizes, 1-3 s behind) plus depth for watched symbols."""
+    url = "wss://contract.mexc.com/edge"
+    ping_message = {"method": "ping"}
+
+    def __init__(self, session, store, contract_sizes: dict[str, Decimal], watched=lambda: ()):
+        super().__init__(session, store, watched)
+        self.contract_sizes = contract_sizes
 
     async def subscribe(self):
         from hydra_basis.adapters.mexc import mexc_contract_symbol
-        self._tasks.append(asyncio.create_task(self.keep_alive()))
         await self.send_spaced({"method": "sub.ticker", "param": {"symbol": mexc_contract_symbol(symbol)}}
-                               for symbol in self.symbols)
+                               for symbol in sorted(self.contract_sizes))
 
-    async def keep_alive(self):
+    def depth_messages(self, symbol):
         from hydra_basis.adapters.mexc import mexc_contract_symbol
-        last_ping = 0.0
-        while True:
-            for symbol in set(self.watched()) - self.depth:
-                await self.ws.send_json({"method": "sub.depth.full",
-                                         "param": {"symbol": mexc_contract_symbol(symbol), "limit": 5}})
-                self.depth.add(symbol)
-            last_ping += 1
-            if last_ping >= 15:
-                await self.ws.send_json({"method": "ping"})
-                last_ping = 0
-            await asyncio.sleep(1)
+        if symbol not in self.contract_sizes:
+            return []
+        return [{"method": "sub.depth.full", "param": {"symbol": mexc_contract_symbol(symbol), "limit": 5}}]
 
     def handle(self, payload):
         from hydra_basis.spread_strategy.feeds import parse_mexc_depth
@@ -463,24 +579,36 @@ class MexcRunner(_SubscribingRunner):
             parsed = parse_push_ticker_message(payload)
             self.store.update_asset_ctxs("mexc", parsed)
             self.store.update_quotes("mexc", {symbol: {**row, "scan_only": True} for symbol, row in parsed.items()})
-        book = parse_mexc_depth(payload)
+            return
+        symbol = str(payload.get("symbol", "")).upper().removesuffix("_USDT")
+        book = parse_mexc_depth(payload, self.contract_sizes.get(symbol))
         if book is not None:
+            # Depth is MEXC's only trade-grade quote; sizes are converted from contracts.
             self.store.update_quotes("mexc", {book["symbol"]: book})
 
 
 class ArcusRunner(_SubscribingRunner):
-    """Arcus: BBO per market over one socket (cap 100 subscriptions), funding by polling markets."""
+    """BBO (top of book with size) per market over one socket (cap 100 subscriptions), l2Orderbook for
+    watched markets, funding by polling markets."""
     MAX_SUBSCRIPTIONS = 100
+    DEPTH_SLOTS = 30
 
-    def __init__(self, session, store, markets: list[str]):
-        super().__init__(session, store)
+    def __init__(self, session, store, markets: list[str], watched=lambda: ()):
+        super().__init__(session, store, watched)
         from hydra_basis.adapters.arcus import arcus_base_url
         self.url = arcus_base_url().replace("https://", "wss://") + "/v1/ws"
-        self.markets = markets[: self.MAX_SUBSCRIPTIONS]
+        self.markets = markets[: self.MAX_SUBSCRIPTIONS - self.DEPTH_SLOTS]
 
     async def subscribe(self):
         self._tasks.append(asyncio.create_task(self.poll_funding()))
         await self.send_spaced({"type": "subscribe", "channel": "bbo", "id": market} for market in self.markets)
+
+    def depth_messages(self, symbol):
+        from hydra_basis.adapters.arcus import arcus_market_name
+        from hydra_basis.spread_strategy.feeds import DEPTH_LEVELS
+        if len(self.depth_subscribed) >= self.DEPTH_SLOTS:
+            return []
+        return [{"type": "subscribe", "channel": "l2Orderbook", "id": arcus_market_name(symbol), "nLevels": DEPTH_LEVELS}]
 
     async def poll_funding(self):
         from hydra_basis.adapters.arcus import fetch_arcus_markets
@@ -491,7 +619,11 @@ class ArcusRunner(_SubscribingRunner):
             await asyncio.sleep(60)
 
     def handle(self, payload):
-        from hydra_basis.spread_strategy.feeds import parse_arcus_bbo
+        from hydra_basis.spread_strategy.feeds import parse_arcus_bbo, parse_arcus_book
+        book = parse_arcus_book(payload)
+        if book is not None:
+            self.store.update_depth("arcus", book["symbol"], book["bids"], book["asks"], source_ms=book["ts_ms"])
+            return
         book = parse_arcus_bbo(payload)
         if book is not None:
             self.store.update_quotes("arcus", {book["symbol"]: book})
@@ -700,6 +832,7 @@ class Dispatcher:
         self.first_seen: dict[tuple, int] = {}
         self.rejected_until: dict[str, int] = {}
         self.pending: set[str] = set()
+        self.dry_run_watch: set[str] = set()  # dry-run candidates whose depth is subscribed
         self.trade_quote_timeout_seconds = 10.0
         self.index_path = data_dir / f"dispatcher.{self.mode}.json"
         self.history = history
@@ -787,7 +920,7 @@ class Dispatcher:
 
     def active_symbols(self) -> set[str]:
         """Symbols that need trade-grade quotes (e.g. MEXC depth): active groups and launches."""
-        return {group.config.symbol for group in self.groups.values()} | self.pending
+        return {group.config.symbol for group in self.groups.values()} | self.pending | self.dry_run_watch
 
     async def wait_for_trade_quotes(self, config: Config):
         feed = StoreFeed(config, self.store, self.health, clock=self.clock)
@@ -796,6 +929,29 @@ class Dispatcher:
                 return
             await asyncio.sleep(0.2)
         raise RuntimeError("no fresh tradeable quotes from both venues")
+
+    def depth_entry(self, config: Config, quantity: Decimal) -> tuple[tuple[Decimal, Decimal] | None, str]:
+        """Average entry fill prices (short sell, long buy) for ``quantity`` from visible depth."""
+        books = StoreFeed(config, self.store, self.health, clock=self.clock).fresh_pair()
+        if books is None:
+            return None, "no fresh quotes"
+        short = books[config.short_venue].executable("SELL", quantity)
+        long = books[config.long_venue].executable("BUY", quantity)
+        if short is None or long is None:
+            return None, "visible depth too thin for the clip"
+        return (short, long), "ok"
+
+    async def wait_for_depth(self, config: Config, quantity: Decimal):
+        """Launch only if the entry still passes at the full clip size (depth subscriptions take a moment)."""
+        reason = "no fresh quotes"
+        for _ in range(max(1, int(self.trade_quote_timeout_seconds / 0.2))):
+            prices, reason = self.depth_entry(config, quantity)
+            if prices is not None:
+                if entry_allowed(config, *prices):
+                    return
+                reason = f"entry at clip size is {spread_bps(*prices):.1f} bps, below the gate"
+            await asyncio.sleep(0.2)
+        raise RuntimeError(f"not tradeable at clip size {quantity}: {reason}")
 
     async def scan_once(self):
         now = self.clock()
@@ -828,6 +984,7 @@ class Dispatcher:
             instruments = await self.load_instruments(config)
             total, clip = size_group(self.settings, opportunity.mid, list(instruments.values()))
             config = self.settings.group_config(symbol, opportunity.short_venue, opportunity.long_venue, total, clip)
+            await self.wait_for_depth(config, clip)
             group = Group(self, gid, config, self.data_dir / "groups" / f"{gid}.{self.mode}.json", self.clock())
             await group.start(instruments)
         except Exception as exc:
@@ -878,10 +1035,19 @@ class Dispatcher:
         from hydra_basis.spread_strategy.core import State
         from hydra_basis.spread_strategy.estimates import estimate_group, estimate_opportunity, format_report
         found = find_opportunities(self.settings, self.store, self.health, self.clock(), include_near_misses=True)
+        # Subscribe depth for the leading candidates so later reports can price them at clip size.
+        self.dry_run_watch |= {o.symbol for o in found[: top * 2]}
+        if len(self.dry_run_watch) > 40:
+            self.dry_run_watch = {o.symbol for o in found[: top * 2]}
+
         def estimate(opportunity):
-            config = self.settings.group_config("CHECK", opportunity.short_venue, opportunity.long_venue,
-                                                ONE_, ONE_)
-            return estimate_opportunity(config, opportunity, self.settings.group_notional_usd)
+            config = self.settings.group_config(opportunity.symbol, opportunity.short_venue,
+                                                opportunity.long_venue, ONE_, ONE_)
+            clip = self.settings.clip_notional_usd / opportunity.mid
+            prices, reason = self.depth_entry(config, clip)
+            status = "ok" if prices else ("thin" if "thin" in reason else "no_data")
+            return estimate_opportunity(config, opportunity, self.settings.group_notional_usd,
+                                        depth_prices=prices, depth_status=status)
         qualifying = [estimate(o) for o in found if o.qualifies][:top]
         near = [estimate(o) for o in found if not o.qualifies][:top]
         histories = []

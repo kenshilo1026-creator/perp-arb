@@ -60,6 +60,7 @@ def tick_for_price(market: dict, price: Decimal) -> Decimal:
 
 
 class ArcusExecutionAdapter:
+    supports_limit_ioc = True
     # One timestamp sequence per API key: X-Timestamp doubles as the payload's ``ct``.
     _ts_lock = threading.Lock()
     _last_ts_by_key: dict[str, int] = {}
@@ -185,10 +186,14 @@ class ArcusExecutionAdapter:
                                  tif="ALO" if post_only else "GTT", reduce_only=reduce_only)
 
     async def place_market_order(self, *, symbol: str, side: str, amount: str, clip_usd: float,
-                                 reduce_only: bool = False) -> dict:
-        # A marketable IOC limit bounded by slippage from the live top of book.
+                                 reduce_only: bool = False, limit_price: str | None = None) -> dict:
+        # A marketable IOC limit: at the caller's worst acceptable price, or
+        # bounded by slippage from the live top of book.
         if not reduce_only:
             await self.ensure_leverage(symbol)
+        if limit_price is not None:
+            return await self._place(symbol=symbol, side=side, amount=amount, price=Decimal(str(limit_price)),
+                                     tif="IOC", reduce_only=reduce_only)
         _, book = await self._request("GET", f"/v1/bbo/{arcus_market_name(symbol)}", label="bbo")
         is_buy = side.strip().upper() == "BUY"
         level = book.get("bestAsk" if is_buy else "bestBid")

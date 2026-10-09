@@ -55,7 +55,7 @@ async def dry_run(args):
         dispatcher = Dispatcher(settings, live=args.live, data_dir=args.data_dir, registry_path=args.registry,
                                 store=QuoteStore(), emit=lambda payload: None)
         feeds = [asyncio.create_task(run_venue_feed(venue, session, dispatcher.store, dispatcher.health,
-                                                    settings, dispatcher.emit))
+                                                    settings, dispatcher.emit, dispatcher.active_symbols))
                  for venue in settings.venues]
         print(f"乾跑模式：只報告，不開倉。讀取現有倉位：{dispatcher.index_path}（{mode}）", flush=True)
         try:

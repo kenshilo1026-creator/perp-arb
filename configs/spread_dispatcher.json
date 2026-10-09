@@ -1,6 +1,7 @@
 {
   "venues": [
     "aster",
+    "arcus",
     "hyperliquid",
     "entropy",
     "lighter",
@@ -11,6 +12,7 @@
   "clip_notional_usd": "50",
   "execution_method": "taker_taker",
   "maker_preference": [
+    "arcus",
     "hyperliquid",
     "entropy",
     "aster",
@@ -23,7 +25,8 @@
     "entropy": 1,
     "lighter": 1,
     "mexc": 1,
-    "variational": 1
+    "variational": 1,
+    "arcus": 1
   },
   "fees": {
     "aster": {
@@ -49,6 +52,10 @@
     "variational": {
       "maker": "0",
       "taker": "0"
+    },
+    "arcus": {
+      "maker": "0",
+      "taker": "0.000225"
     }
   },
   "entry_bps": "40",

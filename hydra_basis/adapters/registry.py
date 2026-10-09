@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from hydra_basis.adapters.arcus import fetch_arcus_funding, fetch_arcus_funding_since, list_symbols as list_arcus_symbols
 from hydra_basis.adapters.entropy import fetch_entropy_funding, fetch_entropy_funding_since, list_symbols as list_entropy_symbols
 from hydra_basis.adapters.aster import fetch_aster_funding, fetch_aster_funding_since, list_symbols as list_aster_symbols
 from hydra_basis.adapters.hyperliquid import fetch_hyperliquid_funding, fetch_hyperliquid_funding_since, list_symbols as list_hyperliquid_symbols
@@ -21,6 +22,7 @@ FETCHERS = {
     "variational": fetch_variational_funding,
     "trade_xyz": fetch_tradexyz_funding,
     "entropy": fetch_entropy_funding,
+    "arcus": fetch_arcus_funding,
 }
 
 FETCHERS_SINCE = {
@@ -31,6 +33,7 @@ FETCHERS_SINCE = {
     "variational": fetch_variational_funding_since,
     "trade_xyz": fetch_tradexyz_funding_since,
     "entropy": fetch_entropy_funding_since,
+    "arcus": fetch_arcus_funding_since,
 }
 
 SYMBOL_DISCOVERERS = {
@@ -41,4 +44,5 @@ SYMBOL_DISCOVERERS = {
     "variational": list_variational_symbols,
     "trade_xyz": list_tradexyz_symbols,
     "entropy": list_entropy_symbols,
+    "arcus": list_arcus_symbols,
 }

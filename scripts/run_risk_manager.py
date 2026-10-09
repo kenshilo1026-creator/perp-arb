@@ -294,6 +294,12 @@ def build_closers() -> dict[str, object]:
         closers["entropy"] = HyperliquidExecutionAdapter(dex="io", venue_name="entropy")
     except Exception as exc:
         print(f"risk manager hyperliquid closer disabled: {exc!r}")
+    try:
+        from hydra_basis.execution_engine.arcus_adapter import ArcusExecutionAdapter
+
+        closers["arcus"] = ArcusExecutionAdapter()
+    except Exception as exc:
+        print(f"risk manager arcus closer disabled: {exc!r}")
     closers["variational"] = VariationalMonitorPositionAdapter()
     return closers
 
@@ -321,6 +327,10 @@ def _funding_close_adapter_for_leg(leg: PositionLeg, *, leverage: int = 1):
             market_config_loader=lambda symbol: fetch_lighter_market_config(symbol),
             orderbook_loader=lambda symbol: fetch_lighter_orderbook_live(symbol),
         )
+    if venue == "arcus":
+        from hydra_basis.execution_engine.arcus_adapter import ArcusExecutionAdapter
+
+        return ArcusExecutionAdapter(leverage=leverage, skip_margin_setup=True)
     raise RuntimeError(f"funding maker/taker close does not support venue: {leg.venue}")
 
 

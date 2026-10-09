@@ -55,7 +55,7 @@ class Settings:
     group_notional_usd: Decimal = Decimal("100")
     clip_notional_usd: Decimal = Decimal("50")
     execution_method: str = "taker_taker"
-    maker_preference: tuple[str, ...] = ("hyperliquid", "entropy", "aster", "lighter", "mexc")
+    maker_preference: tuple[str, ...] = ("arcus", "hyperliquid", "entropy", "aster", "lighter", "mexc")
     leverage: dict[str, int] = field(default_factory=dict)
     entry_bps: Decimal = Decimal("40")
     take_profit_bps: Decimal = Decimal("10")
@@ -314,6 +314,11 @@ async def _build_runners(venue: str, session, store: QuoteStore, settings: Setti
         symbols = [str(row.get("name") or "").upper() for row in rows]
         active = [str(row["name"]) for row in rows if row.get("name") and not row.get("isDelisted")]
         runners = [HyperliquidStreamRunner(session, store, symbols), HyperliquidBooksRunner(session, store, active)]
+    elif venue == "arcus":
+        from hydra_basis.adapters.arcus import fetch_arcus_markets
+        markets = [str(m["marketDisplayName"]) for m in await fetch_arcus_markets(session)
+                   if m.get("status") == "ONLINE"]
+        runners = [ArcusRunner(session, store, markets)]
     elif venue == "entropy":
         from hydra_basis.adapters.hyperliquid import fetch_hyperliquid_meta
         rows = await fetch_hyperliquid_meta(session, "io")
@@ -448,6 +453,35 @@ class MexcRunner(_SubscribingRunner):
         book = parse_mexc_depth(payload)
         if book is not None:
             self.store.update_quotes("mexc", {book["symbol"]: book})
+
+
+class ArcusRunner(_SubscribingRunner):
+    """Arcus: BBO per market over one socket (cap 100 subscriptions), funding by polling markets."""
+    MAX_SUBSCRIPTIONS = 100
+
+    def __init__(self, session, store, markets: list[str]):
+        super().__init__(session, store)
+        from hydra_basis.adapters.arcus import arcus_base_url
+        self.url = arcus_base_url().replace("https://", "wss://") + "/v1/ws"
+        self.markets = markets[: self.MAX_SUBSCRIPTIONS]
+
+    async def subscribe(self):
+        self._tasks.append(asyncio.create_task(self.poll_funding()))
+        await self.send_spaced({"type": "subscribe", "channel": "bbo", "id": market} for market in self.markets)
+
+    async def poll_funding(self):
+        from hydra_basis.adapters.arcus import fetch_arcus_markets
+        while True:
+            self.store.update_asset_ctxs("arcus", {
+                str(m["baseAsset"]).upper(): {"funding": float(m.get("fundingRate") or 0)}
+                for m in await fetch_arcus_markets(self.session)})
+            await asyncio.sleep(60)
+
+    def handle(self, payload):
+        from hydra_basis.spread_strategy.feeds import parse_arcus_bbo
+        book = parse_arcus_bbo(payload)
+        if book is not None:
+            self.store.update_quotes("arcus", {book["symbol"]: book})
 
 
 class VariationalRunner:

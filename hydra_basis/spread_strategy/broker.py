@@ -20,9 +20,10 @@ TERMINAL = {"FILLED", "CANCELED", "REJECTED", "EXPIRED"}
 FILL_KEYS = ("filled_quantity", "executedQty", "executed_qty", "filledQty", "filled_qty",
              "filledBaseAmount", "cumQty", "totalSz")
 AVERAGE_KEYS = ("avg_price", "avgPrice", "averagePrice", "avgPx", "dealAvgPrice", "fill_price", "fillPrice")
-MARGIN_ERROR = re.compile(r"margin|balance|insufficient", re.IGNORECASE)
+MARGIN_ERROR = re.compile(r"margin|balance|insufficient|undercollateral", re.IGNORECASE)
 RATE_LIMIT_ERROR = re.compile(r"\b429\b|-1003|too many|rate limit", re.IGNORECASE)
-POST_ONLY_CROSS = re.compile(r"post only|post-only|would have immediately matched|-5022", re.IGNORECASE)
+POST_ONLY_CROSS = re.compile(r"post only|post-only|post_only|would have immediately matched|would_cross|-5022",
+                             re.IGNORECASE)
 
 
 @dataclass(frozen=True)
@@ -95,6 +96,9 @@ def definitive_rejection(exc: BaseException, result) -> bool:
     # MEXC answers HTTP 200 with success=false for a rejected order; Lighter's signer
     # returns an error (instead of raising) when the transaction was not accepted.
     if re.search(r"mexc order (200|4\d\d):", message) or "lighter create_order failed" in message:
+        return True
+    # Arcus: an HTTP 4xx or an engine REJECTED status means no order exists.
+    if re.search(r"arcus order 4\d\d", message) or "arcus order rejected" in message:
         return True
     if "no extension command client connected" in message:
         return True
@@ -348,6 +352,9 @@ def build_venue_adapter(venue: str, *, leverage: int, order_timeout_seconds: flo
     if venue == "hyperliquid":
         from hydra_basis.execution_engine.hyperliquid_adapter import HyperliquidExecutionAdapter
         return HyperliquidExecutionAdapter(leverage=leverage)
+    if venue == "arcus":
+        from hydra_basis.execution_engine.arcus_adapter import ArcusExecutionAdapter
+        return ArcusExecutionAdapter(leverage=leverage)
     if venue == "entropy":
         # HIP-3 dex "io" on the same Hyperliquid account and key.
         from hydra_basis.execution_engine.hyperliquid_adapter import HyperliquidExecutionAdapter

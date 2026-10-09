@@ -26,6 +26,7 @@ from hydra_basis.symbol_mapping import canonicalize_symbol
 ASTER_WS = "wss://fstream.asterdex.com/ws/{stream}@bookTicker"
 HYPERLIQUID_WS = "wss://api.hyperliquid.xyz/ws"
 LIGHTER_WS = "wss://mainnet.zklighter.elliot.ai/stream?readonly=true"
+ARCUS_WS_PATH = "/v1/ws"
 MEXC_WS = "wss://contract.mexc.com/edge"
 MEXC_PING_SECONDS = 15
 
@@ -84,7 +85,8 @@ class MarketFeed:
     # ------------------------------------------------------------------ streams
 
     async def run(self, session: aiohttp.ClientSession):
-        loops = {"aster": self._aster, "hyperliquid": self._hyperliquid, "entropy": self._entropy,
+        loops = {"aster": self._aster, "arcus": self._arcus, "hyperliquid": self._hyperliquid,
+                 "entropy": self._entropy,
                  "lighter": self._lighter,
                  "mexc": self._mexc, "variational": self._variational}
         await asyncio.gather(*(self._supervise(venue, loops[venue], session) for venue in self.config.venues))
@@ -140,6 +142,20 @@ class MarketFeed:
         # Entropy markets are Hyperliquid HIP-3 coins named "io:<SYMBOL>".
         await self._hyperliquid(session, venue="entropy", coin=f"io:{self.config.symbol}")
 
+    async def _arcus(self, session):
+        from hydra_basis.adapters.arcus import arcus_base_url, arcus_market_name
+        url = arcus_base_url().replace("https://", "wss://") + ARCUS_WS_PATH
+        async with session.ws_connect(url, heartbeat=20) as ws:
+            await ws.send_json({"type": "subscribe", "channel": "bbo", "id": arcus_market_name(self.config.symbol)})
+            async for message in ws:
+                if message.type != aiohttp.WSMsgType.TEXT:
+                    if message.type in {aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR}:
+                        break
+                    continue
+                book = parse_arcus_bbo(message.json())
+                if book is not None:
+                    self.update("arcus", book["bid"], book["ask"], source_ms=book["ts_ms"])
+
     async def _lighter(self, session):
         market_id = (await fetch_lighter_market_map(session)).get(self.config.symbol)
         if market_id is None:
@@ -189,6 +205,18 @@ class MarketFeed:
             quote = parse_variational_quote(data, symbol, clip_usd=clip_usd)
             self.update("variational", quote["bid"], quote["ask"], source_ms=None)
             await asyncio.sleep(self.config.variational_poll_seconds)
+
+
+def parse_arcus_bbo(payload: dict) -> dict | None:
+    """Arcus ``bbo`` channel frame (snapshot or update); timestamps are microseconds."""
+    if payload.get("channel") != "bbo" or payload.get("type") not in {"subscribed", "channel_data"}:
+        return None
+    contents = payload.get("contents") or {}
+    bid, ask = contents.get("bestBid"), contents.get("bestAsk")
+    if not bid or not ask or contents.get("timestamp") is None:
+        return None
+    return {"symbol": str(payload.get("id", "")).upper().removesuffix("-USD"),
+            "bid": bid["price"], "ask": ask["price"], "ts_ms": int(contents["timestamp"]) // 1000}
 
 
 def parse_mexc_depth(payload: dict) -> dict | None:

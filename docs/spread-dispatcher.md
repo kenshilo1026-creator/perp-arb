@@ -3,7 +3,7 @@
 Scans every enabled venue for cross-venue perpetual spreads and runs one
 [spread strategy](spread-strategy.md) group per opportunity. A group is one
 symbol traded between one pair of venues. Supported venues: Aster,
-Hyperliquid, Entropy, Lighter, MEXC and Variational (taker leg only).
+Arcus, Hyperliquid, Entropy, Lighter, MEXC and Variational (taker leg only).
 
 ## Run
 
@@ -94,6 +94,34 @@ positions open. The next run restores every group from
 
 Only one group per symbol, and a symbol traded by the dispatcher is locked
 against the standalone `run_spread_strategy.py` (and vice versa).
+
+### Arcus
+
+[Arcus](https://docs.arcus.xyz/api-reference/introduction) perps: crypto, US
+equities, ETFs and indices, quoted as `<BASE>-USD` (`NVDA-USD`).
+
+* Credentials (`.env`): `ARCUS_API_SIGNING_KEY` (the Ed25519 signing key
+  shown once on app.arcus.xyz/api-keys), `ARCUS_ADDRESS` (the master wallet
+  the key is registered to), `ARCUS_ACCOUNT_INDEX` (subaccount, default 0).
+  `ARCUS_BASE_URL=https://api.testnet.arcus.xyz` switches to testnet.
+* Orders: Ed25519-signed REST. Prices and sizes are signed as integer ticks
+  and quantums. Maker legs are post-only (`ALO`); taker legs are IOC limits
+  50 bps through the book. Placement is asynchronous (202 `ACK`), so fills
+  are read back from `GET /v1/order/{id}`.
+* Margin: the first opening order per market sets isolated margin at the
+  configured leverage. If a cross position already exists there, the mode
+  is left unchanged. Margin top-ups are not supported by the adapter.
+* Fees: Base tier maker 0%, taker 0.0225% (`GET /v1/feeTiers`).
+* Funding: hourly, with history from `GET /v1/fundingRates` (microsecond
+  timestamps). Registered for the funding monitor and backfill as venue
+  `arcus`.
+* Market data: BBO WebSocket for every online market on one socket
+  (Arcus caps a socket at 100 subscriptions).
+* Rate limits: reads are weighted per IP (1,500/min). Order writes do not
+  use that budget.
+* Overlap: 57 of Arcus's 60 online markets also trade on another venue.
+* Equities outside regular trading hours can reject fills beyond the
+  off-hours trading bound (`FILL_WILL_EXCEED_TRADING_BOUND`).
 
 ### Entropy
 

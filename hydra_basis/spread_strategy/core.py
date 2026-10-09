@@ -20,10 +20,10 @@ BPS = Decimal("10000")
 ZERO = Decimal("0")
 ONE = Decimal("1")
 EPSILON = Decimal("1e-12")
-VENUES = {"aster", "hyperliquid", "entropy", "lighter", "mexc", "variational"}
+VENUES = {"aster", "arcus", "hyperliquid", "entropy", "lighter", "mexc", "variational"}
 # Variational orders go through the browser extension and block until filled,
 # so they cannot rest as a cancellable post-only quote.
-MAKER_VENUES = {"aster", "hyperliquid", "entropy", "lighter", "mexc"}
+MAKER_VENUES = {"aster", "arcus", "hyperliquid", "entropy", "lighter", "mexc"}
 TERMINAL_STATES = {"FILLED", "CANCELED", "REJECTED", "EXPIRED"}
 LEGACY_KEYS = {"poll_seconds", "max_quote_age_seconds", "max_request_seconds",
                "maker_timeout_seconds", "max_hold_seconds"}

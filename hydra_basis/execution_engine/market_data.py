@@ -37,6 +37,9 @@ async def fetch_orderbook_snapshot(
         return await fetch_tradexyz_orderbook(session, symbol)
     if normalized == "entropy":
         return await fetch_entropy_orderbook(session, symbol)
+    if normalized == "arcus":
+        from hydra_basis.adapters.arcus import fetch_arcus_orderbook
+        return await fetch_arcus_orderbook(session, symbol)
     raise RuntimeError(f"unsupported preview venue={venue}")
 
 

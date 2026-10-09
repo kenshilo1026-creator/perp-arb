@@ -63,6 +63,8 @@ async def fetch_instrument(session, venue: str, symbol: str) -> Instrument:
         return await _hyperliquid(session, symbol)
     if venue == "entropy":
         return await _entropy(session, symbol)
+    if venue == "arcus":
+        return await _arcus(session, symbol)
     if venue == "lighter":
         return await _lighter(session, symbol)
     if venue == "mexc":
@@ -128,6 +130,25 @@ async def _entropy(session, symbol: str) -> Instrument:
         return Instrument("entropy", lot_size=lot, min_size=lot, min_notional=HYPERLIQUID_MIN_NOTIONAL,
                           sz_decimals=sz_decimals)
     raise RuntimeError(f"symbol not found on entropy: {symbol}")
+
+
+async def _arcus(session, symbol: str) -> Instrument:
+    from hydra_basis.adapters.arcus import arcus_base_url, arcus_market_name
+    from hydra_basis.execution_engine.arcus_adapter import tick_for_price
+    data = await fetch_json(session, "GET", f"{arcus_base_url()}/v1/markets",
+                            params={"market": arcus_market_name(symbol)})
+    market = next(iter(data.get("markets") or []), None)
+    if market is None or market.get("status") != "ONLINE":
+        raise RuntimeError(f"symbol not tradable on arcus: {symbol}")
+    reference = Decimal(str(market.get("oraclePrice") or market.get("markPrice") or "0"))
+    return Instrument(
+        "arcus",
+        # Ticks widen with price (tickTiers); use the increment at today's price level.
+        tick_size=tick_for_price(market, reference) if reference > 0 else Decimal(str(market["tickSize"])),
+        lot_size=Decimal(str(market["stepSize"])),
+        min_size=Decimal(str(market.get("minOrderSize") or market["stepSize"])),
+        min_notional=Decimal(str(market.get("minOrderNotional") or "0")) or None,
+    )
 
 
 async def _lighter(session, symbol: str) -> Instrument:

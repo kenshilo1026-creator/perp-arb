@@ -30,7 +30,8 @@ def config(**kwargs):
     defaults = dict(symbol="ETH", short_venue="aster", long_venue="hyperliquid",
                     execution_method="taker_taker", total_quantity=D("0.02"), clip_quantity=D("0.01"),
                     entry_bps=D("40"), take_profit_bps=D("10"), fees=ZERO_FEES,
-                    min_profit_bps=D("0"), slippage_buffer_bps=D("0"), funding_budget_bps=D("0"))
+                    min_profit_bps=D("0"), slippage_buffer_bps=D("0"), funding_budget_bps=D("0"),
+                    clip_interval_seconds=0)
     return Config(**(defaults | kwargs))
 
 
@@ -245,10 +246,7 @@ class TakerTakerTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(h.engine.failure_count, 1)
             self.assertEqual(h.engine.cooldown_until, h.clock() + 4_000)
             self.assertEqual(h.state.status, "RUNNING", "one accepted leg: margin rejection does not pause")
-            self.assertEqual(h.legs(), (D("-0.01"), D("0")))
-            # Next tick: a bounded taker entry that filled one leg is unwound, not chased at market.
-            h.wide()
-            await h.engine.step()
+            # In the same step, the leg that filled is unwound rather than the other chased at market.
             self.assertEqual(h.legs(), (D("0"), D("0")))
             repair = [o for o in h.state.orders if o.purpose == "repair"][-1]
             self.assertEqual((repair.venue, repair.side, repair.reduce_only), ("aster", "BUY", True))
@@ -288,13 +286,9 @@ class TakerTakerTests(unittest.IsolatedAsyncioTestCase):
             await h.engine.step()
             hl.reject = True
             h.converged()
-            await h.engine.step()  # short closes, long exit rejected
-            self.assertEqual(h.legs(), (D("0"), D("0.01")))
-            h.clock.advance(4_001)
-            h.converged()
-            await h.engine.step()
+            await h.engine.step()  # short closes, long exit rejected, then completed at once
             self.assertEqual(h.legs(), (D("0"), D("0")))
-            self.assertEqual(h.state.orders[-1].side, "SELL")
+            self.assertEqual((h.state.orders[-1].purpose, h.state.orders[-1].side), ("repair", "SELL"))
 
     async def test_entry_margin_rejection_on_both_legs_pauses(self):
         with tempfile.TemporaryDirectory() as tmp:

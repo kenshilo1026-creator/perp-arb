@@ -76,6 +76,11 @@ class Config:
     variational_poll_seconds: float = 2.0
     # Minimum seconds between order-status polls per venue (Lighter's REST limits are tight).
     order_poll_seconds: dict[str, float] = field(default_factory=lambda: {"lighter": 3.0})
+    # Clips shrink to what the books can fill profitably, but never below this notional
+    # (venue minimums apply too); 0 means venue minimums only.
+    min_clip_notional_usd: Decimal = Decimal("0")
+    # Minimum gap between taker clips so thin books can refill.
+    clip_interval_seconds: float = 1.0
     # Optional emergency exit; None disables it (the original has no such exit).
     stop_loss_usd: Decimal | None = None
 
@@ -98,7 +103,7 @@ class Config:
                 raise ValueError(f"{name} must be positive")
         if self.clip_quantity > self.total_quantity:
             raise ValueError("clip_quantity exceeds total_quantity")
-        for name in ("min_profit_bps", "slippage_buffer_bps", "funding_budget_bps"):
+        for name in ("min_profit_bps", "slippage_buffer_bps", "funding_budget_bps", "min_clip_notional_usd"):
             if number(getattr(self, name)) < 0:
                 raise ValueError(f"{name} must not be negative")
         if number(self.entry_bps) <= 0:
@@ -112,9 +117,11 @@ class Config:
             if not isinstance(value, int) or isinstance(value, bool) or value < 1:
                 raise ValueError(f"{name} must be a positive integer")
         for item in fields(self):
-            if item.name.endswith("_seconds") and item.name != "order_poll_seconds" \
+            if item.name.endswith("_seconds") and item.name not in {"order_poll_seconds", "clip_interval_seconds"} \
                     and number(getattr(self, item.name)) <= 0:
                 raise ValueError(f"{item.name} must be positive")
+        if number(self.clip_interval_seconds) < 0:
+            raise ValueError("clip_interval_seconds must not be negative")
         if any(number(value) <= 0 for value in self.order_poll_seconds.values()):
             raise ValueError("order_poll_seconds must be positive")
         for venue in self.venues:
@@ -172,7 +179,7 @@ class Config:
         if unsupported:
             raise ValueError(f"config keys no longer supported: {', '.join(unsupported)}")
         for key in ("total_quantity", "clip_quantity", "entry_bps", "take_profit_bps",
-                    "min_profit_bps", "slippage_buffer_bps", "funding_budget_bps"):
+                    "min_profit_bps", "slippage_buffer_bps", "funding_budget_bps", "min_clip_notional_usd"):
             if key in payload:
                 payload[key] = number(payload[key])
         if payload.get("stop_loss_usd") is not None:

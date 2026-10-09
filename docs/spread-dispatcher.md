@@ -96,6 +96,7 @@ positions open. The next run restores every group from
 | `max_groups` | 5 | Concurrent groups (one symbol each) |
 | `group_notional_usd` | 100 | Maximum position per group, per leg |
 | `clip_notional_usd` | 50 | Size of each order; the group holds a whole number of clips |
+| `min_clip_notional_usd` | 20 | Smallest clip when depth forces clips to shrink |
 | `execution_method` | `taker_taker` | Or `maker_taker`, with the maker leg chosen by `maker_preference` |
 | `fees` | per venue | Fractions. Defaults are placeholders: set your account's actual rates |
 | `leverage` | 1 per venue | Isolated leverage per venue |

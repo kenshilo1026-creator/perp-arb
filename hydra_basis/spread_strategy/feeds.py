@@ -87,6 +87,20 @@ class Ticker:
             return top
         return vwap(levels, quantity)
 
+    def marginal(self, side: str, quantity: Decimal) -> Decimal | None:
+        """Price of the deepest level ``quantity`` reaches: the worst single fill if the book holds.
+        Sizing on it (not the average) keeps every fill profitable and lets an IOC limit at the
+        profit boundary fill the whole clip."""
+        levels = self.asks if side == "BUY" else self.bids
+        if not levels:
+            return self.ask if side == "BUY" else self.bid
+        remaining = quantity
+        for price, size in levels:
+            remaining -= size
+            if remaining <= 0:
+                return price
+        return None
+
 
 class MarketFeed:
     def __init__(self, config: Config, *, clock=now_ms, contract_sizes: dict[str, Decimal] | None = None):

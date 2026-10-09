@@ -30,7 +30,7 @@ from hydra_basis.spread_strategy.core import (
 )
 from hydra_basis.spread_strategy.engine import ACTIVE, Engine
 from hydra_basis.spread_strategy.feeds import StoreFeed
-from hydra_basis.spread_strategy.instruments import Instrument, fetch_instrument
+from hydra_basis.spread_strategy.instruments import Instrument, common_lot, fetch_instrument
 from hydra_basis.spread_strategy.locks import SymbolLock, lock_path
 from hydra_basis.streams.manager import MarketStateStore
 from hydra_basis.symbol_mapping import canonicalize_symbol
@@ -47,7 +47,7 @@ HISTORY_DEFAULTS = {
     "min_coverage_pct": 50,   # below this, the history is "insufficient"
     "block_persistent": True,  # refuse to launch a group on a structural spread
 }
-STRATEGY_KEYS = {"tick_seconds", "order_timeout_seconds", "requote_interval_seconds",
+STRATEGY_KEYS = {"clip_interval_seconds", "tick_seconds", "order_timeout_seconds", "requote_interval_seconds",
                  "market_freshness_seconds", "max_transport_lag_seconds", "future_tolerance_seconds",
                  "repair_cooldown_seconds", "variational_poll_seconds", "order_poll_seconds", "stop_loss_usd"}
 
@@ -63,6 +63,8 @@ class Settings:
     max_groups: int = 5
     group_notional_usd: Decimal = Decimal("100")
     clip_notional_usd: Decimal = Decimal("50")
+    # Clips shrink to the size the books fill profitably, down to this notional.
+    min_clip_notional_usd: Decimal = Decimal("20")
     execution_method: str = "taker_taker"
     maker_preference: tuple[str, ...] = ("arcus", "hyperliquid", "entropy", "aster", "lighter", "mexc")
     leverage: dict[str, int] = field(default_factory=dict)
@@ -109,7 +111,7 @@ class Settings:
     @classmethod
     def load(cls, path: Path) -> "Settings":
         payload = json.loads(path.read_text(encoding="utf-8-sig"))
-        for key in ("group_notional_usd", "clip_notional_usd", "entry_bps", "take_profit_bps", "min_profit_bps",
+        for key in ("group_notional_usd", "clip_notional_usd", "min_clip_notional_usd", "entry_bps", "take_profit_bps", "min_profit_bps",
                     "slippage_buffer_bps", "funding_budget_bps", "max_book_spread_bps",
                     "max_price_deviation_pct", "max_abs_funding_rate_pct"):
             if key in payload:
@@ -141,7 +143,7 @@ class Settings:
             fees={venue: self.fees[venue] for venue in (short_venue, long_venue)},
             execution_method="maker_taker" if maker else "taker_taker", maker_venue=maker,
             min_profit_bps=self.min_profit_bps, slippage_buffer_bps=self.slippage_buffer_bps,
-            funding_budget_bps=self.funding_budget_bps,
+            funding_budget_bps=self.funding_budget_bps, min_clip_notional_usd=self.min_clip_notional_usd,
             short_leverage=int(self.leverage.get(short_venue, 1)),
             long_leverage=int(self.leverage.get(long_venue, 1)),
         )
@@ -297,19 +299,6 @@ def find_opportunities(settings: Settings, store: QuoteStore, health: dict[str, 
 
 
 ONE_ = Decimal("1")
-
-
-def common_lot(instruments: list[Instrument]) -> Decimal | None:
-    """Smallest quantity step valid on every venue (least common multiple of the lots)."""
-    lots = [inst.lot_size for inst in instruments if inst.lot_size]
-    if not lots:
-        return None
-    places = max(max(0, -lot.normalize().as_tuple().exponent) for lot in lots)
-    scale = Decimal(10) ** places
-    value = 1
-    for lot in lots:
-        value = math.lcm(value, int(lot * scale))
-    return Decimal(value) / scale
 
 
 def size_group(settings: Settings, mid: Decimal, instruments: list[Instrument]) -> tuple[Decimal, Decimal]:
@@ -941,17 +930,20 @@ class Dispatcher:
             return None, "visible depth too thin for the clip"
         return (short, long), "ok"
 
-    async def wait_for_depth(self, config: Config, quantity: Decimal):
-        """Launch only if the entry still passes at the full clip size (depth subscriptions take a moment)."""
+    async def wait_for_depth(self, config: Config, instruments: dict, quantity: Decimal):
+        """Launch only if some clip (at least the minimum size) is profitable against visible depth;
+        depth subscriptions take a moment to arrive."""
+        from hydra_basis.spread_strategy.core import Leg
+        from hydra_basis.spread_strategy.engine import fit_clip
         reason = "no fresh quotes"
         for _ in range(max(1, int(self.trade_quote_timeout_seconds / 0.2))):
-            prices, reason = self.depth_entry(config, quantity)
-            if prices is not None:
-                if entry_allowed(config, *prices):
+            books = StoreFeed(config, self.store, self.health, clock=self.clock).fresh_pair()
+            if books is not None:
+                if fit_clip(config, instruments, books, "entry", quantity, Leg(), Leg()) is not None:
                     return
-                reason = f"entry at clip size is {spread_bps(*prices):.1f} bps, below the gate"
+                reason = "no order size the books fill profitably"
             await asyncio.sleep(0.2)
-        raise RuntimeError(f"not tradeable at clip size {quantity}: {reason}")
+        raise RuntimeError(f"not tradeable (clip up to {quantity}): {reason}")
 
     async def scan_once(self):
         now = self.clock()
@@ -984,7 +976,7 @@ class Dispatcher:
             instruments = await self.load_instruments(config)
             total, clip = size_group(self.settings, opportunity.mid, list(instruments.values()))
             config = self.settings.group_config(symbol, opportunity.short_venue, opportunity.long_venue, total, clip)
-            await self.wait_for_depth(config, clip)
+            await self.wait_for_depth(config, instruments, clip)
             group = Group(self, gid, config, self.data_dir / "groups" / f"{gid}.{self.mode}.json", self.clock())
             await group.start(instruments)
         except Exception as exc:

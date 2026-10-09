@@ -10,6 +10,7 @@
   "max_groups": 5,
   "group_notional_usd": "100",
   "clip_notional_usd": "50",
+  "min_clip_notional_usd": "20",
   "execution_method": "taker_taker",
   "maker_preference": [
     "arcus",
@@ -74,6 +75,7 @@
   "scan_seconds": 1,
   "status_seconds": 30,
   "strategy": {
+    "clip_interval_seconds": 1,
     "tick_seconds": 0.5,
     "order_timeout_seconds": 20,
     "requote_interval_seconds": 2,

@@ -12,9 +12,18 @@
   "slippage_buffer_bps": "5",
   "funding_budget_bps": "5",
   "fees": {
-    "aster": {"maker": "0.0005", "taker": "0.0005"},
-    "hyperliquid": {"maker": "0.0005", "taker": "0.0005"},
-    "variational": {"maker": "0.0005", "taker": "0.0005"}
+    "aster": {
+      "maker": "0.0005",
+      "taker": "0.0005"
+    },
+    "hyperliquid": {
+      "maker": "0.0005",
+      "taker": "0.0005"
+    },
+    "variational": {
+      "maker": "0.0005",
+      "taker": "0.0005"
+    }
   },
   "short_leverage": 1,
   "long_leverage": 1,
@@ -26,5 +35,7 @@
   "future_tolerance_seconds": 2,
   "repair_cooldown_seconds": 3,
   "variational_poll_seconds": 2,
-  "stop_loss_usd": null
+  "stop_loss_usd": null,
+  "min_clip_notional_usd": "0",
+  "clip_interval_seconds": 1
 }

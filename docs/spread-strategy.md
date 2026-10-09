@@ -77,6 +77,30 @@ are completed. Maker-fill hedges, repairs and stop-loss exits stay market
 orders because they must complete; Variational legs are market orders too
 (no IOC limits).
 
+### Clip sizing: fit to depth, re-priced every clip
+
+Each tick, at most one clip is sent: the largest size up to `clip_quantity`
+that both books fill with every single fill passing the gate. It is sized on
+the deepest level the clip touches, not the average, so the boundary IOC
+limits admit the whole clip. A thin book therefore means smaller clips, not
+worse fills:
+
+* entries never go below `min_clip_notional_usd` (dispatcher default 20) or
+  any venue minimum; below that the strategy waits (`depth_insufficient`);
+* exits may go below it, so a small remainder can still close;
+* consecutive clips are at least `clip_interval_seconds` (1) apart so books
+  can refill, and every clip is re-priced from the current books, so a
+  vanished spread stops the build-up;
+* a resized clip logs `clip_resized`;
+* in maker mode the resting quote shrinks to what the taker book can hedge.
+
+If the books move between the decision and the order and the legs fill
+unevenly, the difference is settled in the same step: an entry is unwound
+(the filled leg trimmed, reduce-only) and an exit is completed. No unhedged
+leg is left open. A residual below every venue's minimum order (a few USD)
+cannot be traded and is logged as dust. Paper mode does not deplete the book
+between clips, so real clips after the first can be smaller.
+
 ### Net-profit gate (kept from the earlier version; not in the original)
 
 Entry also requires the estimated net edge to reach `min_profit_bps` after a

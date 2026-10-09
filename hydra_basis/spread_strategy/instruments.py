@@ -1,6 +1,7 @@
 """Public instrument constraints: price tick, lot size, minimum size and notional."""
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from decimal import ROUND_CEILING, ROUND_FLOOR, Decimal
 
@@ -54,6 +55,19 @@ class Instrument:
         if price is not None and self.min_notional and quantity * price < self.min_notional:
             return f"below_minimum_notional {quantity * price} < {self.min_notional}"
         return None
+
+
+def common_lot(instruments) -> Decimal | None:
+    """Smallest quantity step valid on every venue (least common multiple of the lots)."""
+    lots = [inst.lot_size for inst in instruments if inst.lot_size]
+    if not lots:
+        return None
+    places = max(max(0, -lot.normalize().as_tuple().exponent) for lot in lots)
+    scale = Decimal(10) ** places
+    value = 1
+    for lot in lots:
+        value = math.lcm(value, int(lot * scale))
+    return Decimal(value) / scale
 
 
 async def fetch_instrument(session, venue: str, symbol: str) -> Instrument:

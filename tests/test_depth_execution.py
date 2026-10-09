@@ -219,7 +219,7 @@ class LaunchDepthTests(unittest.IsolatedAsyncioTestCase):
                                                     "bids": levels((bid, "0.01")), "asks": levels((ask, "0.01"))}})
             await d.scan_once()
             self.assertEqual(d.groups, {})
-            self.assertIn("visible depth too thin", events[-1]["error"])
+            self.assertIn("no order size the books fill profitably", events[-1]["error"])
 
 
 if __name__ == "__main__":

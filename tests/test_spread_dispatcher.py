@@ -22,7 +22,7 @@ ZERO_FEES = {v: {"maker": D("0"), "taker": D("0")} for v in VENUES}
 def settings(**kwargs):
     defaults = dict(venues=VENUES, fees=ZERO_FEES, min_profit_bps=D("0"), slippage_buffer_bps=D("0"),
                     funding_budget_bps=D("0"), confirm_seconds=0, scan_seconds=0.01,
-                    strategy={"tick_seconds": 0.01}, history={"enabled": False})
+                    strategy={"tick_seconds": 0.01, "clip_interval_seconds": 0}, history={"enabled": False})
     return Settings(**(defaults | kwargs))
 
 

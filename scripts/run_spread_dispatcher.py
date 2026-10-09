@@ -30,6 +30,10 @@ def parser():
     result.add_argument("--settle", action="append", default=[], metavar="GROUP_ID:ORDER_ID=QTY[@PRICE]",
                         help="record a manually verified fill for an unresolved order, then resume the group")
     result.add_argument("--max-seconds", type=float, default=0, help="0 runs until Ctrl+C")
+    result.add_argument("--dry-run", action="store_true",
+                        help="only report opportunities and estimated profit; never opens positions")
+    result.add_argument("--report-seconds", type=float, default=15, help="dry-run report interval")
+    result.add_argument("--top", type=int, default=10, help="dry-run rows per section")
     return result
 
 
@@ -43,7 +47,34 @@ def telegram_notifier(tasks: set):
     return notify
 
 
+async def dry_run(args):
+    """Market data only: no credentials, adapters, locks, groups or orders."""
+    settings = Settings.load(args.config)
+    mode = "live" if args.live else "paper"
+    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15)) as session:
+        dispatcher = Dispatcher(settings, live=args.live, data_dir=args.data_dir, registry_path=args.registry,
+                                store=QuoteStore(), emit=lambda payload: None)
+        feeds = [asyncio.create_task(run_venue_feed(venue, session, dispatcher.store, dispatcher.health,
+                                                    settings, dispatcher.emit))
+                 for venue in settings.venues]
+        print(f"乾跑模式：只報告，不開倉。讀取現有倉位：{dispatcher.index_path}（{mode}）", flush=True)
+        try:
+            await asyncio.sleep(10)  # let every venue's quotes arrive
+            elapsed = 10.0
+            while True:
+                print(dispatcher.dry_run_report(top=args.top), flush=True)
+                if args.max_seconds and elapsed >= args.max_seconds:
+                    return
+                await asyncio.sleep(args.report_seconds)
+                elapsed += args.report_seconds
+        finally:
+            for task in feeds:
+                task.cancel()
+
+
 async def run(args):
+    if args.dry_run:
+        return await dry_run(args)
     settings = Settings.load(args.config)
     mode = "live" if args.live else "paper"
     lock = SymbolLock(args.data_dir / f"dispatcher.{mode}.lock")

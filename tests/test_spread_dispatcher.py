@@ -10,6 +10,9 @@ from hydra_basis.spread_strategy.broker import MexcUnits
 from hydra_basis.spread_strategy.dispatcher import (
     Dispatcher, QuoteStore, Settings, common_lot, find_opportunities, size_group,
 )
+from hydra_basis.spread_strategy.core import Leg, State
+from hydra_basis.spread_strategy.dispatcher import Opportunity
+from hydra_basis.spread_strategy.estimates import estimate_group, estimate_opportunity
 from hydra_basis.spread_strategy.instruments import Instrument
 
 VENUES = ("aster", "hyperliquid", "lighter", "mexc")
@@ -151,6 +154,33 @@ class MexcUnitsTests(unittest.IsolatedAsyncioTestCase):
             await units.place_market_order(symbol="ETH", side="BUY", amount="0.015", clip_usd=1)
 
 
+class EstimateTests(unittest.TestCase):
+    def opportunity(self):
+        return Opportunity("ETH", "aster", "hyperliquid", D("50"), D("100.25"),
+                           short_bid=D("100.5"), short_ask=D("100.55"), long_bid=D("99.95"), long_ask=D("100"))
+
+    def test_opportunity_profit_at_take_profit(self):
+        config = settings().group_config("ETH", "aster", "hyperliquid", D("1"), D("1"))
+        estimate = estimate_opportunity(config, self.opportunity(), D("100"))
+        # 1 unit; exit when the short converges to 100 * 1.001: (100.5 - 100.1) + 0
+        self.assertEqual((estimate.quantity, estimate.gross_at_tp, estimate.net_at_tp), (D("1"), D("0.4"), D("0.4")))
+        self.assertEqual(estimate.required_bps, D("40"))
+        fees = {v: {"maker": D("0"), "taker": D("0.001")} for v in VENUES}
+        config = settings(fees=fees).group_config("ETH", "aster", "hyperliquid", D("1"), D("1"))
+        estimate = estimate_opportunity(config, self.opportunity(), D("100"))
+        self.assertEqual(estimate.fees, D("0.4006"))
+        self.assertEqual(estimate.net_at_tp, D("-0.0006"))
+
+    def test_group_close_now_and_at_take_profit(self):
+        config = settings().group_config("ETH", "aster", "hyperliquid", D("1"), D("1"))
+        state = State("id", "paper", "g", short=Leg("-1", "100.5"), long=Leg("1", "100"))
+        books = {"aster": (D("100.2"), D("100.3")), "hyperliquid": (D("100"), D("100.05"))}
+        estimate = estimate_group("g", config, state, books)
+        self.assertEqual((estimate.quantity, estimate.entry_spread_bps), (D("1"), D("50")))
+        self.assertEqual((estimate.close_now, estimate.at_tp), (D("0.2"), D("0.4")))
+        self.assertIsNone(estimate_group("g", config, state, None).close_now)
+
+
 class DispatcherTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -213,6 +243,28 @@ class DispatcherTests(unittest.IsolatedAsyncioTestCase):
         await d.scan_once()
         self.assertEqual(len(d.groups), 1)
         await d.shutdown()
+
+    async def test_dry_run_reports_without_opening(self):
+        self.wide("AAA")
+        quote(self.store, "aster", "BBB", "100.2", "100.25", self.clock)  # 20 bps: below the 40 bps gate
+        quote(self.store, "hyperliquid", "BBB", "99.95", "100", self.clock)
+        d = self.dispatcher()
+        report = d.dry_run_report()
+        self.assertEqual(d.groups, {})
+        self.assertFalse(d.index_path.exists())
+        qualifying, near = report.split("[接近門檻")
+        self.assertIn("AAA", qualifying)
+        self.assertIn("BBB", near)
+        self.assertIn("未達門檻", near)
+        # Existing groups are read from the index without being started.
+        live = self.dispatcher()
+        await live.scan_once()
+        group = next(iter(live.groups.values()))
+        await until(lambda: group.engine.matched() > 0)
+        await live.shutdown()
+        report = self.dispatcher().dry_run_report()
+        self.assertIn(group.id, report)
+        self.assertIn("[現有倉位] 1 組", report)
 
     async def test_confirmation_delay(self):
         self.wide("AAA")

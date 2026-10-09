@@ -12,6 +12,27 @@ python scripts/run_spread_dispatcher.py                 # paper (default)
 python scripts/run_spread_dispatcher.py --live          # real orders
 ```
 
+To only see opportunities and estimated profit, without opening anything
+(not even paper positions):
+
+```powershell
+python scripts/run_spread_dispatcher.py --dry-run                # every 15 s until Ctrl+C
+python scripts/run_spread_dispatcher.py --dry-run --max-seconds 60 --top 15
+```
+
+The dry run uses market data only: no credentials, adapters, locks or groups.
+Each report lists:
+
+* opportunities that pass the entry gate;
+* the best near misses, with the reason they are blocked;
+* existing groups of the selected mode (paper, or `--live`), read from their
+  state files: current exit spread, PnL if closed now, and PnL at take profit.
+
+Profit "at take profit" assumes the exit happens when the exit spread reaches
+`take_profit_bps` (the strategy's rule) with the long leg's price unchanged.
+It covers all four fills' fees at the configured rates, and excludes funding,
+slippage, depth and lot rounding.
+
 Paper mode uses live public data and simulated venues, with no credentials,
 orders or registry writes. Live mode loads `.env` and builds an authenticated
 adapter for every enabled venue at startup. It exits immediately if a venue's

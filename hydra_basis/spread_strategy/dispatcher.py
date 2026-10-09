@@ -189,6 +189,13 @@ class Opportunity:
     long_venue: str
     entry_bps: Decimal
     mid: Decimal
+    short_bid: Decimal = ZERO
+    short_ask: Decimal = ZERO
+    long_bid: Decimal = ZERO
+    long_ask: Decimal = ZERO
+    # False only in dry-run listings of near misses; ``blocked_by`` says why.
+    qualifies: bool = True
+    blocked_by: str = ""
 
     @property
     def key(self) -> tuple[str, str, str]:
@@ -217,7 +224,7 @@ def native_symbol(symbol: str, venue: str) -> bool:
 
 
 def find_opportunities(settings: Settings, store: QuoteStore, health: dict[str, bool], now: int,
-                       *, exclude: set[str] = frozenset()) -> list[Opportunity]:
+                       *, exclude: set[str] = frozenset(), include_near_misses: bool = False) -> list[Opportunity]:
     books: dict[str, dict[str, tuple[Decimal, Decimal]]] = {}
     for venue in settings.venues:
         if not health.get(venue):
@@ -247,13 +254,18 @@ def find_opportunities(settings: Settings, store: QuoteStore, health: dict[str, 
             pair = (short_venue, long_venue)
             if pair not in ratios:
                 ratios[pair] = entry_ratio_required(settings.group_config("CHECK", *pair, ONE_, ONE_))
+            blocked_by = ""
             if short_bid / long_ask < ratios[pair]:
-                continue
-            if any(abs(rate) > funding_cap for venue in pair
-                   if (rate := store.funding(venue, symbol)) is not None):
+                blocked_by = "entry_gate"
+            elif any(abs(rate) > funding_cap for venue in pair
+                     if (rate := store.funding(venue, symbol)) is not None):
+                blocked_by = "funding"
+            if blocked_by and not (include_near_misses and short_bid > long_ask):
                 continue
             found.append(Opportunity(symbol, short_venue, long_venue,
-                                     (short_bid - long_ask) / long_ask * BPS, (short_mid + long_mid) / 2))
+                                     (short_bid - long_ask) / long_ask * BPS, (short_mid + long_mid) / 2,
+                                     short_bid, short_ask, long_bid, long_ask,
+                                     qualifies=not blocked_by, blocked_by=blocked_by))
     found.sort(key=lambda item: item.entry_bps, reverse=True)
     return found
 
@@ -758,6 +770,41 @@ class Dispatcher:
                    "status": status, "reason": group.engine.state.reason})
         self.notify(f"價差組 {group.id} {group.config.symbol} 已{'結束' if status == 'STOPPED' else '暫停'}："
                     f"{group.engine.state.reason}")
+
+    # -------------------------------------------------------------- dry run
+
+    def dry_run_report(self, *, top: int = 10) -> str:
+        """Opportunities and existing-group estimates; never launches, locks or trades."""
+        import time as _time
+        from hydra_basis.spread_strategy.core import State
+        from hydra_basis.spread_strategy.estimates import estimate_group, estimate_opportunity, format_report
+        found = find_opportunities(self.settings, self.store, self.health, self.clock(), include_near_misses=True)
+        def estimate(opportunity):
+            config = self.settings.group_config("CHECK", opportunity.short_venue, opportunity.long_venue,
+                                                ONE_, ONE_)
+            return estimate_opportunity(config, opportunity, self.settings.group_notional_usd)
+        qualifying = [estimate(o) for o in found if o.qualifies][:top]
+        near = [estimate(o) for o in found if not o.qualifies][:top]
+        groups = []
+        if self.index_path.exists():
+            saved = json.loads(self.index_path.read_text(encoding="utf-8"))["groups"]
+            for gid, item in saved.items():
+                state_path = Path(item["state"])
+                if not state_path.exists():
+                    continue
+                config = Config.from_dict(item["config"])
+                state = State.from_dict(json.loads(state_path.read_text(encoding="utf-8")))
+                books = {}
+                for venue in config.venues:
+                    quote = self.store.scan_quotes(venue).get(config.symbol)
+                    if quote is None:
+                        books = None
+                        break
+                    books[venue] = (Decimal(str(quote["bid"])), Decimal(str(quote["ask"])))
+                groups.append(estimate_group(gid, config, state, books))
+        return format_report(now_text=_time.strftime("%Y-%m-%d %H:%M:%S"), feeds=dict(self.health),
+                             take_profit_bps=self.settings.take_profit_bps, qualifying=qualifying, near=near,
+                             groups=groups)
 
     # -------------------------------------------------------------- main loop
 

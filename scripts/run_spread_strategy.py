@@ -106,6 +106,7 @@ async def run(args):
             started = last_status = time.monotonic()
             try:
                 while state.status in {"RUNNING", "STOPPING"}:
+                    revision = feed.revision
                     if feed_task.done():
                         raise RuntimeError(f"market feed stopped: {feed_task.exception()}")
                     await engine.step()
@@ -115,7 +116,7 @@ async def run(args):
                         last_status = now
                     if args.max_seconds and now - started >= args.max_seconds:
                         break
-                    await asyncio.sleep(config.tick_seconds)
+                    await feed.wait_for_update(revision, config.tick_seconds)
             finally:
                 if state.status in {"RUNNING", "STOPPING"}:
                     await engine.shutdown()

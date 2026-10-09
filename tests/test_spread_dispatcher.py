@@ -206,6 +206,18 @@ class DispatcherTests(unittest.IsolatedAsyncioTestCase):
         quote(self.store, short, symbol, "100.5", "100.55", self.clock)
         quote(self.store, long, symbol, "99.95", "100", self.clock)
 
+    async def test_group_new_quote_trades_before_long_housekeeping_timer(self):
+        self.wide("AAA")
+        d = self.dispatcher(settings(strategy={"tick_seconds": 60, "clip_interval_seconds": 0}))
+        try:
+            await d.scan_once()
+            group = next(iter(d.groups.values()))
+            await until(lambda: group.engine.matched() > 0)
+            self.wide("AAA")
+            await until(lambda: group.engine.matched() == group.config.total_quantity, timeout=0.5)
+        finally:
+            await d.shutdown()
+
     async def test_launches_one_group_per_symbol_up_to_the_slot_limit(self):
         for symbol in ("AAA", "BBB", "CCC"):
             self.wide(symbol)
@@ -217,6 +229,9 @@ class DispatcherTests(unittest.IsolatedAsyncioTestCase):
         group = next(iter(d.groups.values()))
         total, clip = group.config.total_quantity, group.config.clip_quantity
         self.assertEqual(total, clip * 2)
+        await until(lambda: all(g.engine.matched() > 0 for g in d.groups.values()))
+        for current in d.groups.values():
+            self.wide(current.config.symbol)  # the next clip needs a fresh snapshot
         await until(lambda: all(g.engine.matched() == g.config.total_quantity for g in d.groups.values()))
         await d.scan_once()
         self.assertEqual(len(d.groups), 2, "no free slot")

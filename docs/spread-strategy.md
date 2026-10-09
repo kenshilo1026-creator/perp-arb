@@ -55,7 +55,7 @@ completion state.
 * Entry: `(short bid - long ask) / long ask * 10000` must be `>= entry_bps`.
 * Exit: `(short ask - long bid) / long bid * 10000` must be `<= take_profit_bps`.
 
-### Prices: order-book depth, and IOC limits at the profit boundary
+### Prices: full-clip VWAP, with IOC depth limits
 
 Every open/close decision prices the full clip against visible depth: the
 average fill when selling into the bids or buying the asks across levels
@@ -64,12 +64,14 @@ converted from contracts). If the visible book cannot fill the clip, the
 strategy does not trade (`depth_insufficient` in the log). Variational quotes
 are already priced for the order's size tier.
 
-Normal entry and exit legs are IOC limits, not market orders. Each leg's limit
-is its worst acceptable price: the largest symmetric slip from the decision
-prices at which both legs filling at their limits still passes the gate
-(fees, take profit, funding and slippage reserves, min profit). It is rounded
-to the stricter tick. A leg either fills profitably or does not fill. A
-zero-fill IOC is a no-fill, not a failure.
+Normal entry and exit legs use IOC limits where the venue supports them. The
+gate evaluates each leg's full-clip VWAP, including fees and reserves. Each
+IOC is capped at the deepest visible price needed for the selected quantity,
+rounded to the stricter tick. This permits worse individual tail fills when
+the entire paired batch still meets the modeled net-profit gate. It does not
+guarantee the average: the book may move before execution, and partial or
+asymmetric fills can have a different average. A zero-fill IOC is a no-fill,
+not a failure. Emergency exits remain market orders.
 
 If only one leg fills, the hedge repair unwinds an entry: it trims the leg
 that filled, reduce-only, rather than chasing the other leg at market. Exits
@@ -79,18 +81,23 @@ orders because they must complete; Variational legs are market orders too
 
 ### Clip sizing: fit to depth, re-priced every clip
 
-Each tick, at most one clip is sent: the largest size up to `clip_quantity`
-that both books fill with every single fill passing the gate. It is sized on
-the deepest level the clip touches, not the average, so the boundary IOC
-limits admit the whole clip. A thin book therefore means smaller clips, not
-worse fills:
+Each evaluation sends at most one clip. Among legal quantities up to
+`clip_quantity`, it selects the highest estimated net dollar return using both
+books' VWAP, after modeled opening/closing fees, target exit spread, funding
+and slippage reserves. This is not the highest percentage spread at the
+smallest size, nor necessarily the largest passing size. It searches the
+minimum/legal endpoints and lot-rounded depth boundaries; between these
+boundaries modeled dollar profit is piecewise linear.
 
-* entries never go below `min_clip_notional_usd` (dispatcher default 20) or
+* entries never go below `min_clip_notional_usd` on either leg (dispatcher default 20) or
   any venue minimum; below that the strategy waits (`depth_insufficient`);
 * exits may go below it, so a small remainder can still close;
-* consecutive clips are at least `clip_interval_seconds` (1) apart so books
-  can refill, and every clip is re-priced from the current books, so a
-  vanished spread stops the build-up;
+* `clip_interval_seconds` defaults to 0: new quote/depth updates wake an active
+  strategy immediately, without a fixed 1-second pause or 0.5-second polling
+  delay. `tick_seconds` remains a maximum wait for housekeeping and order checks;
+* with the default zero interval, a consumed snapshot cannot trigger another
+  clip until this pair receives a new update. Quote bursts coalesce to the
+  latest snapshot. A positive interval remains available as an explicit throttle;
 * a resized clip logs `clip_resized`;
 * in maker mode the resting quote shrinks to what the taker book can hedge.
 
@@ -98,8 +105,11 @@ If the books move between the decision and the order and the legs fill
 unevenly, the difference is settled in the same step: an entry is unwound
 (the filled leg trimmed, reduce-only) and an exit is completed. No unhedged
 leg is left open. A residual below every venue's minimum order (a few USD)
-cannot be traded and is logged as dust. Paper mode does not deplete the book
-between clips, so real clips after the first can be smaller.
+cannot be traded and is logged as dust. Repairs can fail or remain uncertain,
+in which case the strategy pauses rather than promising a flat position.
+Paper mode does not deplete the book; the next clip still requires an updated
+snapshot when the configured interval is zero. Actual execution latency,
+venue rate limits, and browser/REST polling can still miss a brief opportunity.
 
 ### Net-profit gate (kept from the earlier version; not in the original)
 
@@ -194,7 +204,9 @@ quotes from both venues. Disconnected streams reconnect with backoff.
 | `fees` | Fractions per venue and role (`0.0005` = 0.05%) |
 | `min_profit_bps`, `funding_budget_bps`, `slippage_buffer_bps` | Net-profit gate reserves |
 | `short_leverage`, `long_leverage` | Per-leg leverage (isolated margin) |
-| `tick_seconds` | Evaluation interval (0.5) |
+| `min_clip_notional_usd` | Entry floor on both legs; exits may go below this configured floor |
+| `clip_interval_seconds` | Optional batch throttle; 0 reacts to fresh snapshots without a fixed delay |
+| `tick_seconds` | Maximum wait for housekeeping (0.5); market updates wake evaluation earlier |
 | `order_timeout_seconds` | Wait for a market order outcome (20) |
 | `requote_interval_seconds` | Minimum quote age before repricing (2) |
 | `market_freshness_seconds`, `future_tolerance_seconds`, `max_transport_lag_seconds` | Quote freshness (15 / 2 / 3) |

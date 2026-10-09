@@ -213,12 +213,14 @@ class TakerTakerTests(unittest.IsolatedAsyncioTestCase):
             h.wide()
             await h.engine.start()
             await h.engine.step()
+            h.wide()  # a replenished book, rather than consuming the same cached depth
             await h.engine.step()
             self.assertEqual(h.legs(), (D("-0.02"), D("0.02")))
             await h.engine.step()  # at capacity: no further entry
             self.assertEqual(h.legs(), (D("-0.02"), D("0.02")))
             h.converged()
             await h.engine.step()
+            h.converged()
             await h.engine.step()
             self.assertEqual(h.legs(), (D("0"), D("0")))
             self.assertGreater(D(h.state.short.realized) + D(h.state.long.realized), 0)
@@ -346,6 +348,7 @@ class TakerTakerTests(unittest.IsolatedAsyncioTestCase):
             h.wide()
             await h.engine.start()
             await h.engine.step()
+            h.wide()
             await h.engine.step()
             h.books(("2100", "2100.5"), ("1999.5", "2000"))  # spread blows out: -1.8 USD
             await h.engine.step()

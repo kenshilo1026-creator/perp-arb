@@ -166,12 +166,52 @@ class QuoteStore(MarketStateStore):
         self._live: dict[str, dict[str, dict]] = {}
         self._scan: dict[str, dict[str, dict]] = {}
         self._depth: dict[str, dict[str, dict]] = {}
+        self._versions: dict[tuple[str, str], int] = {}
+        self._events: dict[tuple[str, tuple[str, ...]], asyncio.Event] = {}
+        self.revision = 0
+        self._scan_updated = asyncio.Event()
+
+    def version_for(self, symbol, venues):
+        return tuple(self._versions.get((v, symbol.upper()), 0) for v in venues)
+
+    def notify_update(self, venue, symbol, *, trade=True):
+        self.revision += 1
+        self._scan_updated.set()
+        if trade:
+            key = venue, symbol.upper()
+            self._versions[key] = self._versions.get(key, 0) + 1
+            for (watched_symbol, venues), event in self._events.items():
+                if watched_symbol == symbol.upper() and venue in venues:
+                    event.set()
+
+    async def wait_for_update(self, symbol, venues, revision, timeout):
+        if self.version_for(symbol, venues) != revision:
+            await asyncio.sleep(0)
+            return self.version_for(symbol, venues)
+        event = self._events.setdefault((symbol.upper(), tuple(venues)), asyncio.Event())
+        event.clear()
+        try:
+            await asyncio.wait_for(event.wait(), timeout)
+        except asyncio.TimeoutError:
+            pass
+        return self.version_for(symbol, venues)
+
+    async def wait_for_scan_update(self, revision, timeout):
+        if self.revision != revision:
+            await asyncio.sleep(0)
+            return
+        self._scan_updated.clear()
+        try:
+            await asyncio.wait_for(self._scan_updated.wait(), timeout)
+        except asyncio.TimeoutError:
+            pass
 
     def update_depth(self, venue: str, symbol: str, bids, asks, *, source_ms: int | None):
         """A multi-level book for a watched symbol (best first, base units)."""
         if bids and asks:
             self._depth.setdefault(venue, {})[str(symbol).upper()] = {
                 "bids": tuple(bids), "asks": tuple(asks), "received_ms": self.clock(), "source_ms": source_ms}
+            self.notify_update(venue, str(symbol))
 
     def get_depth(self, venue: str, symbol: str) -> dict | None:
         return self._depth.get(venue, {}).get(symbol)
@@ -191,6 +231,7 @@ class QuoteStore(MarketStateStore):
             # Scan-only quotes (lagging tickers) help discovery but never drive orders.
             target = self._scan if entry["scan_only"] else self._live
             target.setdefault(venue, {})[str(symbol).upper()] = entry
+            self.notify_update(venue, str(symbol), trade=not entry["scan_only"])
 
     def get_quote(self, venue: str, symbol: str) -> dict | None:
         return self._live.get(venue, {}).get(symbol)
@@ -778,6 +819,7 @@ class Group:
     async def run(self):
         engine, errors = self.engine, 0
         while engine.state.status in ACTIVE:
+            revision = engine.feed.revision
             try:
                 await engine.step()
                 errors = 0
@@ -791,7 +833,7 @@ class Group:
                 if errors >= MAX_ENGINE_ERRORS:
                     await engine.pause(f"{MAX_ENGINE_ERRORS} consecutive engine errors: {str(exc)[:160]}")
             if engine.state.status in ACTIVE:
-                await asyncio.sleep(self.config.tick_seconds)
+                await engine.feed.wait_for_update(revision, self.config.tick_seconds)
         self.dispatcher.group_finished(self)
 
     def last_activity_ms(self) -> int:
@@ -1126,7 +1168,7 @@ class Dispatcher:
         started = last_status = self.clock()
         found: list[Opportunity] = []
         while True:
-            await asyncio.sleep(self.settings.scan_seconds)
+            revision = self.store.revision
             try:
                 found = await self.scan_once()
             except Exception as exc:
@@ -1137,6 +1179,7 @@ class Dispatcher:
                 last_status = now
             if max_seconds and now - started >= max_seconds * 1000:
                 return
+            await self.store.wait_for_scan_update(revision, self.settings.scan_seconds)
 
     async def shutdown(self):
         for group in list(self.groups.values()):

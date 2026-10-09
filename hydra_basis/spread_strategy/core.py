@@ -79,8 +79,8 @@ class Config:
     # Clips shrink to what the books can fill profitably, but never below this notional
     # (venue minimums apply too); 0 means venue minimums only.
     min_clip_notional_usd: Decimal = Decimal("0")
-    # Minimum gap between taker clips so thin books can refill.
-    clip_interval_seconds: float = 1.0
+    # Optional minimum gap. Zero reacts to fresh market updates without a fixed delay.
+    clip_interval_seconds: float = 0.0
     # Optional emergency exit; None disables it (the original has no such exit).
     stop_loss_usd: Decimal | None = None
 

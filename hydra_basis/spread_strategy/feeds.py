@@ -110,6 +110,24 @@ class MarketFeed:
         self.contract_sizes = contract_sizes or {}
         self._tickers: dict[str, Ticker] = {}
         self._healthy: dict[str, bool] = {venue: False for venue in config.venues}
+        self._revision = 0
+        self._updated = asyncio.Event()
+
+    @property
+    def revision(self):
+        return self._revision
+
+    async def wait_for_update(self, revision, timeout: float):
+        """Coalesce incoming frames; wake immediately, with a timer for housekeeping."""
+        if self.revision != revision:
+            await asyncio.sleep(0)
+            return self.revision
+        self._updated.clear()
+        try:
+            await asyncio.wait_for(self._updated.wait(), timeout)
+        except asyncio.TimeoutError:
+            pass
+        return self.revision
 
     def update(self, venue: str, bid, ask, *, source_ms: int | None, received_ms: int | None = None,
                bids: Levels = (), asks: Levels = ()):
@@ -117,12 +135,17 @@ class MarketFeed:
                                       received_ms if received_ms is not None else self.clock(), source_ms,
                                       tuple(bids), tuple(asks))
         self._healthy[venue] = True
+        self._revision += 1
+        self._updated.set()
 
     def update_book(self, venue: str, bids: Levels, asks: Levels, *, source_ms: int | None):
         if bids and asks:
             self.update(venue, bids[0][0], asks[0][0], source_ms=source_ms, bids=bids, asks=asks)
 
     def set_health(self, venue: str, healthy: bool):
+        if self._healthy.get(venue) != healthy:
+            self._revision += 1
+            self._updated.set()
         self._healthy[venue] = healthy
 
     def ticker(self, venue: str) -> Ticker | None:
@@ -406,6 +429,13 @@ class StoreFeed(MarketFeed):
     def __init__(self, config: Config, store, health: dict[str, bool], *, clock=now_ms):
         super().__init__(config, clock=clock)
         self.store, self.health = store, health
+
+    @property
+    def revision(self):
+        return self.store.version_for(self.config.symbol, self.config.venues)
+
+    async def wait_for_update(self, revision, timeout: float):
+        return await self.store.wait_for_update(self.config.symbol, self.config.venues, revision, timeout)
 
     def update(self, *args, **kwargs):
         raise RuntimeError("StoreFeed is read-only; quotes come from the shared store")

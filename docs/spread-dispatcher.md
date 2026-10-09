@@ -39,7 +39,11 @@ The quote store keeps top of book with size for every symbol. For symbols
 with a group, a pending launch, or a dry-run candidate, it also keeps depth:
 Aster depth10, Lighter order_book (deltas applied), Arcus l2Orderbook and MEXC
 depth.full; Hyperliquid and Entropy books carry 20 levels already. A launch
-waits until the entry still passes at the full clip size against that depth.
+waits until a legal batch passes the VWAP entry gate against that depth. It
+chooses the batch with the greatest modeled net-dollar return, up to the clip
+cap. New quote/depth updates wake scanning and active groups; timer intervals
+remain housekeeping fallbacks. The default clip interval is 0, and active
+groups do not reuse a consumed snapshot for another batch.
 The dry run's 深度後bps column shows the entry spread at clip size
 (不足 = visible depth cannot fill a clip, 無數據 = depth subscription just
 started).

@@ -18,7 +18,7 @@ from hydra_basis.spread_strategy.broker import (
 )
 from hydra_basis.spread_strategy.core import (
     EPSILON, ZERO, Config, Order, State, StateStore, entry_allowed, exit_allowed,
-    imbalance, maker_boundary, matched_quantity, now_ms, number, spread_bps,
+    BPS, ONE, exit_net_per_unit, imbalance, maker_boundary, matched_quantity, now_ms, number, spread_bps,
 )
 from hydra_basis.spread_strategy.feeds import MarketFeed
 from hydra_basis.spread_strategy.instruments import Instrument, common_lot
@@ -41,55 +41,104 @@ def leg_side(leg: str, intent: str) -> str:
 
 def fit_clip(config: Config, instruments: dict, books: dict, intent: str, cap: Decimal, short_leg, long_leg
              ) -> tuple[Decimal, tuple[Decimal, Decimal]] | None:
-    """Largest quantity up to ``cap`` that BOTH books fill with every single fill passing the
-    entry/exit gate (fees and reserves included), within every venue's order-size rules.
+    """Choose the highest estimated net-dollar return using both books' full-clip VWAP.
 
-    Sized on the deepest level the clip touches (not the average), so the IOC limits at the profit
-    boundary admit the whole clip: no partial fill by design, and no fill outside the gate.
-
-    Entries never go below ``min_clip_notional_usd``; exits may, so a small remainder can still
-    close. Returns (quantity, (short price, long price)) or None when nothing profitable fits.
+    On sorted books the gates get harder with size, while dollar profit is piecewise
+    linear between depth boundaries. Search legal/gate endpoints and the lot-rounded
+    boundaries rather than iterating every lot. A larger order need not be more profitable.
+    Missing published sizes remain size-tiered quotes, not a depth guarantee.
     """
     lot = common_lot([instruments[venue] for venue in config.venues]) or Decimal("0.00000001")
 
     def snap(quantity: Decimal, rounding) -> Decimal:
         return (quantity / lot).to_integral_value(rounding=rounding) * lot
 
-    def priced(quantity: Decimal):
-        prices = tuple(books[config.venue_of(leg)].marginal(leg_side(leg, intent), quantity)
+    def averages(quantity: Decimal):
+        prices = tuple(books[config.venue_of(leg)].executable(leg_side(leg, intent), quantity)
                        for leg in ("short", "long"))
         if None in prices:
             return None
+        return prices
+
+    def legal(quantity: Decimal):
+        prices = averages(quantity)
+        if prices is None:
+            return False
         for leg, price in zip(("short", "long"), prices):
             if instruments[config.venue_of(leg)].size_error(quantity, price):
-                return None
-        passes = (entry_allowed(config, *prices) if intent == "entry"
-                  else exit_allowed(config, short_leg, long_leg, *prices))
-        return prices if passes else None
+                return False
+            if intent == "entry" and quantity * price < config.min_clip_notional_usd:
+                return False
+        return True
+
+    def allowed(quantity: Decimal):
+        prices = averages(quantity)
+        if prices is None:
+            return False
+        return (entry_allowed(config, *prices) if intent == "entry"
+                else exit_allowed(config, short_leg, long_leg, *prices))
+
+    boundaries = []
+    # Restrict the cap to published depth before looking for minimum legal size.
+    for leg in ("short", "long"):
+        book = books[config.venue_of(leg)]
+        levels = book.asks if leg_side(leg, intent) == "BUY" else book.bids
+        if levels:
+            depth = ZERO
+            for _, size in levels:
+                depth += size
+                boundaries.append(depth)
+            cap = min(cap, depth)
 
     top = snap(cap, ROUND_FLOOR)
-    if top <= 0:
+    if top <= 0 or not legal(top):
         return None
-    prices = priced(top)
-    if prices is not None:
-        return top, prices
-    reference = books[config.short_venue].bid
-    floor_quantity = max([inst.min_size or ZERO for inst in instruments.values()]
-                         + [(inst.min_notional or ZERO) / reference for inst in instruments.values()]
-                         + ([config.min_clip_notional_usd / reference] if intent == "entry" else []))
-    low = max(snap(floor_quantity, ROUND_CEILING), lot)
-    if low >= top or priced(low) is None:
-        return None
-    high = top  # known to fail; the gate only gets harder as size grows
-    while high - low > lot:
-        middle = snap((low + high) / 2, ROUND_FLOOR)
-        if middle <= low:
-            break
-        if priced(middle) is not None:
-            low = middle
+    # Aggregate notionals rise with size: find the first size satisfying BOTH
+    # venues and the configured minimum. Never divide both floors by one price.
+    left, right = 0, int(top / lot)
+    while right - left > 1:
+        middle = (left + right) // 2
+        if legal(lot * middle):
+            right = middle
         else:
-            high = middle
-    return low, priced(low)
+            left = middle
+    minimum = lot * right
+    if not allowed(minimum):
+        return None
+    if not allowed(top):
+        low, high = int(minimum / lot), int(top / lot)
+        while high - low > 1:
+            middle = (low + high) // 2
+            if allowed(lot * middle):
+                low = middle
+            else:
+                high = middle
+        top = lot * low
+    candidates = {minimum, top}
+    for boundary in boundaries:
+        for rounding in (ROUND_FLOOR, ROUND_CEILING):
+            size = snap(boundary, rounding)
+            if minimum <= size <= top:
+                candidates.add(size)
+    best = None
+    for size in candidates:
+        prices = averages(size)
+        if legal(size) and allowed(size):
+            score = (clip_net_profit(config, intent, size, prices, short_leg, long_leg), size)
+            if best is None or score > best[0]:
+                best = score, size, prices
+    return (best[1], best[2]) if best else None
+
+
+def clip_net_profit(c: Config, intent: str, quantity: Decimal, prices, short_leg, long_leg) -> Decimal:
+    """Expected dollar surplus after modeled costs; min-profit is a gate, not a fee."""
+    s, l = prices
+    if intent == "exit":
+        return quantity * (exit_net_per_unit(c, short_leg, long_leg, s, l)
+                           + number(long_leg.average) * c.min_profit_bps / BPS)
+    fs, fl, tp = c.fee_rate(c.short_venue), c.fee_rate(c.long_venue), c.take_profit_bps
+    cost = (ONE + tp / BPS) * fs + 2 * fl + (tp + c.slippage_buffer_bps + c.funding_budget_bps) / BPS
+    return quantity * (s * (ONE - fs) - l * (ONE + cost))
 
 
 class Engine:
@@ -109,6 +158,7 @@ class Engine:
         self._dust_logged: Decimal | None = None
         self._thin_logged: tuple | None = None
         self.last_clip_at = 0
+        self.last_clip_revision = None
         self._polled_at: dict[str, int] = {}
 
     # ------------------------------------------------------------------ helpers
@@ -358,6 +408,8 @@ class Engine:
             return
         if self.clock() - self.last_clip_at < c.clip_interval_seconds * 1000:
             return  # let thin books refill between clips
+        if c.clip_interval_seconds == 0 and self.feed.revision == self.last_clip_revision:
+            return  # don't consume the same cached depth twice while waiting for new data
         books = self.feed.fresh_pair()
         if books is None:
             return
@@ -426,12 +478,26 @@ class Engine:
 
     async def execute_taker_clip(self, intent: str, quantity: Decimal, condition: str, *, purpose: str | None = None,
                                  prices: tuple[Decimal, Decimal] | None = None):
-        """Both legs at once. With ``prices`` (normal entry/exit) each leg is an IOC limit at the
-        profit boundary, so it fills profitably or not at all; without (stop loss) they are market."""
+        """Both legs at once. VWAP is the batch gate; IOC limits cap each leg at
+        its visible marginal price. Changed books can still cause partial fills.
+        Without ``prices`` (emergency exit), use markets regardless of the gate."""
         c = self.config
         quantity = self.clip_size(quantity)
+        limits = (None, None)
+        if prices is not None:
+            books = self.feed.fresh_pair()
+            if books is None:
+                return
+            prices = tuple(books[c.venue_of(leg)].executable(leg_side(leg, intent), quantity)
+                           for leg in ("short", "long"))
+            if None in prices or not (entry_allowed(c, *prices) if intent == "entry" else
+                                     exit_allowed(c, self.state.short, self.state.long, *prices)):
+                return
+            limits = tuple(self.instruments[c.venue_of(leg)].round_price(
+                books[c.venue_of(leg)].marginal(leg_side(leg, intent), quantity),
+                "down" if leg_side(leg, intent) == "BUY" else "up") for leg in ("short", "long"))
         self.last_clip_at = self.clock()
-        limits = self.boundary_limits(intent, *prices) if prices is not None else (None, None)
+        self.last_clip_revision = self.feed.revision
         legs = []
         for index, leg in enumerate(("short", "long")):
             venue, side = c.venue_of(leg), leg_side(leg, intent)
@@ -540,9 +606,20 @@ class Engine:
         taker_book = books[c.venue_of(taker_leg)]
         side = leg_side(taker_leg, intent)
         lot = common_lot([self.instruments[venue] for venue in c.venues]) or Decimal("0.00000001")
+        def legal(quantity):
+            desired = self.desired_maker_price(intent, quantity)
+            taker_price = taker_book.executable(side, quantity)
+            if desired is None or taker_price is None:
+                return False
+            prices = {c.maker_venue: desired[0], c.venue_of(taker_leg): taker_price}
+            return all(not self.instruments[v].size_error(quantity, price)
+                       and (intent != "entry" or quantity * price >= c.min_clip_notional_usd)
+                       for v, price in prices.items())
         top = self.clip_size(cap)
-        if top <= 0 or taker_book.executable(side, top) is not None:
-            return top
+        if top <= 0:
+            return ZERO
+        if taker_book.executable(side, top) is not None:
+            return top if legal(top) else ZERO
         low, high = ZERO, top
         while high - low > lot:
             middle = ((low + high) / 2 / lot).to_integral_value(rounding=ROUND_FLOOR) * lot
@@ -552,8 +629,7 @@ class Engine:
                 low = middle
             else:
                 high = middle
-        minimum = c.min_clip_notional_usd / taker_book.bid if intent == "entry" else ZERO
-        return low if low >= minimum else ZERO
+        return low if low > 0 and legal(low) else ZERO
 
     async def maintain_quote(self, intent: str, quantity: Decimal):
         c = self.config

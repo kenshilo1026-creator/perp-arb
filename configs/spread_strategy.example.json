@@ -37,5 +37,5 @@
   "variational_poll_seconds": 2,
   "stop_loss_usd": null,
   "min_clip_notional_usd": "0",
-  "clip_interval_seconds": 1
+  "clip_interval_seconds": 0
 }

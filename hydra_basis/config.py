@@ -12,6 +12,7 @@ VENUE_CONFIG: dict[str, FundingConfig] = {
     "aster": FundingConfig("aster", enabled=True),
     "variational": FundingConfig("variational", enabled=True),
     "trade_xyz": FundingConfig("trade_xyz", enabled=True),
+    "entropy": FundingConfig("entropy", enabled=True),
 }
 
 LOOKBACK_DAYS = 7

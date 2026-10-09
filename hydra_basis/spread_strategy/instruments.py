@@ -61,6 +61,8 @@ async def fetch_instrument(session, venue: str, symbol: str) -> Instrument:
         return await _aster(session, symbol)
     if venue == "hyperliquid":
         return await _hyperliquid(session, symbol)
+    if venue == "entropy":
+        return await _entropy(session, symbol)
     if venue == "lighter":
         return await _lighter(session, symbol)
     if venue == "mexc":
@@ -106,6 +108,26 @@ async def _hyperliquid(session, symbol: str) -> Instrument:
     lot = Decimal(1).scaleb(-sz_decimals)
     return Instrument("hyperliquid", lot_size=lot, min_size=lot,
                       min_notional=HYPERLIQUID_MIN_NOTIONAL, sz_decimals=sz_decimals)
+
+
+async def _entropy(session, symbol: str) -> Instrument:
+    """Entropy = Hyperliquid HIP-3 dex "io": Hyperliquid's size/price rules and 10 USD minimum."""
+    meta, ctxs = await fetch_json(session, "POST", "https://api.hyperliquid.xyz/info",
+                                  json={"type": "metaAndAssetCtxs", "dex": "io"})
+    coin = f"IO:{symbol.upper()}"
+    for row, ctx in zip(meta.get("universe", []), ctxs):
+        if str(row.get("name", "")).upper() != coin:
+            continue
+        if row.get("isDelisted") or ctx.get("midPx") is None:
+            raise RuntimeError(f"symbol not trading on entropy: {symbol}")
+        if row.get("growthMode") != "enabled":
+            # Configured entropy fees assume growth mode (0.1x); without it fees are 10x higher.
+            raise RuntimeError(f"entropy {symbol} is not in growth mode; fees would be 10x the configured rate")
+        sz_decimals = int(row["szDecimals"])
+        lot = Decimal(1).scaleb(-sz_decimals)
+        return Instrument("entropy", lot_size=lot, min_size=lot, min_notional=HYPERLIQUID_MIN_NOTIONAL,
+                          sz_decimals=sz_decimals)
+    raise RuntimeError(f"symbol not found on entropy: {symbol}")
 
 
 async def _lighter(session, symbol: str) -> Instrument:

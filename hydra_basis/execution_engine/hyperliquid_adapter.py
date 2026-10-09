@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import threading
 import time
 from decimal import ROUND_CEILING, ROUND_DOWN, ROUND_FLOOR, ROUND_HALF_EVEN, Decimal
 
@@ -15,7 +16,9 @@ from eth_account.messages import encode_typed_data
 from eth_hash.auto import keccak
 
 from hydra_basis.adapters.base import fetch_json
-from hydra_basis.adapters.hyperliquid import fetch_hyperliquid_meta
+from hydra_basis.adapters.hyperliquid import (
+    fetch_hyperliquid_meta, fetch_hyperliquid_perp_dex_index, hyperliquid_asset_id,
+)
 from hydra_basis.execution_engine.order_fill import poll_until_filled
 from hydra_basis.execution_engine.hedge_safety import wait_for_terminal_order
 
@@ -129,6 +132,11 @@ def extract_hyperliquid_order_id(data: dict, *, fill_type: str) -> int | None:
 
 
 class HyperliquidExecutionAdapter:
+    # Every adapter instance signing for one key (main dex and HIP-3 dexes alike)
+    # shares this nonce sequence: two orders in the same millisecond must not collide.
+    _nonce_lock = threading.Lock()
+    _last_nonce_by_signer: dict[str, int] = {}
+
     def __init__(
         self,
         *,
@@ -137,7 +145,12 @@ class HyperliquidExecutionAdapter:
         leverage: int | None = None,
         slippage_bps: float = 50.0,
         skip_margin_setup: bool = False,
+        dex: str | None = None,
+        venue_name: str = "hyperliquid",
     ) -> None:
+        # ``dex`` trades a HIP-3 builder-deployed dex on the same account, e.g. "io" (Entropy).
+        self.dex = dex.lower() if dex else None
+        self.venue_name = venue_name
         self.private_key = private_key or os.getenv("HYPERLIQUID_PRIVATE_KEY", "")
         if not self.private_key:
             raise RuntimeError("HYPERLIQUID_PRIVATE_KEY is not set")
@@ -152,11 +165,26 @@ class HyperliquidExecutionAdapter:
         self.skip_margin_setup = skip_margin_setup
         self._universe: list[str] | None = None
         self._sz_decimals: dict[str, int] | None = None
+        self._dex_index = 0
         self._isolated_asset_indices: set[int] = set()
 
+    def _coin(self, symbol: str) -> str:
+        """Exchange coin name: "ETH" on the main dex, "IO:OAI" (any case) on a HIP-3 dex."""
+        normalized = symbol.strip().upper()
+        dex = getattr(self, "dex", None)
+        if not dex or normalized.startswith(f"{dex.upper()}:"):
+            return normalized
+        return f"{dex.upper()}:{normalized}"
+
+    def _symbol(self, coin: str) -> str:
+        """Strategy symbol for an exchange coin name (the HIP-3 prefix removed)."""
+        return coin.strip().upper().partition(":")[2] if getattr(self, "dex", None) else coin.strip().upper()
+
     async def _load_meta(self) -> None:
+        dex = getattr(self, "dex", None)
         async with aiohttp.ClientSession() as session:
-            rows = await fetch_hyperliquid_meta(session)
+            rows = await fetch_hyperliquid_meta(session, dex)
+            self._dex_index = await fetch_hyperliquid_perp_dex_index(session, dex) if dex else 0
         self._universe = [str(row.get("name") or "").upper() for row in rows]
         self._sz_decimals = {str(row.get("name") or "").upper(): int(row["szDecimals"])
                              for row in rows if row.get("szDecimals") is not None}
@@ -164,30 +192,42 @@ class HyperliquidExecutionAdapter:
     async def _get_asset_index(self, symbol: str) -> int:
         if getattr(self, "_universe", None) is None:
             await self._load_meta()
-        sym = symbol.upper()
         try:
-            return self._universe.index(sym)
+            index = self._universe.index(self._coin(symbol))
         except ValueError:
-            raise RuntimeError(f"hyperliquid symbol not found: {symbol}")
+            raise RuntimeError(f"{getattr(self, 'venue_name', 'hyperliquid')} symbol not found: {symbol}")
+        return hyperliquid_asset_id(index, getattr(self, "_dex_index", 0))
 
     async def _get_sz_decimals(self, symbol: str) -> int:
         if getattr(self, "_sz_decimals", None) is None:
             await self._load_meta()
-        sz_decimals = self._sz_decimals.get(symbol.upper())
+        sz_decimals = self._sz_decimals.get(self._coin(symbol))
         if sz_decimals is None:
             raise RuntimeError(f"hyperliquid szDecimals not found: {symbol}")
         return sz_decimals
 
     async def _get_mid_price(self, symbol: str) -> float:
+        payload = {"type": "allMids"}
+        if getattr(self, "dex", None):
+            payload["dex"] = self.dex
         async with aiohttp.ClientSession() as session:
-            data = await fetch_json(session, "POST", HYPERLIQUID_INFO_URL, json={"type": "allMids"})
-        mid = data.get(symbol.upper())
+            data = await fetch_json(session, "POST", HYPERLIQUID_INFO_URL, json=payload)
+        coin = self._coin(symbol)
+        mid = next((value for key, value in data.items() if str(key).upper() == coin), None)
         if mid is None:
             raise RuntimeError(f"hyperliquid mid price not found: {symbol}")
         return float(mid)
 
+    def _next_nonce(self) -> int:
+        signer = self._wallet.address.lower() if hasattr(self, "_wallet") else ""
+        now = int(time.time() * 1000)
+        with HyperliquidExecutionAdapter._nonce_lock:
+            nonce = max(now, HyperliquidExecutionAdapter._last_nonce_by_signer.get(signer, 0) + 1)
+            HyperliquidExecutionAdapter._last_nonce_by_signer[signer] = nonce
+        return nonce
+
     async def _post_order(self, action: dict) -> dict:
-        nonce = int(time.time() * 1000)
+        nonce = self._next_nonce()
         signature = _sign_l1_action(self.private_key, action, None, nonce)
         body = {"action": action, "nonce": nonce, "signature": signature, "vaultAddress": None}
         async with aiohttp.ClientSession() as session:
@@ -225,18 +265,20 @@ class HyperliquidExecutionAdapter:
                 json={
                     "type": "clearinghouseState",
                     "user": self.account_address,
+                    **({"dex": self.dex} if getattr(self, "dex", None) else {}),
                 },
             )
 
     async def list_open_orders(self, *, symbol: str) -> list[dict]:
         async with aiohttp.ClientSession() as session:
             orders = await fetch_json(session, "POST", HYPERLIQUID_INFO_URL,
-                                      json={"type": "openOrders", "user": self.account_address})
+                                      json={"type": "openOrders", "user": self.account_address,
+                                            **({"dex": self.dex} if getattr(self, "dex", None) else {})})
         if not isinstance(orders, list):
             raise RuntimeError("hyperliquid open-order list unavailable")
         if any(not isinstance(item, dict) or "coin" not in item for item in orders):
             raise RuntimeError("malformed hyperliquid open orders")
-        return [item for item in orders if str(item["coin"]).upper() == symbol.upper()]
+        return [item for item in orders if str(item["coin"]).upper() == self._coin(symbol)]
 
     async def get_fill_average_price(self, *, symbol: str, order_result: dict,
                                      quantity: Decimal) -> Decimal | None:
@@ -249,7 +291,7 @@ class HyperliquidExecutionAdapter:
         if not isinstance(fills, list):
             raise RuntimeError("hyperliquid fills unavailable")
         selected = [item for item in fills if str(item.get("oid")) == str(order_id)
-                    and str(item.get("coin", "")).upper() == symbol.upper()]
+                    and str(item.get("coin", "")).upper() == self._coin(symbol)]
         filled = sum((Decimal(str(item["sz"])) for item in selected), Decimal("0"))
         if filled != quantity:
             return None
@@ -265,7 +307,7 @@ class HyperliquidExecutionAdapter:
         order = wrapper.get("order") if isinstance(wrapper, dict) else None
         if not isinstance(order, dict):
             return {"status": "UNKNOWN", "terminal": False}
-        if str(order.get("oid")) != str(order_id) or str(order.get("coin", "")).upper() != symbol.upper():
+        if str(order.get("oid")) != str(order_id) or str(order.get("coin", "")).upper() != self._coin(symbol):
             raise RuntimeError("hyperliquid order query identity mismatch")
         status = str(wrapper.get("status", "")).upper()
         if status.endswith("CANCELED") or status == "SCHEDULEDCANCEL":
@@ -292,12 +334,13 @@ class HyperliquidExecutionAdapter:
         if market_type != "perp":
             raise RuntimeError("hyperliquid live position query only supports perp")
         normalized_symbol = symbol.strip().upper()
+        coin = self._coin(symbol)
         state = await self._fetch_clearinghouse_state()
         raw_positions = state.get("assetPositions", [])
-        print(f"[hyperliquid] get_open_position symbol={normalized_symbol} querying_account={self.account_address} total_positions={len(raw_positions)}")
+        print(f"[hyperliquid] get_open_position symbol={coin} querying_account={self.account_address} total_positions={len(raw_positions)}")
         for item in state.get("assetPositions", []):
             position = item.get("position", {})
-            if str(position.get("coin", "")).strip().upper() != normalized_symbol:
+            if str(position.get("coin", "")).strip().upper() != coin:
                 continue
             size = Decimal(str(position.get("szi", "0") or "0"))
             if size == 0:
@@ -316,7 +359,7 @@ class HyperliquidExecutionAdapter:
         positions: list[dict] = []
         for item in state.get("assetPositions", []):
             position = item.get("position", {})
-            symbol = str(position.get("coin", "")).strip().upper()
+            symbol = self._symbol(str(position.get("coin", "")))
             if not symbol:
                 continue
             size = Decimal(str(position.get("szi", "0") or "0"))
@@ -324,7 +367,7 @@ class HyperliquidExecutionAdapter:
                 continue
             positions.append(
                 {
-                    "venue": "hyperliquid",
+                    "venue": getattr(self, "venue_name", "hyperliquid"),
                     "symbol": symbol,
                     "market_type": "perp",
                     "side": "LONG" if size > 0 else "SHORT",

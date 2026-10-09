@@ -290,6 +290,8 @@ def build_closers() -> dict[str, object]:
         from hydra_basis.execution_engine.hyperliquid_adapter import HyperliquidExecutionAdapter
 
         closers["hyperliquid"] = HyperliquidExecutionAdapter()
+        # Entropy is a HIP-3 dex on the same Hyperliquid account (coins "io:XXX").
+        closers["entropy"] = HyperliquidExecutionAdapter(dex="io", venue_name="entropy")
     except Exception as exc:
         print(f"risk manager hyperliquid closer disabled: {exc!r}")
     closers["variational"] = VariationalMonitorPositionAdapter()
@@ -309,6 +311,10 @@ def _funding_close_adapter_for_leg(leg: PositionLeg, *, leverage: int = 1):
         from hydra_basis.execution_engine.hyperliquid_adapter import HyperliquidExecutionAdapter
 
         return HyperliquidExecutionAdapter(leverage=leverage, skip_margin_setup=True)
+    if venue == "entropy":
+        from hydra_basis.execution_engine.hyperliquid_adapter import HyperliquidExecutionAdapter
+
+        return HyperliquidExecutionAdapter(leverage=leverage, skip_margin_setup=True, dex="io", venue_name="entropy")
     if venue == "lighter":
         return LighterExecutionAdapter(
             signer_client_factory=build_lighter_client_factory_from_env(),

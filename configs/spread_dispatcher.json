@@ -1,17 +1,55 @@
 {
-  "venues": ["aster", "hyperliquid", "lighter", "mexc"],
+  "venues": [
+    "aster",
+    "hyperliquid",
+    "entropy",
+    "lighter",
+    "mexc"
+  ],
   "max_groups": 5,
   "group_notional_usd": "100",
   "clip_notional_usd": "50",
   "execution_method": "taker_taker",
-  "maker_preference": ["hyperliquid", "aster", "lighter", "mexc"],
-  "leverage": {"aster": 1, "hyperliquid": 1, "lighter": 1, "mexc": 1, "variational": 1},
+  "maker_preference": [
+    "hyperliquid",
+    "entropy",
+    "aster",
+    "lighter",
+    "mexc"
+  ],
+  "leverage": {
+    "aster": 1,
+    "hyperliquid": 1,
+    "entropy": 1,
+    "lighter": 1,
+    "mexc": 1,
+    "variational": 1
+  },
   "fees": {
-    "aster": {"maker": "0.0001", "taker": "0.00035"},
-    "hyperliquid": {"maker": "0.00015", "taker": "0.00045"},
-    "lighter": {"maker": "0", "taker": "0"},
-    "mexc": {"maker": "0", "taker": "0.0002"},
-    "variational": {"maker": "0", "taker": "0"}
+    "aster": {
+      "maker": "0.0001",
+      "taker": "0.00035"
+    },
+    "hyperliquid": {
+      "maker": "0.00015",
+      "taker": "0.00045"
+    },
+    "entropy": {
+      "maker": "0.00003",
+      "taker": "0.00009"
+    },
+    "lighter": {
+      "maker": "0",
+      "taker": "0"
+    },
+    "mexc": {
+      "maker": "0",
+      "taker": "0.0002"
+    },
+    "variational": {
+      "maker": "0",
+      "taker": "0"
+    }
   },
   "entry_bps": "40",
   "take_profit_bps": "10",
@@ -37,7 +75,9 @@
     "future_tolerance_seconds": 2,
     "repair_cooldown_seconds": 3,
     "variational_poll_seconds": 2,
-    "order_poll_seconds": {"lighter": 3},
+    "order_poll_seconds": {
+      "lighter": 3
+    },
     "stop_loss_usd": null
   }
 }

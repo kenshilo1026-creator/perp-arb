@@ -348,6 +348,10 @@ def build_venue_adapter(venue: str, *, leverage: int, order_timeout_seconds: flo
     if venue == "hyperliquid":
         from hydra_basis.execution_engine.hyperliquid_adapter import HyperliquidExecutionAdapter
         return HyperliquidExecutionAdapter(leverage=leverage)
+    if venue == "entropy":
+        # HIP-3 dex "io" on the same Hyperliquid account and key.
+        from hydra_basis.execution_engine.hyperliquid_adapter import HyperliquidExecutionAdapter
+        return HyperliquidExecutionAdapter(leverage=leverage, dex="io", venue_name="entropy")
     if venue == "lighter":
         from hydra_basis.execution_engine.lighter_adapter import LighterExecutionAdapter
         from hydra_basis.execution_engine.lighter_live import (

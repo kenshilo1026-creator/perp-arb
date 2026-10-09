@@ -56,10 +56,30 @@ async def _post_hyperliquid_info(session, payload: dict):
     raise RuntimeError("hyperliquid info request failed without an error")
 
 
-async def fetch_hyperliquid_meta(session) -> list[dict]:
-    """Return ALL perp asset rows (name, szDecimals, ...) in raw order, including delisted."""
-    data = await _post_hyperliquid_info(session, {"type": "meta"})
+async def fetch_hyperliquid_meta(session, dex: str | None = None) -> list[dict]:
+    """Return ALL perp asset rows (name, szDecimals, ...) in raw order, including delisted.
+
+    ``dex`` selects a HIP-3 builder-deployed perp dex (e.g. "io" for Entropy); its
+    asset names carry the dex prefix ("io:OAI").
+    """
+    payload = {"type": "meta"} if not dex else {"type": "meta", "dex": dex}
+    data = await _post_hyperliquid_info(session, payload)
     return list(data.get("universe") or [])
+
+
+async def fetch_hyperliquid_perp_dex_index(session, dex: str) -> int:
+    """Position of a HIP-3 dex in ``perpDexs`` (index 0 is the main dex)."""
+    dexs = await _post_hyperliquid_info(session, {"type": "perpDexs"})
+    for index, item in enumerate(dexs or []):
+        if isinstance(item, dict) and item.get("name") == dex:
+            return index
+    raise RuntimeError(f"hyperliquid perp dex not found: {dex}")
+
+
+def hyperliquid_asset_id(index_in_meta: int, dex_index: int = 0) -> int:
+    """Order asset id: main-dex perps use the meta index; HIP-3 perps use
+    100000 + perp_dex_index * 10000 + index_in_meta."""
+    return index_in_meta if dex_index == 0 else 100000 + dex_index * 10000 + index_in_meta
 
 
 async def fetch_hyperliquid_universe(session) -> list[str]:

@@ -65,6 +65,7 @@ SPREAD_REFRESH_CONCURRENCY_BY_VENUE = {
     "hyperliquid": 2,
     "lighter": 1,
     "trade_xyz": 2,
+    "entropy": 2,
     "variational": 1,
 }
 SPREAD_REFRESH_DELAY_BY_VENUE_SECONDS = {
@@ -72,6 +73,7 @@ SPREAD_REFRESH_DELAY_BY_VENUE_SECONDS = {
     "hyperliquid": 0.25,
     "lighter": 1.0,
     "trade_xyz": 0.25,
+    "entropy": 0.25,
     "variational": 0.5,
 }
 SPREAD_ERROR_ALERT_MAX_ITEMS = 10

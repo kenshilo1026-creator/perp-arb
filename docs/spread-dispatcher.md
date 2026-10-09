@@ -3,7 +3,7 @@
 Scans every enabled venue for cross-venue perpetual spreads and runs one
 [spread strategy](spread-strategy.md) group per opportunity. A group is one
 symbol traded between one pair of venues. Supported venues: Aster,
-Hyperliquid, Lighter, MEXC and Variational (taker leg only).
+Hyperliquid, Entropy, Lighter, MEXC and Variational (taker leg only).
 
 ## Run
 
@@ -94,6 +94,36 @@ positions open. The next run restores every group from
 
 Only one group per symbol, and a symbol traded by the dispatcher is locked
 against the standalone `run_spread_strategy.py` (and vice versa).
+
+### Entropy
+
+[Entropy](https://docs.entropy.io/) is not a separate exchange. It is a HIP-3
+builder-deployed perp dex on Hyperliquid named `io` (coins `io:OAI`,
+`io:SNDK`…), so it trades through the Hyperliquid API with the same key and
+account (`HYPERLIQUID_PRIVATE_KEY`), and the strategy calls the venue
+`entropy`.
+
+* Markets: equity, index and pre-IPO perps. Every market is isolated-only
+  (`strictIsolated`: margin can be added but not removed). The order asset id
+  is 100000 + 10000 × dex index + market index.
+* Orders: Hyperliquid's limit types, so post-only (`Alo`), IOC and GTC all
+  work: both maker and taker legs are supported.
+* Funding: hourly, with history from Hyperliquid's `fundingHistory`
+  (`io:XXX`). It is registered for the funding monitor and backfill as venue
+  `entropy` (symbols `IO:XXX`, like trade.xyz's `XYZ:XXX`).
+* Fees: HIP-3 markets cost 2× normal Hyperliquid rates (taker 0.090%, maker
+  0.030% at the base tier), reduced 90% in growth mode. The config assumes
+  growth mode (taker 0.009%, maker 0.003%). A market without growth mode is
+  rejected at launch, since its fees would be 10× the configured rate.
+* Margin: HIP-3 dexes keep their own margin state. The preflight reads the io
+  dex's `withdrawable`; if it shows no balance, make USDC available to the io
+  dex in Hyperliquid first.
+* Overlap: only DRAM, EWY, NBIS and SNDK are also on Aster, Lighter or MEXC.
+  OAI, ANTH, GPRO, IONQ and TCNT trade only on Entropy among the supported
+  venues.
+* Outside US market hours the oracle changes slowly and the funding
+  multiplier drops. Spreads against other venues' equity perps can then
+  persist.
 
 ### Symbols
 

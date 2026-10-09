@@ -55,7 +55,7 @@ class Settings:
     group_notional_usd: Decimal = Decimal("100")
     clip_notional_usd: Decimal = Decimal("50")
     execution_method: str = "taker_taker"
-    maker_preference: tuple[str, ...] = ("hyperliquid", "aster", "lighter", "mexc")
+    maker_preference: tuple[str, ...] = ("hyperliquid", "entropy", "aster", "lighter", "mexc")
     leverage: dict[str, int] = field(default_factory=dict)
     entry_bps: Decimal = Decimal("40")
     take_profit_bps: Decimal = Decimal("10")
@@ -314,6 +314,11 @@ async def _build_runners(venue: str, session, store: QuoteStore, settings: Setti
         symbols = [str(row.get("name") or "").upper() for row in rows]
         active = [str(row["name"]) for row in rows if row.get("name") and not row.get("isDelisted")]
         runners = [HyperliquidStreamRunner(session, store, symbols), HyperliquidBooksRunner(session, store, active)]
+    elif venue == "entropy":
+        from hydra_basis.adapters.hyperliquid import fetch_hyperliquid_meta
+        rows = await fetch_hyperliquid_meta(session, "io")
+        runners = [EntropyBooksRunner(session, store, [str(row["name"]) for row in rows
+                                                      if row.get("name") and not row.get("isDelisted")])]
     elif venue == "lighter":
         markets = await fetch_lighter_market_map(session)
         runners = [LighterStreamRunner(session, store), LighterQuoteRunner(session, store, markets)]
@@ -369,10 +374,11 @@ class _SubscribingRunner:
 
 class HyperliquidBooksRunner(_SubscribingRunner):
     url = "wss://api.hyperliquid.xyz/ws"
+    venue = "hyperliquid"
 
     def __init__(self, session, store, coins: list[str]):
         super().__init__(session, store)
-        self.coins = coins  # exchange spelling (e.g. kPEPE), delisted excluded
+        self.coins = coins  # exchange spelling (e.g. kPEPE, io:OAI), delisted excluded
 
     async def subscribe(self):
         await self.send_spaced({"method": "subscribe", "subscription": {"type": "l2Book", "coin": coin}}
@@ -381,7 +387,27 @@ class HyperliquidBooksRunner(_SubscribingRunner):
     def handle(self, payload):
         from hydra_basis.spread_monitor.runtime import parse_hyperliquid_l2_book
         if payload.get("channel") == "l2Book":
-            self.store.update_quotes("hyperliquid", parse_hyperliquid_l2_book(payload))
+            quotes = parse_hyperliquid_l2_book(payload)
+            # HIP-3 coins carry a dex prefix ("IO:OAI"); the strategy symbol is the part after it.
+            self.store.update_quotes(self.venue, {coin.partition(":")[2] or coin: row for coin, row in quotes.items()})
+
+
+class EntropyBooksRunner(HyperliquidBooksRunner):
+    """Entropy's HIP-3 dex "io": order books by WebSocket, funding by polling asset contexts."""
+    venue = "entropy"
+
+    async def subscribe(self):
+        self._tasks.append(asyncio.create_task(self.poll_funding()))
+        await super().subscribe()
+
+    async def poll_funding(self):
+        while True:
+            meta, ctxs = await fetch_json(self.session, "POST", "https://api.hyperliquid.xyz/info",
+                                          json={"type": "metaAndAssetCtxs", "dex": "io"})
+            self.store.update_asset_ctxs("entropy", {
+                str(row["name"]).upper().partition(":")[2]: {"funding": float(ctx.get("funding") or 0)}
+                for row, ctx in zip(meta.get("universe", []), ctxs)})
+            await asyncio.sleep(60)
 
 
 class MexcRunner(_SubscribingRunner):

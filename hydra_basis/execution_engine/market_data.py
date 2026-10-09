@@ -35,7 +35,19 @@ async def fetch_orderbook_snapshot(
         return await fetch_variational_quote(session, canonicalize_symbol(symbol, venue="variational"), clip_usd=clip_usd)
     if normalized == "trade_xyz":
         return await fetch_tradexyz_orderbook(session, symbol)
+    if normalized == "entropy":
+        return await fetch_entropy_orderbook(session, symbol)
     raise RuntimeError(f"unsupported preview venue={venue}")
+
+
+async def fetch_entropy_orderbook(session: aiohttp.ClientSession, symbol: str) -> dict[str, float | int]:
+    from hydra_basis.adapters.entropy import entropy_api_coin
+    coin = entropy_api_coin(symbol)
+    data = await fetch_json(session, "POST", "https://api.hyperliquid.xyz/info", json={"type": "l2Book", "coin": coin})
+    levels = (data or {}).get("levels") or []
+    if len(levels) < 2 or not levels[0] or not levels[1]:
+        raise RuntimeError(f"missing entropy orderbook for {symbol}")
+    return {"bid": float(levels[0][0]["px"]), "ask": float(levels[1][0]["px"]), "ts_ms": int(data.get("time") or 0)}
 
 
 async def fetch_mexc_spot_orderbook(session: aiohttp.ClientSession, symbol: str) -> dict[str, float | int]:

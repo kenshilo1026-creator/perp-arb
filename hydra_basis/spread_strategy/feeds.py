@@ -84,7 +84,8 @@ class MarketFeed:
     # ------------------------------------------------------------------ streams
 
     async def run(self, session: aiohttp.ClientSession):
-        loops = {"aster": self._aster, "hyperliquid": self._hyperliquid, "lighter": self._lighter,
+        loops = {"aster": self._aster, "hyperliquid": self._hyperliquid, "entropy": self._entropy,
+                 "lighter": self._lighter,
                  "mexc": self._mexc, "variational": self._variational}
         await asyncio.gather(*(self._supervise(venue, loops[venue], session) for venue in self.config.venues))
 
@@ -117,10 +118,10 @@ class MarketFeed:
                     continue
                 self.update("aster", data["b"], data["a"], source_ms=int(data.get("T") or data.get("E")))
 
-    async def _hyperliquid(self, session):
+    async def _hyperliquid(self, session, venue: str = "hyperliquid", coin: str | None = None):
         async with session.ws_connect(HYPERLIQUID_WS, heartbeat=20) as ws:
             await ws.send_json({"method": "subscribe",
-                                "subscription": {"type": "l2Book", "coin": self.config.symbol}})
+                                "subscription": {"type": "l2Book", "coin": coin or self.config.symbol}})
             async for message in ws:
                 if message.type != aiohttp.WSMsgType.TEXT:
                     if message.type in {aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR}:
@@ -133,8 +134,11 @@ class MarketFeed:
                 levels = data.get("levels") or []
                 if len(levels) < 2 or not levels[0] or not levels[1]:
                     continue
-                self.update("hyperliquid", levels[0][0]["px"], levels[1][0]["px"],
-                            source_ms=int(data["time"]))
+                self.update(venue, levels[0][0]["px"], levels[1][0]["px"], source_ms=int(data["time"]))
+
+    async def _entropy(self, session):
+        # Entropy markets are Hyperliquid HIP-3 coins named "io:<SYMBOL>".
+        await self._hyperliquid(session, venue="entropy", coin=f"io:{self.config.symbol}")
 
     async def _lighter(self, session):
         market_id = (await fetch_lighter_market_map(session)).get(self.config.symbol)

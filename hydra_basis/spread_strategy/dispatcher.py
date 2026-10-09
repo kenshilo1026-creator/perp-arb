@@ -66,7 +66,7 @@ class Settings:
     # Clips shrink to the size the books fill profitably, down to this notional.
     min_clip_notional_usd: Decimal = Decimal("20")
     execution_method: str = "taker_taker"
-    maker_preference: tuple[str, ...] = ("arcus", "hyperliquid", "entropy", "aster", "lighter", "mexc")
+    maker_preference: tuple[str, ...] = ("arcus", "ondo", "hyperliquid", "entropy", "aster", "lighter", "mexc")
     leverage: dict[str, int] = field(default_factory=dict)
     entry_bps: Decimal = Decimal("40")
     take_profit_bps: Decimal = Decimal("10")
@@ -340,6 +340,8 @@ async def _build_runners(venue: str, session, store: QuoteStore, settings: Setti
                    LighterRunner(session, store, await fetch_lighter_market_map(session), watched)]
     elif venue == "aster":
         runners = [AsterStreamRunner(session, store), AsterRunner(session, store, watched)]
+    elif venue == "ondo":
+        runners = [OndoRunner(session, store, watched)]
     elif venue == "mexc":
         details = await fetch_json(session, "GET", "https://contract.mexc.com/api/v1/contract/detail")
         sizes = {str(row["baseCoin"]).upper(): Decimal(str(row["contractSize"])) for row in details.get("data") or []
@@ -359,13 +361,15 @@ class _SubscribingRunner:
     url = ""
     ping_message: dict | None = None
     ping_seconds = 15
+    ssl_context = None  # a custom CA bundle where the system store cannot verify the venue
 
     def __init__(self, session, store: QuoteStore, watched=lambda: ()):
         self.session, self.store, self.ws, self._tasks = session, store, None, []
         self.watched, self.depth_subscribed = watched, set()
 
     async def initialize(self):
-        self.ws = await self.session.ws_connect(self.url, heartbeat=20)
+        extra = {"ssl": self.ssl_context} if self.ssl_context is not None else {}
+        self.ws = await self.session.ws_connect(self.url, heartbeat=20, **extra)
         self._tasks.append(asyncio.create_task(self.subscribe()))
         self._tasks.append(asyncio.create_task(self.watch_depth()))
 
@@ -616,6 +620,43 @@ class ArcusRunner(_SubscribingRunner):
         book = parse_arcus_bbo(payload)
         if book is not None:
             self.store.update_quotes("arcus", {book["symbol"]: book})
+
+
+class OndoRunner(_SubscribingRunner):
+    """Top of book for every market on one subscription, depth snapshots for watched markets,
+    funding by polling contracts. Verified against certifi's CA bundle (see adapters.ondo)."""
+    ping_message = {"op": "ping"}
+
+    def __init__(self, session, store, watched=lambda: ()):
+        super().__init__(session, store, watched)
+        from hydra_basis.adapters.ondo import ondo_ssl, ondo_ws_url
+        self.url, self.ssl_context = ondo_ws_url(), ondo_ssl()
+
+    async def subscribe(self):
+        self._tasks.append(asyncio.create_task(self.poll_funding()))
+        await self.ws.send_json({"op": "subscribe", "channel": "topOfBooksPerps"})
+
+    def depth_messages(self, symbol):
+        from hydra_basis.adapters.ondo import ondo_market_name
+        from hydra_basis.spread_strategy.feeds import DEPTH_LEVELS
+        return [{"op": "subscribe", "channel": "depthBooksPerps", "markets": [ondo_market_name(symbol)],
+                 "limit": DEPTH_LEVELS}]
+
+    async def poll_funding(self):
+        from hydra_basis.adapters.ondo import fetch_ondo_contracts, ondo_symbol
+        while True:
+            self.store.update_asset_ctxs("ondo", {
+                ondo_symbol(row["market"]): {"funding": float(row.get("fundingRate") or 0)}
+                for row in await fetch_ondo_contracts(self.session)})
+            await asyncio.sleep(60)
+
+    def handle(self, payload):
+        from hydra_basis.spread_strategy.feeds import parse_ondo_books
+        for book in parse_ondo_books(payload):
+            if book["channel"] == "depthBooksPerps":
+                self.store.update_depth("ondo", book["symbol"], book["bids"], book["asks"], source_ms=book["ts_ms"])
+            else:
+                self.store.update_quotes("ondo", {book["symbol"]: book})
 
 
 class VariationalRunner:

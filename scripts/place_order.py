@@ -166,6 +166,9 @@ def build_adapter_for_venue(venue: str, *, leverage: int = 1, broker_url: str | 
     if v == "arcus":
         from hydra_basis.execution_engine.arcus_adapter import ArcusExecutionAdapter
         return ArcusExecutionAdapter(leverage=leverage, skip_margin_setup=skip_margin_setup)
+    if v == "ondo":
+        from hydra_basis.execution_engine.ondo_adapter import OndoExecutionAdapter
+        return OndoExecutionAdapter(leverage=leverage, skip_margin_setup=skip_margin_setup)
     raise RuntimeError(f"no execution adapter for venue: {venue}")
 
 
@@ -525,7 +528,7 @@ async def execute_close_position_plan(
     )
 
 
-ALL_CLOSE_VENUES = ["hyperliquid", "lighter", "aster", "mexc", "arcus"]
+ALL_CLOSE_VENUES = ["hyperliquid", "lighter", "aster", "mexc", "arcus", "ondo"]
 
 
 async def scan_open_positions(

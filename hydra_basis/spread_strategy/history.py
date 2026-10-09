@@ -24,7 +24,9 @@ import aiohttp
 MINUTE_MS = 60_000
 FORWARD_FILL_MINUTES = 5          # a quiet market keeps its last price this long
 CANDLE_CACHE_SECONDS = 300
-RECORDED_VENUES = {"lighter", "variational"}
+# Venues whose mids are recorded locally: no public candles (Lighter, Variational) or candles
+# that need an API key (Ondo, used when ONDO_API_KEY_ID/SECRET are set).
+RECORDED_VENUES = {"lighter", "variational", "ondo"}
 
 LABELS = {
     "insufficient": "資料不足",
@@ -66,6 +68,9 @@ async def fetch_minute_closes(session, venue: str, symbol: str, start_ms: int, e
                            params={"interval": "Min1", "start": start_ms // 1000, "end": end_ms // 1000})
         rows = data.get("data") or {}
         return {int(t) * 1000: float(c) for t, c in zip(rows.get("time") or [], rows.get("close") or [])}
+    if venue == "ondo":
+        from hydra_basis.adapters.ondo import fetch_ondo_minute_closes
+        return await fetch_ondo_minute_closes(session, symbol, start_ms, end_ms)
     if venue == "arcus":
         from hydra_basis.adapters.arcus import arcus_base_url, arcus_market_name
         minutes = max(1, min(1500, (end_ms - start_ms) // MINUTE_MS))
@@ -241,7 +246,7 @@ class SpreadHistory:
         self.recorder.save(now_ms)
 
     async def _series(self, venue: str, symbol: str, now_ms: int) -> tuple[dict[int, float], str]:
-        if venue in RECORDED_VENUES:
+        if venue in {"lighter", "variational"}:
             return self.recorder.get(venue, symbol), "recorded"
         cached = self._cache.get((venue, symbol))
         if cached is None or time.monotonic() - cached[0] > CANDLE_CACHE_SECONDS:
@@ -254,6 +259,8 @@ class SpreadHistory:
                 series = {}
             cached = (time.monotonic(), series)
             self._cache[(venue, symbol)] = cached
+        if not cached[1] and venue in RECORDED_VENUES:
+            return self.recorder.get(venue, symbol), "recorded"  # e.g. Ondo without an API key
         return cached[1] or {}, "candles"
 
     async def profile(self, symbol: str, short_venue: str, long_venue: str) -> SpreadProfile:

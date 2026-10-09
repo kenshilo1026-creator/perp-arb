@@ -79,6 +79,8 @@ async def fetch_instrument(session, venue: str, symbol: str) -> Instrument:
         return await _entropy(session, symbol)
     if venue == "arcus":
         return await _arcus(session, symbol)
+    if venue == "ondo":
+        return await _ondo(session, symbol)
     if venue == "lighter":
         return await _lighter(session, symbol)
     if venue == "mexc":
@@ -163,6 +165,17 @@ async def _arcus(session, symbol: str) -> Instrument:
         min_size=Decimal(str(market.get("minOrderSize") or market["stepSize"])),
         min_notional=Decimal(str(market.get("minOrderNotional") or "0")) or None,
     )
+
+
+async def _ondo(session, symbol: str) -> Instrument:
+    from hydra_basis.adapters.ondo import fetch_ondo_contracts, fetch_ondo_markets, ondo_market_name
+    name = ondo_market_name(symbol)
+    market = next((row for row in await fetch_ondo_markets(session) if row.get("market") == name), None)
+    contract = next((row for row in await fetch_ondo_contracts(session) if row.get("market") == name), None)
+    if market is None or contract is None or contract.get("disabled"):
+        raise RuntimeError(f"symbol not tradable on ondo: {symbol}")
+    lot = Decimal(str(market["baseIncrement"]))
+    return Instrument("ondo", tick_size=Decimal(str(market["quoteIncrement"])), lot_size=lot, min_size=lot)
 
 
 async def _lighter(session, symbol: str) -> Instrument:

@@ -40,6 +40,9 @@ async def fetch_orderbook_snapshot(
     if normalized == "arcus":
         from hydra_basis.adapters.arcus import fetch_arcus_orderbook
         return await fetch_arcus_orderbook(session, symbol)
+    if normalized == "ondo":
+        from hydra_basis.adapters.ondo import fetch_ondo_orderbook
+        return await fetch_ondo_orderbook(session, symbol)
     raise RuntimeError(f"unsupported preview venue={venue}")
 
 

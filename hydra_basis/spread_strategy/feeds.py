@@ -156,7 +156,7 @@ class MarketFeed:
 
     async def run(self, session: aiohttp.ClientSession):
         loops = {"aster": self._aster, "arcus": self._arcus, "hyperliquid": self._hyperliquid,
-                 "entropy": self._entropy, "lighter": self._lighter, "mexc": self._mexc,
+                 "entropy": self._entropy, "lighter": self._lighter, "mexc": self._mexc, "ondo": self._ondo,
                  "variational": self._variational}
         await asyncio.gather(*(self._supervise(venue, loops[venue], session) for venue in self.config.venues))
 
@@ -248,6 +248,19 @@ class MarketFeed:
             finally:
                 pinger.cancel()
 
+    async def _ondo(self, session):
+        from hydra_basis.adapters.ondo import ondo_market_name, ondo_ssl, ondo_ws_url
+        async with session.ws_connect(ondo_ws_url(), heartbeat=20, ssl=ondo_ssl()) as ws:
+            await ws.send_json({"op": "subscribe", "channel": "depthBooksPerps",
+                                "markets": [ondo_market_name(self.config.symbol)], "limit": DEPTH_LEVELS})
+            pinger = asyncio.create_task(_ping_forever(ws, {"op": "ping"}, 15))
+            try:
+                async for payload in self._messages(ws):
+                    for book in parse_ondo_books(payload):
+                        self.update_book("ondo", book["bids"], book["asks"], source_ms=book["ts_ms"])
+            finally:
+                pinger.cancel()
+
     async def _variational(self, session):
         symbol = canonicalize_symbol(self.config.symbol, venue="variational")
         while True:
@@ -332,6 +345,20 @@ def parse_mexc_depth(payload: dict, contract_size: Decimal | None = None) -> dic
         return _book(symbol, to_levels(bids, contract_size), to_levels(asks, contract_size), int(payload["ts"]))
     return {"symbol": symbol, "bid": Decimal(str(bids[0][0])), "ask": Decimal(str(asks[0][0])),
             "bids": (), "asks": (), "ts_ms": int(payload["ts"])}
+
+
+def parse_ondo_books(payload: dict) -> list[dict]:
+    """Ondo ``topOfBooksPerps`` / ``depthBooksPerps`` update: a list of book snapshots per market."""
+    from hydra_basis.adapters.ondo import ondo_symbol, parse_iso_ms
+    if payload.get("type") != "update" or not isinstance(payload.get("data"), list):
+        return []
+    books = []
+    for row in payload["data"]:
+        book = _book(ondo_symbol(row.get("market", "")), to_levels(row.get("bids")), to_levels(row.get("asks")),
+                     parse_iso_ms(row["time"]))
+        if book is not None:
+            books.append({**book, "channel": payload.get("channel")})
+    return books
 
 
 class LighterBook:

@@ -102,6 +102,8 @@ def definitive_rejection(exc: BaseException, result) -> bool:
     # Arcus: an HTTP 4xx or an engine REJECTED status means no order exists.
     if re.search(r"arcus order 4\d\d", message) or "arcus order rejected" in message:
         return True
+    if re.search(r"ondo order 4\d\d", message):
+        return True
     if "no extension command client connected" in message:
         return True
     if isinstance(result, dict) and result.get("type") == "ORDER_RESULT" and result.get("ok") is False:
@@ -381,6 +383,9 @@ def build_venue_adapter(venue: str, *, leverage: int, order_timeout_seconds: flo
     if venue == "arcus":
         from hydra_basis.execution_engine.arcus_adapter import ArcusExecutionAdapter
         return ArcusExecutionAdapter(leverage=leverage)
+    if venue == "ondo":
+        from hydra_basis.execution_engine.ondo_adapter import OndoExecutionAdapter
+        return OndoExecutionAdapter(leverage=leverage)
     if venue == "entropy":
         # HIP-3 dex "io" on the same Hyperliquid account and key.
         from hydra_basis.execution_engine.hyperliquid_adapter import HyperliquidExecutionAdapter

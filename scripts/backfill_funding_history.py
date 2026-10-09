@@ -67,6 +67,7 @@ SPREAD_REFRESH_CONCURRENCY_BY_VENUE = {
     "trade_xyz": 2,
     "entropy": 2,
     "arcus": 1,
+    "ondo": 1,
     "variational": 1,
 }
 SPREAD_REFRESH_DELAY_BY_VENUE_SECONDS = {
@@ -76,6 +77,7 @@ SPREAD_REFRESH_DELAY_BY_VENUE_SECONDS = {
     "trade_xyz": 0.25,
     "entropy": 0.25,
     "arcus": 1.0,
+    "ondo": 0.5,
     "variational": 0.5,
 }
 SPREAD_ERROR_ALERT_MAX_ITEMS = 10

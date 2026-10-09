@@ -2,8 +2,8 @@
 
 An independent Python implementation of the `auto` spread strategy in
 [Gate CrossEx](https://github.com/your-quantguy/gate-crossex), using this
-project's Aster, Arcus, Hyperliquid, Entropy (Hyperliquid HIP-3 dex `io`), Lighter, MEXC
-and Variational adapters. To scan
+project's Aster, Arcus, Hyperliquid, Entropy (Hyperliquid HIP-3 dex `io`), Lighter, MEXC,
+Ondo and Variational adapters. To scan
 all venues and run several symbols automatically, see the
 [dispatcher](spread-dispatcher.md). It does not use a Gate
 account, Gate SDK or CrossEx shared margin, and imports no source from that

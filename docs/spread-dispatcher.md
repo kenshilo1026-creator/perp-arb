@@ -3,7 +3,7 @@
 Scans every enabled venue for cross-venue perpetual spreads and runs one
 [spread strategy](spread-strategy.md) group per opportunity. A group is one
 symbol traded between one pair of venues. Supported venues: Aster,
-Arcus, Hyperliquid, Entropy, Lighter, MEXC and Variational (taker leg only).
+Arcus, Hyperliquid, Entropy, Lighter, MEXC, Ondo and Variational (taker leg only).
 
 ## Run
 
@@ -141,6 +141,38 @@ positions open. The next run restores every group from
 
 Only one group per symbol, and a symbol traded by the dispatcher is locked
 against the standalone `run_spread_strategy.py` (and vice versa).
+
+### Ondo Perps
+
+[Ondo Perps](https://docs.ondoperps.xyz/api-reference/api_key_authentication)
+perps cover crypto, US equities, ETFs, commodities (XAU, XAG, WTI, NATGAS),
+indices and FX, quoted as `<BASE>-USD.P` (`NVDA-USD.P`).
+
+* Credentials (`.env`): `ONDO_API_KEY_ID` (`ondoKeyId_...`) and
+  `ONDO_API_SECRET` (`ondoApiSecret_...`), created on the web app (address
+  menu -> API Keys) with trading permission. Whitelisting your IP is
+  recommended. Requests are signed with HMAC-SHA256 over
+  `timestamp + METHOD + path?query + body`.
+* Orders: maker legs are post-only GTC limits (`post_only_has_match` means a
+  harmless cross). Taker legs are IOC limits at the profit boundary. Fills
+  are read from `GET /v1/perps/orders/{id}`.
+* Margin: cross only (one pool for all positions); leverage is set per
+  market on the first opening order. Self-match prevention cancels your own
+  resting orders that an aggressive order would cross.
+* Fees: promotional maker 0.01%, taker 0.025% (base 0.02% / 0.05%).
+* Funding: hourly, with history from `/v1/perps/funding_rate_history`
+  (cursor pages). Registered for the funding monitor and backfill as venue
+  `ondo`.
+* Market data: `topOfBooksPerps` for all markets on one subscription, and
+  `depthBooksPerps` for watched markets.
+* 24h history: Ondo candles require an API key. Without one, Ondo mids are
+  recorded locally like Lighter's.
+* TLS: on some Windows machines Python's trust store holds an expired
+  cross-signed root and cannot verify `api.ondoperps.xyz` (curl can). Ondo
+  connections verify against certifi's CA bundle instead. Verification is
+  never disabled.
+* Weekends and extended hours add price limits on top of mark-price
+  protection.
 
 ### Arcus
 

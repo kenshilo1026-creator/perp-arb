@@ -5,6 +5,7 @@ base asset. Funding is hourly; API timestamps are epoch MICROseconds.
 """
 from __future__ import annotations
 
+import asyncio
 import os
 
 from hydra_basis.adapters.base import fetch_json
@@ -16,6 +17,7 @@ from hydra_basis.funding_engine.normalization import infer_interval_hours_from_t
 ARCUS_VENUE = "arcus"
 ARCUS_FUNDING_INTERVAL_HOURS = 1.0
 FUNDING_PAGE_LIMIT = 1000
+ARCUS_RATE_LIMIT_RETRIES = 4
 
 
 def arcus_base_url() -> str:
@@ -38,6 +40,23 @@ async def list_symbols(session) -> set[str]:
             if m.get("status") == "ONLINE" and m.get("type", "PERPETUAL") == "PERPETUAL"}
 
 
+async def _get_with_rate_limit_retry(session, url: str, params: dict) -> dict:
+    """Back off on 429 (Retry-After when given, else 1, 2, 4, 8 s); other errors propagate."""
+    for attempt in range(ARCUS_RATE_LIMIT_RETRIES + 1):
+        try:
+            return await fetch_json(session, "GET", url, params=params)
+        except Exception as exc:
+            if getattr(exc, "status", None) != 429 or attempt >= ARCUS_RATE_LIMIT_RETRIES:
+                raise
+            headers = getattr(exc, "headers", None) or {}
+            try:
+                retry_after = float(headers.get("Retry-After") or 0)
+            except (TypeError, ValueError):
+                retry_after = 0.0
+            await asyncio.sleep(max(retry_after, 2.0 ** attempt))
+    raise AssertionError("unreachable")
+
+
 async def fetch_arcus_funding(session, symbol: str) -> list[FundingPoint]:
     return await fetch_arcus_funding_since(session, symbol, start_time_ms=ms_days_ago(LOOKBACK_DAYS))
 
@@ -51,7 +70,7 @@ async def fetch_arcus_funding_since(session, symbol: str, start_time_ms: int) ->
         params = {"market": arcus_market_name(symbol), "from": start_us, "limit": FUNDING_PAGE_LIMIT}
         if to_us is not None:
             params["to"] = to_us
-        data = await fetch_json(session, "GET", f"{arcus_base_url()}/v1/fundingRates", params=params)
+        data = await _get_with_rate_limit_retry(session, f"{arcus_base_url()}/v1/fundingRates", params)
         page = data.get("fundingRates") or []
         for row in page:
             rows[int(row["time"]) // 1000] = float(row["fundingRate"])

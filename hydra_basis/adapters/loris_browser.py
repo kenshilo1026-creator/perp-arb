@@ -326,6 +326,7 @@ async def fetch_loris_historical_with_nodriver(
     symbol: str,
     start: str,
     end: str,
+    exchanges: str | None = None,
 ) -> dict:
     timeout_seconds = float(
         os.getenv("LORIS_NODRIVER_TIMEOUT_SECONDS", str(DEFAULT_LORIS_NODRIVER_TIMEOUT_SECONDS))
@@ -337,11 +338,12 @@ async def fetch_loris_historical_with_nodriver(
                 symbol=symbol,
                 start=start,
                 end=end,
+                exchanges=exchanges,
             ),
             timeout=timeout_seconds,
         )
     return await asyncio.wait_for(
-        _fetch_loris_historical_with_nodriver_inner(symbol=symbol, start=start, end=end),
+        _fetch_loris_historical_with_nodriver_inner(symbol=symbol, start=start, end=end, exchanges=exchanges),
         timeout=timeout_seconds,
     )
 
@@ -364,6 +366,7 @@ def _fetch_loris_historical_with_nodriver_sync(
     symbol: str,
     start: str,
     end: str,
+    exchanges: str | None = None,
 ) -> dict:
     proactor_loop = getattr(asyncio, "ProactorEventLoop", None)
     if proactor_loop is None:
@@ -372,7 +375,7 @@ def _fetch_loris_historical_with_nodriver_sync(
     loop = proactor_loop()
     try:
         return loop.run_until_complete(
-            _fetch_loris_historical_with_nodriver_inner(symbol=symbol, start=start, end=end)
+            _fetch_loris_historical_with_nodriver_inner(symbol=symbol, start=start, end=end, exchanges=exchanges)
         )
     finally:
         loop.close()
@@ -383,6 +386,7 @@ async def _fetch_loris_historical_with_nodriver_inner(
     symbol: str,
     start: str,
     end: str,
+    exchanges: str | None = None,
 ) -> dict:
     global _shared_page
     try:
@@ -393,7 +397,11 @@ async def _fetch_loris_historical_with_nodriver_inner(
             "Install requirements or run: pip install nodriver"
         ) from exc
 
-    params = urlencode({"symbol": symbol.upper(), "start": start, "end": end})
+    query = {"symbol": symbol.upper(), "start": start, "end": end}
+    if exchanges:
+        # Without a filter the response carries every venue's series (40+); ask only for what is used.
+        query["exchanges"] = exchanges
+    params = urlencode(query)
     url = f"{LORIS_HISTORICAL_URL}?{params}"
     headless = env_flag("LORIS_NODRIVER_HEADLESS", default=False)
     user_data_dir = os.getenv("LORIS_NODRIVER_USER_DATA_DIR", "").strip() or None

@@ -808,6 +808,11 @@ class TradeXyzAdapterTests(unittest.IsolatedAsyncioTestCase):
 
 
 class AsterAdapterTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self) -> None:
+        # The metadata cache is keyed by id(session); throwaway object() sessions reuse ids.
+        from hydra_basis.adapters import aster as aster_adapter
+        aster_adapter._ASTER_SYMBOL_METADATA_CACHE.clear()
+
     async def test_list_symbols_uses_funding_info_and_normalizes_suffixes(self) -> None:
         payload = [
             {"symbol": "BTCUSDT", "fundingIntervalHours": 8},

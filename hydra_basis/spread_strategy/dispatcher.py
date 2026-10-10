@@ -378,7 +378,8 @@ async def _build_runners(venue: str, session, store: QuoteStore, settings: Setti
         runners = [ArcusRunner(session, store, markets, watched)]
     elif venue == "lighter":
         runners = [LighterStreamRunner(session, store),
-                   LighterRunner(session, store, await fetch_lighter_market_map(session), watched)]
+                   *(LighterRunner(session, store, shard, watched)
+                     for shard in lighter_market_shards(await fetch_lighter_market_map(session)))]
     elif venue == "aster":
         runners = [AsterStreamRunner(session, store), AsterRunner(session, store, watched)]
     elif venue == "ondo":
@@ -538,8 +539,19 @@ class AsterRunner(_SubscribingRunner):
                 self.store.update_quotes("aster", {symbol: book})
 
 
+# Lighter accepts 200 client messages per minute per connection ("Too Many Websocket Messages!"
+# beyond it), so tickers are spread over sockets with room left for depth subscriptions and pongs.
+LIGHTER_MARKETS_PER_SOCKET = 150
+
+
+def lighter_market_shards(market_map: dict[str, int], size: int = LIGHTER_MARKETS_PER_SOCKET) -> list[dict[str, int]]:
+    items = sorted(market_map.items(), key=lambda item: item[1])
+    return [dict(items[start:start + size]) for start in range(0, len(items), size)] or [{}]
+
+
 class LighterRunner(_SubscribingRunner):
-    """Tickers for every market (top of book with size) plus order_book deltas for watched markets."""
+    """Tickers for one shard of markets (top of book with size) plus order_book deltas for its
+    watched markets; build one per ``lighter_market_shards`` entry."""
     url = "wss://mainnet.zklighter.elliot.ai/stream?readonly=true"
 
     def __init__(self, session, store, market_map: dict[str, int], watched=lambda: ()):
@@ -579,7 +591,8 @@ class LighterRunner(_SubscribingRunner):
             return
         ticker = payload.get("ticker") or {}
         bid, ask = ticker.get("b") or {}, ticker.get("a") or {}
-        if bid.get("price") is None or ask.get("price") is None or payload.get("timestamp") is None:
+        # A market with an empty book sends price "" (not null); it has no quote yet.
+        if not bid.get("price") or not ask.get("price") or payload.get("timestamp") is None:
             return
         self.store.update_quotes("lighter", {symbol: {
             "bid": bid["price"], "ask": ask["price"], "ts_ms": int(payload["timestamp"]),

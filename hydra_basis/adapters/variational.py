@@ -4,6 +4,7 @@ import asyncio
 import datetime as dt
 import json
 import os
+import random
 from pathlib import Path
 
 from hydra_basis.adapters.base import fetch_json
@@ -23,9 +24,14 @@ LORIS_HISTORICAL_URL = "https://api.loris.tools/funding/historical"
 _VARIATIONAL_STATS_CACHE: dict[int, dict[str, dict[str, float]]] = {}
 LORIS_GATEWAY_RETRIES = 2
 LORIS_EMPTY_SERIES_RETRIES = 1
-LORIS_RATE_LIMIT_RETRIES = 3
-LORIS_RATE_LIMIT_BACKOFF_SECONDS = 30.0
+# Loris answers 429 with Retry-After: 1 and recommends exponential backoff with jitter:
+# 2, 4, 8, 16, 32 s (~1 min in total) instead of a fixed 30/60/90 s.
+LORIS_RATE_LIMIT_RETRIES = 5
+LORIS_RATE_LIMIT_BACKOFF_SECONDS = 2.0
+LORIS_RATE_LIMIT_MAX_BACKOFF_SECONDS = 60.0
 LORIS_COMPARISON_INTERVAL_HOURS = 8.0
+# Only the Variational series is used; unfiltered responses carry every venue (~36x the bytes).
+LORIS_EXCHANGES = "variational"
 VARIATIONAL_LORIS_INVALID_SYMBOLS_PATH = Path(
     os.getenv("VARIATIONAL_LORIS_INVALID_SYMBOLS_PATH", "data/variational_loris_invalid_symbols.json")
 )
@@ -169,6 +175,12 @@ def _loris_series_count(data: dict, *, venue: str) -> int:
     return len(rows) if isinstance(rows, list) else 0
 
 
+def loris_rate_limit_backoff_seconds(attempt: int) -> float:
+    """Exponential backoff with up to 10% jitter for the ``attempt``-th consecutive 429 (1-based)."""
+    base = min(LORIS_RATE_LIMIT_MAX_BACKOFF_SECONDS, LORIS_RATE_LIMIT_BACKOFF_SECONDS * 2 ** (attempt - 1))
+    return base * (1 + random.uniform(0, 0.1))
+
+
 def _loris_response_is_rate_limited(data: object) -> bool:
     if not isinstance(data, dict):
         return False
@@ -241,6 +253,7 @@ async def fetch_variational_funding_since(session, symbol: str, start_time_ms: i
                     symbol=symbol.upper(),
                     start=start_iso,
                     end=end_iso,
+                    exchanges=LORIS_EXCHANGES,
                 )
             except RuntimeError as exc:
                 if _is_loris_explicit_invalid_symbol_error(exc, symbol=symbol):
@@ -264,7 +277,7 @@ async def fetch_variational_funding_since(session, symbol: str, start_time_ms: i
                         flush=True,
                     )
                     break
-                backoff = LORIS_RATE_LIMIT_BACKOFF_SECONDS * rate_limit_attempts
+                backoff = loris_rate_limit_backoff_seconds(rate_limit_attempts)
                 print(
                     f"loris rate limited symbol={symbol.upper()} "
                     f"attempt={rate_limit_attempts}/{LORIS_RATE_LIMIT_RETRIES} "
@@ -300,6 +313,7 @@ async def fetch_variational_funding_since(session, symbol: str, start_time_ms: i
                         "symbol": symbol.upper(),
                         "start": start_iso,
                         "end": end_iso,
+                        "exchanges": LORIS_EXCHANGES,
                     },
                     headers=loris_headers,
                 ),
@@ -314,6 +328,7 @@ async def fetch_variational_funding_since(session, symbol: str, start_time_ms: i
                         symbol=symbol.upper(),
                         start=start_iso,
                         end=end_iso,
+                        exchanges=LORIS_EXCHANGES,
                     ),
                     delay_seconds=VARIATIONAL_REQUEST_DELAY_SECONDS,
                 )

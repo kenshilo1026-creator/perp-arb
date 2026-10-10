@@ -67,6 +67,20 @@ def backfill_needs_top_up(points: Sequence, *, now_ms: int) -> bool:
     return newest_ts <= now_ms - max_interval_ms
 
 
+def classify_backfill_key(points: Sequence, *, now_ms: int, required_days: int = 7) -> str:
+    """"skip" (newest point is within one funding interval), "top_up" (the window start is covered,
+    so fetching from the newest point completes it) or "full" (the window start is missing).
+
+    ``points`` must be the untrimmed stored history: staleness alone never forces a full backfill,
+    a run after days offline still only needs the gap since the newest point.
+    """
+    if not points or not funding_history_is_complete(
+        list(points), required_days=required_days, now_ms=now_ms, require_recent=False,
+    ):
+        return "full"
+    return "top_up" if backfill_needs_top_up(points, now_ms=now_ms) else "skip"
+
+
 def _format_ms_utc(ts_ms: int | None) -> str:
     if ts_ms is None:
         return "None"

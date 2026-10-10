@@ -14,16 +14,18 @@ ensure_project_root_on_path()
 
 from hydra_basis.adapters.registry import FETCHERS, FETCHERS_SINCE, SYMBOL_DISCOVERERS
 from hydra_basis.backfill import (
+    INVALID_SYMBOL_SENTINEL,
     build_spread_refresh_keys,
     build_no_new_points_warning,
     chunk_sequence,
+    classify_backfill_key,
     split_loris_batched_keys,
     capture_backfill_spread_snapshot_with_error,
     persist_backfill_progress,
     prune_funding_history_keys,
     backfill_incremental_start_ms,
-    backfill_needs_top_up,
 )
+from hydra_basis.backfill_ws_spreads import BULK_SPREAD_VENUES, collect_top_of_book
 from hydra_basis.adapters.base import fetch_json
 from hydra_basis.adapters.variational import VARIATIONAL_BASE_URL, VARIATIONAL_LORIS_INVALID_SYMBOLS
 from hydra_basis.config import (
@@ -37,9 +39,9 @@ from hydra_basis.config import (
 from hydra_basis.env import load_environment
 from hydra_basis.async_utils import gather_limited
 from hydra_basis.execution_engine.orderbook_spread_store import OrderbookSpreadStore
+from hydra_basis.execution_engine.risk import compute_spread_pct
 from hydra_basis.history_store import (
     FundingHistoryStore,
-    funding_history_is_complete,
     merge_points_by_interval_bucket,
     summarize_history_coverage,
     trim_points_to_analysis_days,
@@ -204,29 +206,23 @@ async def run_backfill(*, skip_spread_refresh: bool = False, symbols_filter: set
             for symbol in sorted(venue_symbols.get(venue, set())):
                 if symbols_filter is not None and symbol.upper() not in symbols_filter:
                     continue
-                # Every loaded key was already merged once above.
+                # Every loaded key was already merged once above. Classify on the untrimmed
+                # history: data that went stale while the backfill was not running still covers
+                # the window start, so it only needs the gap since its newest point.
                 merged_cached_points = all_points.get((venue, symbol), [])
-                cached_points = trim_points_to_analysis_days(
-                    merged_cached_points,
-                    analysis_days=7,
-                )
-                if funding_history_is_complete(cached_points, required_days=7):
-                    if backfill_needs_top_up(cached_points, now_ms=current_now_ms):
-                        start_ms = backfill_incremental_start_ms(merged_cached_points)
-                        if start_ms is not None:
-                            pending_keys.append((venue, symbol))
-                            top_up_keys.add((venue, symbol))
-                            incremental_starts[(venue, symbol)] = start_ms
-                            top_up_scheduled += 1
-                    else:
-                        skipped_complete += 1
+                kind = classify_backfill_key(merged_cached_points, now_ms=current_now_ms)
+                if kind == "skip":
+                    skipped_complete += 1
                     continue
                 pending_keys.append((venue, symbol))
-                full_backfill_scheduled += 1
-                if venue in FETCHERS_SINCE:
-                    start_ms = backfill_incremental_start_ms(merged_cached_points)
-                    if start_ms is not None:
-                        incremental_starts[(venue, symbol)] = start_ms
+                if kind == "top_up":
+                    top_up_keys.add((venue, symbol))
+                    top_up_scheduled += 1
+                else:
+                    full_backfill_scheduled += 1
+                start_ms = backfill_incremental_start_ms(merged_cached_points)
+                if start_ms is not None and (kind == "top_up" or venue in FETCHERS_SINCE):
+                    incremental_starts[(venue, symbol)] = start_ms
 
         print(
             "backfill summary "
@@ -256,212 +252,253 @@ async def run_backfill(*, skip_spread_refresh: bool = False, symbols_filter: set
 
         loris_batched_keys.sort(key=_staleness_key)
 
-        if immediate_keys:
-            print(f"backfill direct size={len(immediate_keys)}")
-            tasks = []
-            for venue, symbol in immediate_keys:
-                start_ms = incremental_starts.get((venue, symbol))
-                if start_ms is not None and venue in FETCHERS_SINCE:
-                    tasks.append(FETCHERS_SINCE[venue](session, symbol, start_ms))
-                else:
-                    tasks.append(FETCHERS[venue](session, symbol))
-            # Use higher concurrency when all pending keys are top-ups (tiny incremental fetches).
-            is_all_top_up = all(k in top_up_keys for k in immediate_keys)
-            direct_limit = TOP_UP_CONCURRENCY_LIMIT if is_all_top_up else FETCH_CONCURRENCY_LIMIT
-            results = await gather_limited(tasks, limit=direct_limit, return_exceptions=True)
-
-            dirty = 0
-            for key, result in zip(immediate_keys, results):
-                if isinstance(result, Exception):
-                    if should_raise_immediately(result):
-                        raise result
-                    coverage = summarize_history_coverage(
-                        trim_points_to_analysis_days(
-                            merge_points_by_interval_bucket(all_points.get(key, [])),
-                            analysis_days=7,
-                        ),
-                        required_days=7,
-                    )
-                    print(
-                        f"backfill failed {key}: {result!r} "
-                        f"samples={coverage['samples']} "
-                        f"oldest_ts_ms={coverage['oldest_ts_ms']} "
-                        f"newest_ts_ms={coverage['newest_ts_ms']} "
-                        f"missing_ms={coverage['missing_ms']}"
-                    )
-                    continue
-                if not result:
-                    coverage = summarize_history_coverage(
-                        trim_points_to_analysis_days(
-                            merge_points_by_interval_bucket(all_points.get(key, [])),
-                            analysis_days=7,
-                        ),
-                        required_days=7,
-                    )
-                    warning = build_no_new_points_warning(
-                        venue=key[0],
-                        symbol=key[1],
-                        start_ms=incremental_starts.get(key),
-                        end_ms=current_now_ms,
-                        coverage=coverage,
-                    )
-                    print(warning)
-                    continue
-                merged = merge_points_by_interval_bucket(all_points.get(key, []) + result)
-                all_points[key] = trim_points_to_lookback_ms(
-                    merged,
-                    lookback_ms=FUNDING_HISTORY_LOOKBACK_DAYS * 24 * 60 * 60 * 1000,
-                )
-                dirty += 1
-                if dirty % PERSIST_EVERY_N == 0:
-                    persist_backfill_progress(
-                        history_store=store,
-                        spread_store=spread_store,
-                        funding_points=all_points,
-                        spreads=all_spreads,
-                    )
-            if dirty % PERSIST_EVERY_N != 0:
-                persist_backfill_progress(
-                    history_store=store,
-                    spread_store=spread_store,
-                    funding_points=all_points,
-                    spreads=all_spreads,
-                )
-                #print(f"backfill stored {key}: {len(all_points[key])} points")
-
-        batches = chunk_sequence(loris_batched_keys, chunk_size=BACKFILL_BATCH_SIZE)
-        for batch_index, batch in enumerate(batches, start=1):
-            print(
-                f"backfill loris-batch {batch_index}/{len(batches)} "
-                f"size={len(batch)} concurrency={LORIS_BATCH_CONCURRENCY_LIMIT}"
+        checkpoint = BackfillCheckpoint(
+            lambda: persist_backfill_progress(
+                history_store=store,
+                spread_store=spread_store,
+                funding_points=all_points,
+                spreads=all_spreads,
             )
-            tasks = []
-            for venue, symbol in batch:
-                start_ms = incremental_starts.get((venue, symbol))
-                if start_ms is not None and venue in FETCHERS_SINCE:
-                    tasks.append(FETCHERS_SINCE[venue](session, symbol, start_ms))
-                else:
-                    tasks.append(FETCHERS[venue](session, symbol))
-            results = await gather_limited(tasks, limit=LORIS_BATCH_CONCURRENCY_LIMIT, return_exceptions=True)
+        )
+        # Rate limits and timeouts no longer abort the run: they are collected and reported once
+        # it has finished, and the affected keys are retried by the next run.
+        deferred_errors: list[dict[str, str]] = []
 
-            dirty = 0
+        def merge_result(key: tuple[str, str], result) -> None:
+            if isinstance(result, Exception):
+                if should_raise_immediately(result):
+                    deferred_errors.append({"venue": key[0], "symbol": key[1], "error": repr(result)[:300]})
+                coverage = summarize_history_coverage(
+                    trim_points_to_analysis_days(
+                        merge_points_by_interval_bucket(all_points.get(key, [])),
+                        analysis_days=7,
+                    ),
+                    required_days=7,
+                )
+                print(
+                    f"backfill failed {key}: {result!r} "
+                    f"samples={coverage['samples']} "
+                    f"oldest_ts_ms={coverage['oldest_ts_ms']} "
+                    f"newest_ts_ms={coverage['newest_ts_ms']} "
+                    f"missing_ms={coverage['missing_ms']}"
+                )
+                return
+            if not result:
+                coverage = summarize_history_coverage(
+                    trim_points_to_analysis_days(
+                        merge_points_by_interval_bucket(all_points.get(key, [])),
+                        analysis_days=7,
+                    ),
+                    required_days=7,
+                )
+                warning = build_no_new_points_warning(
+                    venue=key[0],
+                    symbol=key[1],
+                    start_ms=incremental_starts.get(key),
+                    end_ms=current_now_ms,
+                    coverage=coverage,
+                )
+                print(warning)
+                return
+            merged = merge_points_by_interval_bucket(all_points.get(key, []) + result)
+            all_points[key] = trim_points_to_lookback_ms(
+                merged,
+                lookback_ms=FUNDING_HISTORY_LOOKBACK_DAYS * 24 * 60 * 60 * 1000,
+            )
+            checkpoint.mark_dirty()
+
+        def fetch_task(venue: str, symbol: str):
+            start_ms = incremental_starts.get((venue, symbol))
+            if start_ms is not None and venue in FETCHERS_SINCE:
+                return FETCHERS_SINCE[venue](session, symbol, start_ms)
+            return FETCHERS[venue](session, symbol)
+
+        async def run_loris_batches() -> None:
+            batches = chunk_sequence(loris_batched_keys, chunk_size=BACKFILL_BATCH_SIZE)
+            for batch_index, batch in enumerate(batches, start=1):
+                print(
+                    f"backfill loris-batch {batch_index}/{len(batches)} "
+                    f"size={len(batch)} concurrency={LORIS_BATCH_CONCURRENCY_LIMIT}"
+                )
+                results = await gather_limited(
+                    [fetch_task(venue, symbol) for venue, symbol in batch],
+                    limit=LORIS_BATCH_CONCURRENCY_LIMIT,
+                    return_exceptions=True,
+                )
+                for key, result in zip(batch, results):
+                    merge_result(key, result)
+
+        # Loris (Variational history) is paced by its own rate limit and shares no host with the
+        # other venues, so it runs alongside the direct fetches and the spread refresh.
+        loris_task = asyncio.create_task(run_loris_batches()) if loris_batched_keys else None
+        try:
+            if immediate_keys:
+                print(f"backfill direct size={len(immediate_keys)}")
+                # Use higher concurrency when all pending keys are top-ups (tiny incremental fetches).
+                is_all_top_up = all(k in top_up_keys for k in immediate_keys)
+                direct_limit = TOP_UP_CONCURRENCY_LIMIT if is_all_top_up else FETCH_CONCURRENCY_LIMIT
+                results = await gather_limited(
+                    [fetch_task(venue, symbol) for venue, symbol in immediate_keys],
+                    limit=direct_limit,
+                    return_exceptions=True,
+                )
+                for key, result in zip(immediate_keys, results):
+                    merge_result(key, result)
+
+            if spread_refresh_keys and not skip_spread_refresh:
+                await refresh_spreads(
+                    session=session,
+                    keys=spread_refresh_keys,
+                    spreads=all_spreads,
+                    spread_store=spread_store,
+                )
+
+            if loris_task is not None:
+                await loris_task
+        finally:
+            if loris_task is not None and not loris_task.done():
+                loris_task.cancel()
+                await asyncio.gather(loris_task, return_exceptions=True)
+            checkpoint.flush()
+
+        await report_deferred_errors(deferred_errors)
+
+
+class BackfillCheckpoint:
+    """Persist after every PERSIST_EVERY_N updated keys across all phases, then once at the end.
+
+    Each save rewrites the whole history file (several seconds at ~60 MB), so phases do not save
+    after every batch.
+    """
+
+    def __init__(self, save):
+        self._save = save
+        self._dirty = 0
+        self._unsaved = False
+
+    def mark_dirty(self) -> None:
+        self._dirty += 1
+        self._unsaved = True
+        if self._dirty % PERSIST_EVERY_N == 0:
+            self.flush()
+
+    def flush(self) -> None:
+        if self._unsaved:
+            self._save()
+            self._unsaved = False
+
+
+async def refresh_spreads(*, session, keys: list[tuple[str, str]], spreads, spread_store) -> None:
+    """Bulk top of book (Aster REST, the other venues by WebSocket) first; REST snapshots only
+    for what that did not cover. Variational keeps its one-request stats snapshot below."""
+    wanted: dict[str, set[str]] = {}
+    for venue, symbol in keys:
+        if venue in BULK_SPREAD_VENUES and spreads.get((venue, symbol), {}).get("status") != INVALID_SYMBOL_SENTINEL:
+            wanted.setdefault(venue, set()).add(symbol)
+    covered: set[tuple[str, str]] = set()
+    if wanted:
+        quotes, stream_errors = await collect_top_of_book(session, wanted)
+        for key, quote in quotes.items():
+            spreads[key] = {
+                "bid": quote["bid"],
+                "ask": quote["ask"],
+                "spread_pct": compute_spread_pct(quote),
+                "ts_ms": quote["ts_ms"],
+            }
+        covered = set(quotes)
+        for venue, error in stream_errors.items():
+            print(f"backfill spread stream failed venue={venue}: {error}")
+        print(
+            f"backfill spread bulk stored={len(covered)} "
+            f"rest_fallback={sum(1 for key in keys if key not in covered and key[0] != 'variational')}"
+        )
+        spread_store.save(spreads)
+
+    spread_keys_by_venue: dict[str, list[tuple[str, str]]] = {}
+    for key in keys:
+        if key not in covered:
+            spread_keys_by_venue.setdefault(key[0], []).append(key)
+    for venue, venue_keys in spread_keys_by_venue.items():
+        spread_batches = chunk_sequence(venue_keys, chunk_size=PERSIST_EVERY_N)
+        spread_limit = SPREAD_REFRESH_CONCURRENCY_BY_VENUE.get(venue, FETCH_CONCURRENCY_LIMIT)
+        for batch_index, batch in enumerate(spread_batches, start=1):
+            print(
+                f"backfill spread-batch venue={venue} "
+                f"{batch_index}/{len(spread_batches)} size={len(batch)} "
+                f"concurrency={spread_limit}"
+            )
+            variational_stats = (
+                await fetch_variational_spread_batch_stats(session)
+                if venue == "variational" else None
+            )
+            tasks = [
+                capture_spread_snapshot_with_venue_delay(
+                    session=session,
+                    spreads=spreads,
+                    venue=item_venue,
+                    symbol=symbol,
+                    variational_stats=variational_stats,
+                )
+                for item_venue, symbol in batch
+            ]
+            results = await gather_limited(
+                tasks,
+                limit=spread_limit,
+                return_exceptions=True,
+            )
+            spread_errors: list[dict[str, object]] = []
             for key, result in zip(batch, results):
                 if isinstance(result, Exception):
-                    if should_raise_immediately(result):
-                        raise result
-                    coverage = summarize_history_coverage(
-                        trim_points_to_analysis_days(
-                            merge_points_by_interval_bucket(all_points.get(key, [])),
-                            analysis_days=7,
-                        ),
-                        required_days=7,
-                    )
+                    print(f"backfill spread failed {key}: {result!r}")
+                    spread_errors.append({
+                        "venue": key[0],
+                        "symbol": key[1],
+                        "error": repr(result),
+                        "error_type": "task_exception",
+                    })
+                    continue
+                if result.get("error"):
                     print(
-                        f"backfill failed {key}: {result!r} "
-                        f"samples={coverage['samples']} "
-                        f"oldest_ts_ms={coverage['oldest_ts_ms']} "
-                        f"newest_ts_ms={coverage['newest_ts_ms']} "
-                        f"missing_ms={coverage['missing_ms']}"
+                        "backfill spread error "
+                        f"{key}: type={result.get('error_type')} "
+                        f"{result.get('error')}"
                     )
-                    continue
-                if not result:
-                    coverage = summarize_history_coverage(
-                        trim_points_to_analysis_days(
-                            merge_points_by_interval_bucket(all_points.get(key, [])),
-                            analysis_days=7,
-                        ),
-                        required_days=7,
-                    )
-                    warning = build_no_new_points_warning(
-                        venue=key[0],
-                        symbol=key[1],
-                        start_ms=incremental_starts.get(key),
-                        end_ms=current_now_ms,
-                        coverage=coverage,
-                    )
-                    print(warning)
-                    continue
-                merged = merge_points_by_interval_bucket(all_points.get(key, []) + result)
-                all_points[key] = trim_points_to_lookback_ms(
-                    merged,
-                    lookback_ms=FUNDING_HISTORY_LOOKBACK_DAYS * 24 * 60 * 60 * 1000,
-                )
-                dirty += 1
-                if dirty % PERSIST_EVERY_N == 0:
-                    persist_backfill_progress(
-                        history_store=store,
-                        spread_store=spread_store,
-                        funding_points=all_points,
-                        spreads=all_spreads,
-                    )
-            if dirty % PERSIST_EVERY_N != 0:
-                persist_backfill_progress(
-                    history_store=store,
-                    spread_store=spread_store,
-                    funding_points=all_points,
-                    spreads=all_spreads,
-                )
-                #print(f"backfill stored {key}: {len(all_points[key])} points")
+                    spread_errors.append(result)
+            await send_spread_error_alert(
+                venue=venue,
+                batch_index=batch_index,
+                batch_count=len(spread_batches),
+                errors=spread_errors,
+            )
+            # Funding history is checkpointed separately; spreads are saved per batch.
+            spread_store.save(spreads)
 
-        if spread_refresh_keys and not skip_spread_refresh:
-            spread_keys_by_venue: dict[str, list[tuple[str, str]]] = {}
-            for key in spread_refresh_keys:
-                spread_keys_by_venue.setdefault(key[0], []).append(key)
-            for venue, venue_keys in spread_keys_by_venue.items():
-                spread_batches = chunk_sequence(venue_keys, chunk_size=PERSIST_EVERY_N)
-                spread_limit = SPREAD_REFRESH_CONCURRENCY_BY_VENUE.get(venue, FETCH_CONCURRENCY_LIMIT)
-                for batch_index, batch in enumerate(spread_batches, start=1):
-                    print(
-                        f"backfill spread-batch venue={venue} "
-                        f"{batch_index}/{len(spread_batches)} size={len(batch)} "
-                        f"concurrency={spread_limit}"
-                    )
-                    variational_stats = (
-                        await fetch_variational_spread_batch_stats(session)
-                        if venue == "variational" else None
-                    )
-                    tasks = [
-                        capture_spread_snapshot_with_venue_delay(
-                            session=session,
-                            spreads=all_spreads,
-                            venue=item_venue,
-                            symbol=symbol,
-                            variational_stats=variational_stats,
-                        )
-                        for item_venue, symbol in batch
-                    ]
-                    results = await gather_limited(
-                        tasks,
-                        limit=spread_limit,
-                        return_exceptions=True,
-                    )
-                    spread_errors: list[dict[str, object]] = []
-                    for key, result in zip(batch, results):
-                        if isinstance(result, Exception):
-                            print(f"backfill spread failed {key}: {result!r}")
-                            spread_errors.append({
-                                "venue": key[0],
-                                "symbol": key[1],
-                                "error": repr(result),
-                                "error_type": "task_exception",
-                            })
-                            continue
-                        if result.get("error"):
-                            print(
-                                "backfill spread error "
-                                f"{key}: type={result.get('error_type')} "
-                                f"{result.get('error')}"
-                            )
-                            spread_errors.append(result)
-                    await send_spread_error_alert(
-                        venue=venue,
-                        batch_index=batch_index,
-                        batch_count=len(spread_batches),
-                        errors=spread_errors,
-                    )
-                    # Funding history has already been checkpointed above and
-                    # is unchanged throughout the spread-only phase.
-                    spread_store.save(all_spreads)
+
+async def report_deferred_errors(errors: list[dict[str, str]]) -> None:
+    """One summary, after the run, of the keys skipped for rate limits or timeouts."""
+    if not errors:
+        return
+    by_venue: dict[str, list[dict[str, str]]] = {}
+    for item in errors:
+        by_venue.setdefault(item["venue"], []).append(item)
+    summary = " ".join(f"{venue}={len(items)}" for venue, items in sorted(by_venue.items()))
+    print(f"backfill finished with rate-limited/timed-out keys (retried next run): {summary}")
+    lines = [
+        "<b>Backfill 完成：部分 symbol 遇到限流/逾時</b>",
+        f"受影響: {html.escape(summary)}",
+        "處理: 已跳過並繼續，下次 backfill 會補回。",
+    ]
+    for item in errors[:SPREAD_ERROR_ALERT_MAX_ITEMS]:
+        lines.append(
+            f"<code>{html.escape(item['venue'])} {html.escape(item['symbol'])}</code>: "
+            f"{html.escape(item['error'])[:240]}"
+        )
+    if len(errors) > SPREAD_ERROR_ALERT_MAX_ITEMS:
+        lines.append(f"...另外 {len(errors) - SPREAD_ERROR_ALERT_MAX_ITEMS} 個")
+    try:
+        await send_telegram("\n".join(lines))
+    except Exception as exc:
+        print(f"backfill deferred-error telegram alert failed: {exc!r}")
 
 
 if __name__ == "__main__":

@@ -51,7 +51,11 @@ async def fetch_minute_closes(session, venue: str, symbol: str, start_ms: int, e
     """Minute open-time (ms) -> close price; None when the venue has no public candles."""
     symbol = symbol.upper()
     if venue in ("hyperliquid", "entropy"):
-        coin = f"io:{symbol}" if venue == "entropy" else symbol
+        if venue == "entropy":
+            coin = f"io:{symbol}"
+        else:
+            from hydra_basis.adapters.hyperliquid import resolve_hyperliquid_coin
+            coin = await resolve_hyperliquid_coin(session, symbol)  # kPEPE, not KPEPE
         rows = await _json(session, "POST", "https://api.hyperliquid.xyz/info", json={
             "type": "candleSnapshot",
             "req": {"coin": coin, "interval": "1m", "startTime": start_ms, "endTime": end_ms}})

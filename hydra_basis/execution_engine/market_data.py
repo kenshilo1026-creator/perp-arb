@@ -7,7 +7,7 @@ import aiohttp
 
 from hydra_basis.adapters.aster import fetch_aster_symbol_metadata
 from hydra_basis.adapters.base import fetch_json
-from hydra_basis.adapters.hyperliquid import fetch_hyperliquid_universe
+from hydra_basis.adapters.hyperliquid import fetch_hyperliquid_universe, hyperliquid_coin_name
 from hydra_basis.adapters.lighter import fetch_lighter_market_map
 from hydra_basis.adapters.mexc import mexc_contract_symbol
 from hydra_basis.adapters.tradexyz import fetch_tradexyz_universe
@@ -81,7 +81,7 @@ async def fetch_hyperliquid_orderbook(session: aiohttp.ClientSession, symbol: st
     universe = await fetch_hyperliquid_universe(session)
     if symbol.upper() not in universe:
         raise RuntimeError(f"symbol not found on hyperliquid: {symbol}")
-    payload = {"type": "l2Book", "coin": symbol.upper()}
+    payload = {"type": "l2Book", "coin": hyperliquid_coin_name(symbol)}  # the universe fetch loaded spellings
     data = await fetch_json(session, "POST", "https://api.hyperliquid.xyz/info", json=payload)
     levels = data.get("levels") or []
     bids = levels[0] if len(levels) > 0 else []

@@ -257,5 +257,44 @@ class ArcusRetryTests(unittest.IsolatedAsyncioTestCase):
                 await arcus.fetch_arcus_funding_since(None, "BTC", start_time_ms=0)
 
 
+class HyperliquidCoinNameTests(unittest.IsolatedAsyncioTestCase):
+    """The info API is case-sensitive: project symbols are upper-cased, Hyperliquid spells kPEPE."""
+
+    def setUp(self):
+        from hydra_basis.adapters import hyperliquid as hl
+        self.hl = hl
+        hl._coin_names.clear()
+        hl._coin_names_ms = 0
+        self.addCleanup(hl._coin_names.clear)
+
+    async def test_funding_history_requests_the_exchange_spelling(self):
+        meta = {"universe": [{"name": "BTC"}, {"name": "kPEPE"}, {"name": "KAITO"}]}
+        rows = [{"time": 1_717_000_000_000, "fundingRate": "0.0001"}]
+        post = AsyncMock(side_effect=[meta, rows])
+        with patch.object(self.hl, "_post_hyperliquid_info", post):
+            symbols = await self.hl.list_symbols(None)
+            points = await self.hl.fetch_hyperliquid_funding_since(None, "KPEPE", start_time_ms=1)
+        self.assertIn("KPEPE", symbols)
+        self.assertEqual(post.await_args_list[1].args[1]["coin"], "kPEPE")
+        self.assertEqual(points[0].symbol, "KPEPE")
+        self.assertEqual((self.hl.hyperliquid_coin_name("kaito"), self.hl.hyperliquid_coin_name("NEW")), ("KAITO", "NEW"))
+
+    async def test_resolve_loads_meta_only_when_missing(self):
+        post = AsyncMock(return_value={"universe": [{"name": "kBONK"}]})
+        with patch.object(self.hl, "_post_hyperliquid_info", post):
+            self.assertEqual(await self.hl.resolve_hyperliquid_coin(None, "KBONK"), "kBONK")
+            self.assertEqual(await self.hl.resolve_hyperliquid_coin(None, "KBONK"), "kBONK")
+        self.assertEqual(post.await_count, 1)
+
+    async def test_minute_candles_use_the_exchange_spelling(self):
+        from hydra_basis.spread_strategy import history
+        self.hl.remember_hyperliquid_coin_names([{"name": "kSHIB"}])
+        candles = AsyncMock(return_value=[{"t": 60_000, "c": "0.01"}])
+        with patch.object(history, "_json", candles):
+            closes = await history.fetch_minute_closes(None, "hyperliquid", "KSHIB", 0, 120_000)
+        self.assertEqual(candles.await_args.kwargs["json"]["req"]["coin"], "kSHIB")
+        self.assertEqual(closes, {60_000: 0.01})
+
+
 if __name__ == "__main__":
     unittest.main()

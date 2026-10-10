@@ -14,6 +14,33 @@ HYPERLIQUID_INFO_URL = "https://api.hyperliquid.xyz/info"
 HYPERLIQUID_RETRY_ATTEMPTS = 4
 HYPERLIQUID_RATE_LIMIT_BACKOFF_SECONDS = 3.0
 HYPERLIQUID_FUNDING_INTERVAL_HOURS = 1.0
+COIN_NAMES_TTL_MS = 60 * 60 * 1000
+
+# Project symbols are upper-cased, but the info API only accepts Hyperliquid's own spelling of
+# a coin ("kPEPE", not "KPEPE"). Every main-dex meta response refreshes this map.
+_coin_names: dict[str, str] = {}
+_coin_names_ms = 0
+
+
+def remember_hyperliquid_coin_names(rows) -> None:
+    global _coin_names_ms
+    names = {str(row["name"]).upper(): str(row["name"]) for row in rows or [] if row.get("name")}
+    if names:
+        _coin_names.update(names)
+        _coin_names_ms = now_ms()
+
+
+def hyperliquid_coin_name(symbol: str) -> str:
+    """Hyperliquid's spelling of a main-dex coin from the last meta response (unknown: as given)."""
+    normalized = symbol.strip().upper()
+    return _coin_names.get(normalized, normalized)
+
+
+async def resolve_hyperliquid_coin(session, symbol: str) -> str:
+    """Like ``hyperliquid_coin_name``, fetching meta first when it is missing or over an hour old."""
+    if not _coin_names or now_ms() - _coin_names_ms > COIN_NAMES_TTL_MS:
+        await fetch_hyperliquid_meta(session)
+    return hyperliquid_coin_name(symbol)
 
 
 def ms_days_ago(days: int) -> int:
@@ -64,7 +91,10 @@ async def fetch_hyperliquid_meta(session, dex: str | None = None) -> list[dict]:
     """
     payload = {"type": "meta"} if not dex else {"type": "meta", "dex": dex}
     data = await _post_hyperliquid_info(session, payload)
-    return list(data.get("universe") or [])
+    rows = list(data.get("universe") or [])
+    if not dex:
+        remember_hyperliquid_coin_names(rows)
+    return rows
 
 
 async def fetch_hyperliquid_perp_dex_index(session, dex: str) -> int:
@@ -91,6 +121,7 @@ async def list_symbols(session) -> set[str]:
     payload = {"type": "meta"}
     data = await _post_hyperliquid_info(session, payload)
     universe = data.get("universe") or []
+    remember_hyperliquid_coin_names(universe)
     return {str(row.get("name") or "").upper() for row in universe if not row.get("isDelisted")}
 
 
@@ -124,7 +155,8 @@ async def fetch_hyperliquid_current_funding(session, symbol: str) -> dict[str, f
 
 
 async def fetch_hyperliquid_funding_since(session, symbol: str, start_time_ms: int) -> list[FundingPoint]:
-    payload = build_funding_history_payload(symbol, start_time_ms=start_time_ms)
+    # Symbol discovery (list_symbols) has already loaded the coin spellings.
+    payload = build_funding_history_payload(hyperliquid_coin_name(symbol), start_time_ms=start_time_ms)
     data = await _post_hyperliquid_info(session, payload)
 
     rows_data = [

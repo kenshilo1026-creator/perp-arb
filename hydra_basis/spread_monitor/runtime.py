@@ -7,7 +7,7 @@ from typing import Any
 import aiohttp
 
 from hydra_basis.adapters.aster import fetch_aster_symbol_metadata, normalize_aster_symbol
-from hydra_basis.adapters.hyperliquid import fetch_hyperliquid_universe
+from hydra_basis.adapters.hyperliquid import fetch_hyperliquid_universe, hyperliquid_coin_name
 from hydra_basis.adapters.lighter import fetch_lighter_market_map
 from hydra_basis.adapters.mexc import list_symbols as list_mexc_symbols
 from hydra_basis.streams.manager import (
@@ -52,8 +52,9 @@ class HyperliquidQuoteRunner:
     async def initialize(self) -> None:
         self.ws = await self.session.ws_connect("wss://api.hyperliquid.xyz/ws", heartbeat=20)
         for symbol in self.ordered_symbols:
+            # ordered_symbols come upper-cased from the universe fetch, which loaded the spellings.
             await self.ws.send_json(
-                {"method": "subscribe", "subscription": {"type": "l2Book", "coin": symbol}}
+                {"method": "subscribe", "subscription": {"type": "l2Book", "coin": hyperliquid_coin_name(symbol)}}
             )
 
     async def pump_once(self) -> dict[str, Any]:

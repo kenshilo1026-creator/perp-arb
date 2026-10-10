@@ -215,9 +215,12 @@ class MarketFeed:
                     self.update_book("aster", book["bids"], book["asks"], source_ms=book["ts_ms"])
 
     async def _hyperliquid(self, session, venue: str = "hyperliquid", coin: str | None = None):
+        if coin is None:
+            from hydra_basis.adapters.hyperliquid import resolve_hyperliquid_coin
+            coin = await resolve_hyperliquid_coin(session, self.config.symbol)  # kPEPE, not KPEPE
         async with session.ws_connect(HYPERLIQUID_WS, heartbeat=20) as ws:
             await ws.send_json({"method": "subscribe",
-                                "subscription": {"type": "l2Book", "coin": coin or self.config.symbol}})
+                                "subscription": {"type": "l2Book", "coin": coin}})
             async for payload in self._messages(ws):
                 book = parse_hyperliquid_book(payload)
                 if book is not None:

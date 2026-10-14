@@ -1733,6 +1733,12 @@ class MexcSpotExecutionAdapterTests(unittest.IsolatedAsyncioTestCase):
                 return {"orderId": "spot-1"}
 
         class Session:
+            def __init__(self, **kwargs):
+                self.closed = False
+
+            async def close(self):
+                self.closed = True
+
             async def __aenter__(self) -> "Session":
                 return self
 
@@ -1752,6 +1758,7 @@ class MexcSpotExecutionAdapterTests(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(setattr, mexc_spot_adapter.aiohttp, "ClientSession", original_session)
 
         adapter = Adapter(api_key="k", api_secret="s")
+        self.addAsyncCleanup(adapter.close)
         await adapter._post_order(
             {
                 "symbol": "ETHUSDT",

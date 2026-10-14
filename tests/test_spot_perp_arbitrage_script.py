@@ -175,6 +175,7 @@ class SpotPerpArbitrageScriptTests(unittest.TestCase):
             [
                 "下單成功 mexc現貨成交價: 3001",
                 "aster做空成交價: 3010",
+                "實際不利成交價差（以 Maker 均價為分母）: -0.2990%",
             ],
         )
 
@@ -204,6 +205,7 @@ class SpotPerpArbitrageScriptTests(unittest.TestCase):
             [
                 "下單成功 mexc現貨成交價: 2990",
                 "aster做空成交價: 2999",
+                "實際不利成交價差（以 Maker 均價為分母）: -0.3010%",
             ],
         )
 

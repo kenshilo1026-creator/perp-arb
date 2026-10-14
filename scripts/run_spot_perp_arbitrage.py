@@ -28,7 +28,7 @@ from hydra_basis.execution_engine.market_data import (
     fetch_mexc_spot_orderbook,
     fetch_orderbook_snapshot,
 )
-from hydra_basis.execution_engine.maker_price_guard import MakerPriceGuard
+from hydra_basis.execution_engine.maker_price_guard import MakerPriceGuard, adverse_price_gap
 from hydra_basis.execution_engine.mexc_spot_adapter import MexcSpotExecutionAdapter
 from hydra_basis.execution_engine.order_service import Deps, progress_printer, run_batched_execution
 from hydra_basis.execution_engine.risk import compute_spread_pct
@@ -301,6 +301,8 @@ def price_for_venue_from_execution_summary(
     if not isinstance(summary, dict):
         return "N/A"
     key = "maker_avg_price" if venue == plan.maker_venue else "taker_avg_price"
+    if key == "maker_avg_price" and summary.get("maker_avg_price_confirmed") is False:
+        return "N/A"
     return summary.get(key) or "N/A"
 
 
@@ -319,10 +321,29 @@ def format_spot_perp_execution_summary(
         result=result,
         venue=plan.short_venue,
     )
-    return [
+    lines = [
         f"下單成功 {display_venue_name(MEXC_SPOT_VENUE)}現貨成交價: {spot_price}",
-        f"{display_venue_name(plan.short_venue)}做空成交價: {short_price}",
+        f"{display_venue_name(plan.short_venue)}{'做空' if plan.mode == 'open' else '買入平空'}成交價: {short_price}",
     ]
+    summary = result.get("execution_price_summary") or {}
+    maker, taker = summary.get("maker_avg_price"), summary.get("taker_avg_price")
+    if (summary.get("maker_avg_price_confirmed") is False
+            or maker in (None, "", "N/A") or taker in (None, "", "N/A")):
+        lines.append("成交均價未齊：無法驗證最終價差；pre_trade_price_gap 不是實際成交價差")
+    else:
+        gap = adverse_price_gap(Decimal(str(maker)), Decimal(str(taker)), plan.maker_side)
+        lines.append(f"實際不利成交價差（以 Maker 均價為分母）: {gap:.4%}")
+        if gap > Decimal("0.002"):
+            lines.append("警告：實際成交價差超過 0.20%；Maker 掛單保護不限制市價對沖的滑點")
+    timing = result.get("execution_timing")
+    if isinstance(timing, dict):
+        lines.append(
+            f"對沖延遲 [{timing['maker_confirmation_source']}]："
+            f"本機收到成交 → 呼叫對沖 {timing['maker_observed_to_hedge_call_ms']:.2f} ms；"
+            f"對沖呼叫至回傳 {timing['hedge_call_duration_ms']:.2f} ms"
+            "（非兩所實際成交時間差）"
+        )
+    return lines
 
 
 def format_spot_perp_price_gap_alert(plan: SpotPerpPlan) -> str:
@@ -430,6 +451,23 @@ async def execute_spot_perp_plan(
     )
     assert_maker_limit_supported(maker_adapter, plan.maker_venue)
     try:
+        # Do setup while both legs are still unfilled. In particular, an Aster
+        # taker must not fetch metadata/set margin/leverage after a spot fill.
+        for adapter in (maker_adapter, taker_adapter):
+            prepare = getattr(adapter, "prepare_execution", None)
+            warm_up = getattr(adapter, "warm_up", None)
+            if callable(prepare):
+                await prepare(plan.symbol)
+            elif callable(warm_up):
+                await warm_up()
+        prepare_stream = getattr(maker_adapter, "prepare_maker_fill_stream", None)
+        if callable(prepare_stream):
+            try:
+                await prepare_stream()
+                print(f"[fill-stream] {plan.maker_venue}: private order stream ready", flush=True)
+            except Exception as exc:
+                # Do not print exception text: websocket URLs contain listen keys.
+                print(f"[fill-stream] {plan.maker_venue}: {type(exc).__name__}; using REST fallback", flush=True)
         fresh_maker_price = await refresh_spot_perp_maker_price(plan)
         async def guard_books() -> tuple[dict, dict]:
             spot, perp = await fetch_plan_books(
@@ -463,6 +501,7 @@ async def execute_spot_perp_plan(
             taker_orderbook=plan.taker_orderbook,
             require_maker_fill_confirmation=True,
             maker_fill_timeout_seconds=MAKER_FILL_TIMEOUT_SECONDS,
+            maker_fill_poll_interval_seconds=0.2,
             max_maker_reprice_attempts=maker_reprice_attempts_for_venue(plan.maker_venue),
             maker_reprice_min_change_pct=(
                 VARIATIONAL_MAKER_REPRICE_MIN_CHANGE_PCT

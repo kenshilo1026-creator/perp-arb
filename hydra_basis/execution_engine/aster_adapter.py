@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import threading
+from contextlib import asynccontextmanager
 import os
 import time
 from decimal import Decimal, ROUND_FLOOR
@@ -15,6 +16,7 @@ except ImportError:  # eth-account >= 0.12
 from eth_account.messages import encode_typed_data
 
 from hydra_basis.execution_engine.order_fill import poll_until_filled
+from hydra_basis.execution_engine.order_stream import OrderEventStream, decode_aster_order
 from hydra_basis.execution_engine.hedge_safety import wait_for_terminal_order
 
 ASTER_EXECUTION_SUFFIXES = ("USDT", "USDC", "USD")
@@ -103,6 +105,53 @@ class AsterExecutionAdapter:
         self._exchange_info_by_symbol: dict[str, dict] | None = None
         self._isolated_symbols: set[str] = set()
         self._leveraged_symbols: set[str] = set()
+        self._session: aiohttp.ClientSession | None = None
+        self._fill_stream: OrderEventStream | None = None
+
+    @asynccontextmanager
+    async def _request_session(self):
+        if self._session is None or self._session.closed:
+            self._session = aiohttp.ClientSession(connector=aiohttp.TCPConnector(keepalive_timeout=120))
+        yield self._session
+
+    async def close(self) -> None:
+        if self._fill_stream is not None:
+            await self._fill_stream.close()
+            self._fill_stream = None
+        if self._session is not None and not self._session.closed:
+            await self._session.close()
+        self._session = None
+
+    async def prepare_execution(self, symbol: str) -> None:
+        """Complete metadata/margin/leverage requests before the other leg fills."""
+        await self.warm_up()
+        await self.ensure_isolated_margin(symbol)
+        await self.ensure_leverage(symbol)
+
+    async def _user_stream_request(self, method: str) -> dict:
+        params = self.build_signed_params({})
+        async with self._request_session() as session:
+            async with session.request(method, f"{self.BASE_URL}/fapi/v3/listenKey",
+                                       data=params) as response:
+                if response.status != 200:
+                    raise RuntimeError(f"aster user stream HTTP {response.status}")
+                return await response.json()
+
+    async def prepare_maker_fill_stream(self) -> None:
+        if self._fill_stream is not None:
+            return
+
+        async def connect():
+            data = await self._user_stream_request("POST")
+            key = data["listenKey"]
+            async with self._request_session() as session:
+                return await session.ws_connect(f"wss://fstream.asterdex.com/ws/{key}", heartbeat=20)
+
+        stream = OrderEventStream(venue="aster", connect=connect,
+                                  renew=lambda: self._user_stream_request("PUT"),
+                                  decode=decode_aster_order)
+        await stream.start()
+        self._fill_stream = stream
 
     def _sign(self, encoded_params: str) -> str:
         if not self.private_key:
@@ -145,7 +194,7 @@ class AsterExecutionAdapter:
     async def _load_exchange_info_by_symbol(self) -> dict[str, dict]:
         if self._exchange_info_by_symbol is not None:
             return self._exchange_info_by_symbol
-        async with aiohttp.ClientSession() as session:
+        async with self._request_session() as session:
             async with session.get(f"{self.BASE_URL}/fapi/v3/exchangeInfo") as resp:
                 data = await resp.json()
                 if resp.status != 200:
@@ -191,7 +240,7 @@ class AsterExecutionAdapter:
             "Content-Type": "application/x-www-form-urlencoded",
             "User-Agent": "funding-arb-execution/0.1",
         }
-        async with aiohttp.ClientSession() as session:
+        async with self._request_session() as session:
             async with session.post(url, data=data, headers=headers) as resp:
                 content_type = resp.headers.get("Content-Type", "")
                 if "application/json" not in content_type.lower():
@@ -211,7 +260,7 @@ class AsterExecutionAdapter:
             "Content-Type": "application/x-www-form-urlencoded",
             "User-Agent": "funding-arb-execution/0.1",
         }
-        async with aiohttp.ClientSession() as session:
+        async with self._request_session() as session:
             async with session.post(f"{url}?{query}", headers=headers) as resp:
                 content_type = resp.headers.get("Content-Type", "")
                 if "application/json" not in content_type.lower():
@@ -231,7 +280,7 @@ class AsterExecutionAdapter:
             "Content-Type": "application/x-www-form-urlencoded",
             "User-Agent": "funding-arb-execution/0.1",
         }
-        async with aiohttp.ClientSession() as session:
+        async with self._request_session() as session:
             async with session.get(f"{url}?{query}", headers=headers) as resp:
                 content_type = resp.headers.get("Content-Type", "")
                 if "application/json" not in content_type.lower():
@@ -251,7 +300,7 @@ class AsterExecutionAdapter:
             "Content-Type": "application/x-www-form-urlencoded",
             "User-Agent": "funding-arb-execution/0.1",
         }
-        async with aiohttp.ClientSession() as session:
+        async with self._request_session() as session:
             async with session.delete(f"{url}?{query}", headers=headers) as resp:
                 content_type = resp.headers.get("Content-Type", "")
                 if "application/json" not in content_type.lower():
@@ -379,6 +428,14 @@ class AsterExecutionAdapter:
         order_id = order_result.get("order_id") or order_result.get("orderId")
         if order_id is None:
             raise RuntimeError("aster limit order fill wait requires order_id")
+        if self._fill_stream is not None:
+            return await self._fill_stream.wait_for_fill(
+                symbol=await self._resolve_raw_symbol(symbol), order_id=order_id,
+                fetch_status=lambda: self._get_order_status(symbol=symbol, order_id=order_id),
+                timeout_seconds=timeout_seconds, poll_interval_seconds=poll_interval_seconds,
+                timeout_message="aster limit order fill timeout",
+                return_on_partial_fill=allow_partial_fill,
+            )
         return await poll_until_filled(
             fetch_status=lambda: self._get_order_status(symbol=symbol, order_id=order_id),
             timeout_seconds=timeout_seconds,

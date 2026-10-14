@@ -4,6 +4,7 @@ import hashlib
 import hmac
 import os
 import time
+from contextlib import asynccontextmanager
 from decimal import Decimal
 from urllib.parse import urlencode
 
@@ -11,6 +12,7 @@ import aiohttp
 
 from hydra_basis.symbol_mapping import canonicalize_symbol, venue_symbol
 from hydra_basis.execution_engine.order_fill import poll_until_filled
+from hydra_basis.execution_engine.order_stream import OrderEventStream, decode_mexc_order, MEXC_ORDER_CHANNEL
 
 
 class MexcSpotExecutionAdapter:
@@ -35,6 +37,63 @@ class MexcSpotExecutionAdapter:
             else os.getenv("MEXC_SPOT_API_SECRET", "") or os.getenv("MEXC_API_SECRET", "")
         )
         self.recv_window_ms = recv_window_ms
+        self._session: aiohttp.ClientSession | None = None
+        self._fill_stream: OrderEventStream | None = None
+        self._listen_key: str | None = None
+
+    @asynccontextmanager
+    async def _request_session(self):
+        if self._session is None or self._session.closed:
+            self._session = aiohttp.ClientSession(connector=aiohttp.TCPConnector(keepalive_timeout=120))
+        yield self._session
+
+    async def close(self) -> None:
+        if self._fill_stream is not None:
+            await self._fill_stream.close()
+            self._fill_stream = None
+        if self._listen_key is not None:
+            try:
+                await self._user_stream_request("DELETE")
+            except Exception:
+                pass
+            self._listen_key = None
+        if self._session is not None and not self._session.closed:
+            await self._session.close()
+        self._session = None
+
+    async def warm_up(self) -> None:
+        """Open the public HTTPS connection before a maker order is submitted."""
+        async with self._request_session() as session:
+            async with session.get(f"{self.BASE_URL}/api/v3/ping") as response:
+                response.raise_for_status()
+                await response.read()
+
+    async def _user_stream_request(self, method: str) -> dict:
+        params = {"listenKey": self._listen_key} if method != "POST" else {}
+        async with self._request_session() as session:
+            async with session.request(method, f"{self.BASE_URL}/api/v3/userDataStream",
+                                       params=params, headers=self._order_headers(),
+                                       timeout=aiohttp.ClientTimeout(total=5)) as response:
+                if response.status != 200:
+                    raise RuntimeError(f"mexc user stream HTTP {response.status}")
+                return await response.json()
+
+    async def prepare_maker_fill_stream(self) -> None:
+        if self._fill_stream is not None:
+            return
+
+        async def connect():
+            data = await self._user_stream_request("POST")
+            self._listen_key = str(data["listenKey"])
+            async with self._request_session() as session:
+                return await session.ws_connect("wss://wbs-api.mexc.com/ws",
+                                                params={"listenKey": self._listen_key}, heartbeat=20)
+
+        stream = OrderEventStream(venue="mexc_spot", connect=connect,
+                                  renew=lambda: self._user_stream_request("PUT"),
+                                  decode=decode_mexc_order, channel=MEXC_ORDER_CHANNEL)
+        await stream.start()
+        self._fill_stream = stream
 
     def _timestamp_ms(self) -> int:
         return int(time.time() * 1000)
@@ -76,7 +135,7 @@ class MexcSpotExecutionAdapter:
         headers = {
             **self._order_headers(),
         }
-        async with aiohttp.ClientSession() as session:
+        async with self._request_session() as session:
             async with session.post(
                 f"{self.BASE_URL}/api/v3/order",
                 params=signed_params,
@@ -89,7 +148,7 @@ class MexcSpotExecutionAdapter:
 
     async def _get_order(self, params: dict) -> dict:
         signed_params = self._signed_order_params(params)
-        async with aiohttp.ClientSession() as session:
+        async with self._request_session() as session:
             async with session.get(
                 f"{self.BASE_URL}/api/v3/order",
                 params=signed_params,
@@ -102,7 +161,7 @@ class MexcSpotExecutionAdapter:
 
     async def _delete_order(self, params: dict) -> dict:
         signed_params = self._signed_order_params(params)
-        async with aiohttp.ClientSession() as session:
+        async with self._request_session() as session:
             async with session.delete(
                 f"{self.BASE_URL}/api/v3/order",
                 params=signed_params,
@@ -125,7 +184,7 @@ class MexcSpotExecutionAdapter:
 
     async def _get_account(self) -> dict:
         signed_params = self._signed_order_params({})
-        async with aiohttp.ClientSession() as session:
+        async with self._request_session() as session:
             async with session.get(
                 f"{self.BASE_URL}/api/v3/account",
                 params=signed_params,
@@ -200,6 +259,14 @@ class MexcSpotExecutionAdapter:
         order_id = order_result.get("order_id") or order_result.get("orderId")
         if order_id is None:
             raise RuntimeError("mexc spot limit order fill wait requires order_id")
+        if self._fill_stream is not None:
+            return await self._fill_stream.wait_for_fill(
+                symbol=self._spot_symbol(symbol), order_id=order_id,
+                fetch_status=lambda: self._get_order({"symbol": self._spot_symbol(symbol), "orderId": order_id}),
+                timeout_seconds=timeout_seconds, poll_interval_seconds=poll_interval_seconds,
+                timeout_message="mexc spot limit order fill timeout",
+                return_on_partial_fill=allow_partial_fill,
+            )
         return await poll_until_filled(
             fetch_status=lambda: self._get_order(
                 {

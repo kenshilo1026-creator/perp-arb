@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from decimal import Decimal
 import inspect
+import time
 from typing import Awaitable, Callable
 
 from hydra_basis.execution_engine.order_fill import extract_filled_quantity
@@ -306,6 +307,22 @@ def extract_average_price(payload: object) -> Decimal | None:
     return None
 
 
+def extract_actual_average_price(payload: object) -> Decimal | None:
+    """Read fill averages/filled quote amounts, never a submitted limit price."""
+    if isinstance(payload, dict):
+        direct = _decimal_from_mapping(payload, {
+            "avgprice", "avg_price", "averageprice", "average_price", "avgpx",
+            "executedprice", "executed_price", "fillprice", "fill_price",
+        }) or _average_price_from_quote_and_quantity(payload) or _average_price_from_fills(payload.get("fills"))
+        if direct is not None:
+            return direct
+        for key in ("raw", "execution_status", "details", "fill_result"):
+            found = extract_actual_average_price(payload.get(key))
+            if found is not None:
+                return found
+    return None
+
+
 def execution_sides_for_signal(*, maker_venue: str, short_venue: str, long_venue: str) -> tuple[str, str]:
     maker_side = "SELL" if maker_venue == short_venue else "BUY"
     taker_side = "BUY" if maker_venue == short_venue else "SELL"
@@ -397,12 +414,20 @@ async def wait_for_maker_fill(
     side: str,
     amount: str,
     timeout_seconds: float,
+    poll_interval_seconds: float = 0.5,
 ) -> dict[str, object]:
     if order_result_looks_filled(maker_result):
-        return {"ok": True, "source": "order_result", "raw": maker_result}
+        return {"ok": True, "source": "order_result", "raw": maker_result,
+                "observed_monotonic_ns": time.monotonic_ns()}
 
     waiter = getattr(maker_adapter, "wait_for_order_fill", None)
     if callable(waiter):
+        poll_kwargs = {}
+        parameters = inspect.signature(waiter).parameters
+        if "poll_interval_seconds" in parameters or any(
+            p.kind == inspect.Parameter.VAR_KEYWORD for p in parameters.values()
+        ):
+            poll_kwargs["poll_interval_seconds"] = poll_interval_seconds
         result = waiter(
             order_result=maker_result,
             symbol=symbol,
@@ -410,6 +435,7 @@ async def wait_for_maker_fill(
             amount=amount,
             timeout_seconds=timeout_seconds,
             allow_partial_fill=True,
+            **poll_kwargs,
         )
         if inspect.isawaitable(result):
             result = await result
@@ -501,6 +527,7 @@ async def execute_single_clip(
     taker_orderbook: dict[str, float | int] | None = None,
     require_maker_fill_confirmation: bool = False,
     maker_fill_timeout_seconds: float = 60.0,
+    maker_fill_poll_interval_seconds: float = 0.5,
     max_maker_reprice_attempts: int = 0,
     max_execution_price_gap_pct: float = 0.01,
     maker_reprice_min_change_pct: float = 0.0,
@@ -536,6 +563,7 @@ async def execute_single_clip(
         taker_orderbook=taker_orderbook,
         require_maker_fill_confirmation=require_maker_fill_confirmation,
         maker_fill_timeout_seconds=maker_fill_timeout_seconds,
+        maker_fill_poll_interval_seconds=maker_fill_poll_interval_seconds,
         max_maker_reprice_attempts=max_maker_reprice_attempts,
         max_execution_price_gap_pct=max_execution_price_gap_pct,
         maker_reprice_min_change_pct=maker_reprice_min_change_pct,
@@ -569,6 +597,7 @@ async def execute_single_clip_with_sides(
     taker_orderbook: dict[str, float | int] | None = None,
     require_maker_fill_confirmation: bool = False,
     maker_fill_timeout_seconds: float = 60.0,
+    maker_fill_poll_interval_seconds: float = 0.5,
     max_maker_reprice_attempts: int = 0,
     max_execution_price_gap_pct: float = 0.01,
     maker_reprice_min_change_pct: float = 0.0,
@@ -779,6 +808,7 @@ async def execute_single_clip_with_sides(
                 side=maker_side,
                 amount=str(quantity),
                 timeout_seconds=maker_fill_timeout_seconds,
+                poll_interval_seconds=maker_fill_poll_interval_seconds,
             )
             maker_fill_result = await (
                 wait_with_price_guard(fill_wait, maker_price_guard, maker_kwargs["price"])
@@ -1076,6 +1106,9 @@ async def execute_single_clip_with_sides(
     if maker_result is None:
         raise RuntimeError("maker order was not submitted")
 
+    fill_observation = maker_fill_result or {}
+    maker_observed_ns = fill_observation.get("observed_monotonic_ns", time.monotonic_ns())
+    maker_confirmation_source = fill_observation.get("source", "reconciled")
     requested_quantity = Decimal(str(quantity))
     executed_quantity = resolve_executed_quantity(
         requested_quantity=requested_quantity,
@@ -1116,6 +1149,7 @@ async def execute_single_clip_with_sides(
                 side=maker_side,
                 amount=str(quantity),
                 timeout_seconds=maker_fill_timeout_seconds,
+                poll_interval_seconds=maker_fill_poll_interval_seconds,
             )
             maker_fill_result = await (
                 wait_with_price_guard(fill_wait, maker_price_guard, maker_kwargs["price"])
@@ -1238,6 +1272,7 @@ async def execute_single_clip_with_sides(
         print(f"[maker-reconcile] final {maker_venue} quantity={executed_quantity}", flush=True)
 
     state_machine.to_hedging_taker_leg()
+    first_hedge_call_ns = None
     last_error: Exception | None = None
     for attempt in range(max_hedge_retries + 1):
         try:
@@ -1250,6 +1285,8 @@ async def execute_single_clip_with_sides(
             }
             if taker_reduce_only:
                 taker_kwargs["reduce_only"] = True
+            if first_hedge_call_ns is None:
+                first_hedge_call_ns = time.monotonic_ns()
             if verify_hedge_fill:
                 # Recovery orders only go to the original hedge leg. Never
                 # reverse the filled maker to compensate for a failed hedge.
@@ -1263,6 +1300,12 @@ async def execute_single_clip_with_sides(
                 hedge_result = await taker_adapter.place_market_order(**taker_kwargs)
                 if not isinstance(hedge_result, dict) or not hedge_result.get("ok", False):
                     raise RuntimeError(f"hedge order rejected: {hedge_result}")
+            hedge_returned_ns = time.monotonic_ns()
+            execution_timing = {
+                "maker_confirmation_source": maker_confirmation_source,
+                "maker_observed_to_hedge_call_ms": (first_hedge_call_ns - maker_observed_ns) / 1_000_000,
+                "hedge_call_duration_ms": (hedge_returned_ns - first_hedge_call_ns) / 1_000_000,
+            }
             if verify_hedge_fill:
                 await confirm_pair_execution(
                     maker_adapter, taker_adapter, symbol=symbol,
@@ -1274,8 +1317,23 @@ async def execute_single_clip_with_sides(
                 or extract_average_price(maker_result)
                 or (Decimal(str(resolved_maker_price)) if resolved_maker_price is not None else None)
             )
-            taker_avg_price = extract_average_price(hedge_result)
+            taker_avg_price = extract_actual_average_price(hedge_result)
+            if taker_avg_price is None:
+                # Query AFTER dispatch, never before the urgent hedge. An ACK
+                # often has no fill price (Aster); keep N/A if status is missing.
+                query = getattr(taker_adapter, "get_order_execution", None)
+                if callable(query):
+                    try:
+                        status = await query(order_result=hedge_result, symbol=symbol)
+                        taker_avg_price = extract_actual_average_price(status)
+                        hedge_result = {**hedge_result, "execution_status": status}
+                    except Exception:
+                        pass
             execution_price_summary = {
+                "maker_avg_price_confirmed": (
+                    extract_actual_average_price(maker_fill_result) is not None
+                    or extract_actual_average_price(maker_result) is not None
+                ),
                 "maker_avg_price": format_decimal(maker_avg_price) if maker_avg_price is not None else None,
                 "taker_avg_price": format_decimal(taker_avg_price) if taker_avg_price is not None else None,
                 "price_gap_pct": (
@@ -1296,6 +1354,7 @@ async def execute_single_clip_with_sides(
             return {
                 "ok": True,
                 "hedge_verified": verify_hedge_fill,
+                "execution_timing": execution_timing,
                 "maker_result": maker_result,
                 "maker_attempts": maker_attempts,
                 "maker_fill_result": maker_fill_result,

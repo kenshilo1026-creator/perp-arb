@@ -122,7 +122,8 @@ async def poll_until_filled(
         last_status = await fetch_status()
         if status_dict_looks_filled(last_status):
             filled_quantity = extract_filled_quantity(last_status, allow_terminal_quantity_fallback=True)
-            result = {"ok": True, "raw": last_status}
+            result = {"ok": True, "raw": last_status, "source": "rest_poll",
+                      "observed_monotonic_ns": time.monotonic_ns()}
             if filled_quantity is not None:
                 result["filled_quantity"] = format(filled_quantity.normalize(), "f")
             return result
@@ -133,6 +134,8 @@ async def poll_until_filled(
                     "ok": True,
                     "raw": last_status,
                     "partial": True,
+                    "source": "rest_poll",
+                    "observed_monotonic_ns": time.monotonic_ns(),
                     "filled_quantity": format(partial_quantity.normalize(), "f"),
                 }
         if time.monotonic() >= deadline:

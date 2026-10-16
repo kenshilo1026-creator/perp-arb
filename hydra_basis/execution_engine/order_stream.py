@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import time
 from collections import OrderedDict
 from decimal import Decimal
@@ -12,9 +13,51 @@ import aiohttp
 from hydra_basis.execution_engine.order_fill import poll_until_filled, status_dict_looks_filled
 
 
+def redact_stream_message(message, secrets=()) -> str:
+    text = str(message or "")
+    for secret in secrets:
+        if secret:
+            text = text.replace(str(secret), "<redacted>")
+    text = re.sub(r"(?:https?|wss?)://\S+", "<url redacted>", text, flags=re.I)
+    text = re.sub(
+        r"(?i)((?:listen[_-]?key|api[_-]?key|secret|signature|authorization|token)"
+        r"[\"']?\s*[:=]\s*[\"']?)[^\s,\"'&}]+", r"\1<redacted>", text,
+    )
+    text = re.sub(r"[A-Za-z0-9_+/=-]{24,}", "<redacted>", text)
+    return " ".join(text.split())[:240]
+
+
+class OrderStreamError(RuntimeError):
+    """A public diagnostic; never retain raw response bodies or request URLs."""
+
+    def __init__(self, stage, *, http_status=None, payload=None, reason=None, secrets=()):
+        parts = [stage]
+        if isinstance(http_status, int):
+            parts.append(f"HTTP {http_status}")
+        if isinstance(payload, dict):
+            code = payload.get("code")
+            if re.fullmatch(r"-?\d{1,10}", str(code)):
+                parts.append(f"code={code}")
+            message = redact_stream_message(payload.get("msg") or payload.get("message"), secrets)
+            if message:
+                parts.append(f"message={message}")
+        if reason:
+            parts.append(redact_stream_message(reason, secrets))
+        super().__init__("; ".join(parts))
+
+
+def format_stream_error(exc: Exception) -> str:
+    if isinstance(exc, OrderStreamError):
+        return str(exc)
+    # aiohttp exception strings can contain authenticated URLs. Whitelist only
+    # the numeric HTTP status; unknown errors continue to show their type.
+    status = getattr(exc, "status", None)
+    return type(exc).__name__ + (f" (HTTP {status})" if isinstance(status, int) else "")
+
+
 def decode_aster_order(message: dict) -> dict | None:
     if message.get("e") == "listenKeyExpired":
-        raise RuntimeError("Aster order stream expired")
+        raise OrderStreamError("aster user stream", reason="listen key expired")
     if message.get("e") != "ORDER_TRADE_UPDATE":
         return None
     order = message["o"]
@@ -144,14 +187,14 @@ class OrderEventStream:
             payload = json.loads(message.data)
             if self.channel:
                 if "code" in payload and payload["code"] != 0:
-                    raise RuntimeError("private order subscription rejected")
+                    raise OrderStreamError(f"{self.venue} subscription rejected", payload=payload)
                 return payload.get("code") == 0 and payload.get("msg") == self.channel
             status = self.decode(payload)
         elif message.type == aiohttp.WSMsgType.BINARY and self.channel:
             status = self.decode(message.data)
         elif message.type in (aiohttp.WSMsgType.CLOSE, aiohttp.WSMsgType.CLOSED,
                                aiohttp.WSMsgType.ERROR):
-            raise RuntimeError("private order stream disconnected")
+            raise OrderStreamError(f"{self.venue} websocket", reason="connection closed or failed")
         else:
             return False
         if status is not None:
@@ -159,22 +202,26 @@ class OrderEventStream:
         return False
 
     async def start(self):
+        stage = "connect"
         try:
             async with asyncio.timeout(10):
                 self._ws = await self.connect()
                 if self.channel:
+                    stage = "subscription acknowledgement"
                     await self._ws.send_json({"method": "SUBSCRIPTION", "params": [self.channel], "id": 1})
                     while not self._handle(await self._ws.receive()):
                         pass
             self.healthy = True
             self._tasks = [asyncio.create_task(self._reader()), asyncio.create_task(self._maintain())]
-        except BaseException:
+        except BaseException as exc:
             await self.close()
+            if isinstance(exc, Exception) and not isinstance(exc, OrderStreamError):
+                raise OrderStreamError(f"{self.venue} {stage}", reason=format_stream_error(exc)) from None
             raise
 
     def _failed(self, exc):
         if self.healthy:
-            print(f"[fill-stream] {self.venue}: {type(exc).__name__}; using REST fallback", flush=True)
+            print(f"[fill-stream] {self.venue}: {format_stream_error(exc)}; using REST fallback", flush=True)
         self.healthy = False
         self._notify()
 

@@ -30,6 +30,7 @@ from hydra_basis.execution_engine.market_data import (
 )
 from hydra_basis.execution_engine.maker_price_guard import MakerPriceGuard, adverse_price_gap
 from hydra_basis.execution_engine.mexc_spot_adapter import MexcSpotExecutionAdapter
+from hydra_basis.execution_engine.order_stream import format_stream_error
 from hydra_basis.execution_engine.order_service import Deps, progress_printer, run_batched_execution
 from hydra_basis.execution_engine.risk import compute_spread_pct
 from hydra_basis.execution_engine.state_machine import ExecutionStateMachine
@@ -467,7 +468,7 @@ async def execute_spot_perp_plan(
                 print(f"[fill-stream] {plan.maker_venue}: private order stream ready", flush=True)
             except Exception as exc:
                 # Do not print exception text: websocket URLs contain listen keys.
-                print(f"[fill-stream] {plan.maker_venue}: {type(exc).__name__}; using REST fallback", flush=True)
+                print(f"[fill-stream] {plan.maker_venue}: {format_stream_error(exc)}; using REST fallback", flush=True)
         fresh_maker_price = await refresh_spot_perp_maker_price(plan)
         async def guard_books() -> tuple[dict, dict]:
             spot, perp = await fetch_plan_books(

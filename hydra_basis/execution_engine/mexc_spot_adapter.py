@@ -12,7 +12,7 @@ import aiohttp
 
 from hydra_basis.symbol_mapping import canonicalize_symbol, venue_symbol
 from hydra_basis.execution_engine.order_fill import poll_until_filled
-from hydra_basis.execution_engine.order_stream import OrderEventStream, decode_mexc_order, MEXC_ORDER_CHANNEL
+from hydra_basis.execution_engine.order_stream import OrderEventStream, OrderStreamError, decode_mexc_order, MEXC_ORDER_CHANNEL
 
 
 class MexcSpotExecutionAdapter:
@@ -70,13 +70,23 @@ class MexcSpotExecutionAdapter:
 
     async def _user_stream_request(self, method: str) -> dict:
         params = {"listenKey": self._listen_key} if method != "POST" else {}
+        # Listen-key lifecycle endpoints require the same timestamp/HMAC
+        # authentication as other private spot REST requests.
+        signed_params = self._signed_order_params(params)
         async with self._request_session() as session:
             async with session.request(method, f"{self.BASE_URL}/api/v3/userDataStream",
-                                       params=params, headers=self._order_headers(),
+                                       params=signed_params, headers=self._order_headers(),
                                        timeout=aiohttp.ClientTimeout(total=5)) as response:
-                if response.status != 200:
-                    raise RuntimeError(f"mexc user stream HTTP {response.status}")
-                return await response.json()
+                try:
+                    data = await response.json(content_type=None)
+                except ValueError:
+                    data = None
+                if response.status != 200 or (isinstance(data, dict) and data.get("code", 0) not in (0, "0")):
+                    raise OrderStreamError(f"mexc_spot listen-key {method}", http_status=response.status,
+                                           payload=data, secrets=(self.api_key, self.api_secret, self._listen_key))
+                if not isinstance(data, dict) or (method == "POST" and not data.get("listenKey")):
+                    raise OrderStreamError(f"mexc_spot listen-key {method}", reason="invalid response / missing listenKey")
+                return data
 
     async def prepare_maker_fill_stream(self) -> None:
         if self._fill_stream is not None:

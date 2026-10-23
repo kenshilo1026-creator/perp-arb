@@ -4,6 +4,7 @@ import asyncio
 from decimal import Decimal
 import inspect
 import time
+from pathlib import Path
 from typing import Awaitable, Callable
 
 from hydra_basis.execution_engine.order_fill import extract_filled_quantity
@@ -11,9 +12,15 @@ from hydra_basis.execution_engine.maker_price_guard import (
     MakerPriceGuard, MakerPriceRecheck, adverse_price_gap, wait_with_price_guard,
 )
 from hydra_basis.execution_engine.hedge_safety import (
-    confirm_pair_execution, execute_confirmed_market_order, position_quantity, terminal_fill_quantity,
+    HedgeFailure, confirm_pair_execution, execute_confirmed_market_order, position_quantity, terminal_fill_quantity,
     wait_for_terminal_order,
 )
+from hydra_basis.execution_engine.quote_safety import (
+    assert_bounded_hedge_supported, assert_hedge_limit_still_marketable,
+    assert_post_only_supported, executable_price, validate_quote_age, validate_quote_pair_age,
+    cap_hedge_to_maker,
+)
+from hydra_basis.execution_engine.residual_report import append_residual_report
 
 
 def passive_limit_price_from_orderbook(orderbook: dict[str, float | int], side: str) -> str:
@@ -316,6 +323,8 @@ def extract_actual_average_price(payload: object) -> Decimal | None:
         }) or _average_price_from_quote_and_quantity(payload) or _average_price_from_fills(payload.get("fills"))
         if direct is not None:
             return direct
+        if payload.get("aggregate_fill"):
+            return None  # A last child's average must never stand for the whole hedge.
         for key in ("raw", "execution_status", "details", "fill_result"):
             found = extract_actual_average_price(payload.get(key))
             if found is not None:
@@ -539,6 +548,14 @@ async def execute_single_clip(
     maker_reduce_only: bool = False,
     taker_reduce_only: bool = False,
     verify_hedge_fill: bool = False,
+    require_bounded_hedge: bool = False,
+    hedge_limit_price: str | None = None,
+    planned_hedge_price: str | None = None,
+    max_quote_age_ms: float | None = None,
+    hedge_quote_refresher: Callable[[], Awaitable[dict]] | None = None,
+    maker_market_type: str = "perp",
+    taker_market_type: str = "perp",
+    residual_report_path: Path | str | None = None,
 ) -> dict[str, object]:
     maker_side, taker_side = execution_sides_for_signal(
         maker_venue=maker_venue,
@@ -575,6 +592,14 @@ async def execute_single_clip(
         maker_reduce_only=maker_reduce_only,
         taker_reduce_only=taker_reduce_only,
         verify_hedge_fill=verify_hedge_fill,
+        require_bounded_hedge=require_bounded_hedge,
+        hedge_limit_price=hedge_limit_price,
+        planned_hedge_price=planned_hedge_price,
+        max_quote_age_ms=max_quote_age_ms,
+        hedge_quote_refresher=hedge_quote_refresher,
+        maker_market_type=maker_market_type,
+        taker_market_type=taker_market_type,
+        residual_report_path=residual_report_path,
     )
 
 
@@ -609,9 +634,24 @@ async def execute_single_clip_with_sides(
     maker_reduce_only: bool = False,
     taker_reduce_only: bool = False,
     verify_hedge_fill: bool = False,
+    require_bounded_hedge: bool = False,
+    hedge_limit_price: str | None = None,
+    planned_hedge_price: str | None = None,
+    max_quote_age_ms: float | None = None,
+    hedge_quote_refresher: Callable[[], Awaitable[dict]] | None = None,
+    maker_market_type: str = "perp",
+    taker_market_type: str = "perp",
+    residual_report_path: Path | str | None = None,
 ) -> dict[str, object]:
-    if maker_price_guard is not None and (maker_venue != "aster" or not require_maker_fill_confirmation):
-        raise RuntimeError("maker price guard requires an Aster maker with fill confirmation")
+    if require_bounded_hedge:
+        if not verify_hedge_fill:
+            raise RuntimeError("bounded hedge requires terminal fill verification")
+        if hedge_limit_price in (None, ""):
+            raise RuntimeError("bounded hedge requires an explicit hedge_limit_price")
+        assert_bounded_hedge_supported(taker_adapter, taker_venue)
+        assert_post_only_supported(maker_adapter, maker_venue)
+    if maker_price_guard is not None and not require_maker_fill_confirmation:
+        raise RuntimeError("maker price guard requires fill confirmation")
     if maker_price_guard is not None and (
         maker_price_guard.maker_side.upper() != maker_side.upper()
         or maker_price_guard.taker_side.upper() != taker_side.upper()
@@ -656,6 +696,14 @@ async def execute_single_clip_with_sides(
         maker_kwargs["price"] = resolved_maker_price
 
     pre_trade_price_summary: dict[str, str] | None = None
+    quote_age_summary: dict[str, str] | None = None
+    if require_bounded_hedge:
+        if maker_orderbook is None or taker_orderbook is None or max_quote_age_ms is None:
+            raise RuntimeError("bounded hedge requires fresh maker and taker books plus max_quote_age_ms")
+        if maker_price_guard is None:
+            quote_age_summary = validate_quote_pair_age(
+                maker_orderbook, taker_orderbook, max_age_ms=max_quote_age_ms,
+            )
     if resolved_maker_price is not None and taker_orderbook is not None:
         maker_pre_price = Decimal(str(resolved_maker_price))
         taker_pre_price = Decimal(taker_price_from_orderbook(taker_orderbook, taker_side))
@@ -685,7 +733,8 @@ async def execute_single_clip_with_sides(
                 await setup(symbol)
         # Fail before submitting the maker if either live position is unavailable.
         maker_position_baseline, taker_position_baseline = await asyncio.gather(
-            position_quantity(maker_adapter, symbol), position_quantity(taker_adapter, symbol),
+            position_quantity(maker_adapter, symbol, market_type=maker_market_type),
+            position_quantity(taker_adapter, symbol, market_type=taker_market_type),
         )
         if abs(maker_position_baseline + taker_position_baseline) > max(
             Decimal(str(quantity)) * Decimal("0.001"), Decimal("0.00000001")
@@ -769,9 +818,16 @@ async def execute_single_clip_with_sides(
                 maker_result = None
                 maker_cancel_result = None
                 maker_fill_result = None
+                if require_bounded_hedge and maker_attempt == 0 and maker_price_guard is None:
+                    # Baseline/setup calls happen after the first validation. Recheck
+                    # immediately before dispatch so a slow private API cannot age it out.
+                    validate_quote_pair_age(
+                        maker_orderbook, taker_orderbook, max_age_ms=max_quote_age_ms,
+                    )
                 if maker_price_guard is not None:
                     # Also run immediately before every dispatch, after cancel reconciliation.
                     guarded_price = await maker_price_guard.prepare(str(maker_kwargs["price"]))
+                    quote_age_summary = maker_price_guard.quote_age_summary
                     maker_kwargs.update(price=guarded_price, post_only=True)
                     resolved_maker_price = guarded_price
                     taker_pre_price = maker_price_guard.taker_price(maker_price_guard.taker_book)
@@ -782,6 +838,8 @@ async def execute_single_clip_with_sides(
                         "adverse_price_gap_pct": format_decimal(adverse_price_gap(
                             Decimal(guarded_price), taker_pre_price, maker_side)),
                     }
+                if require_bounded_hedge:
+                    maker_kwargs["post_only"] = True
                 maker_result = await maker_adapter.place_limit_order(**maker_kwargs)
                 attempt_record["maker_result"] = maker_result
                 # If the order was placed without an explicit price (e.g. variational Mid click),
@@ -861,7 +919,7 @@ async def execute_single_clip_with_sides(
             maker_attempts.append(attempt_record)
             print(f"[maker-failure] venue={maker_venue} symbol={symbol} side={maker_side} error={exc}", flush=True)
             if isinstance(exc, (asyncio.CancelledError, KeyboardInterrupt, SystemExit)):
-                if (verify_hedge_fill or maker_price_guard is not None) and maker_venue in {"aster", "lighter", "hyperliquid", "mexc"}:
+                if (verify_hedge_fill or maker_price_guard is not None) and maker_venue in {"aster", "lighter", "hyperliquid", "mexc", "mexc_spot"}:
                     cleanup_errors = await cleanup_active_makers()
                     final_fill = terminal_fill_quantity(maker_cancel_result)
                     if not cleanup_errors and final_fill is not None and final_fill > 0:
@@ -896,7 +954,7 @@ async def execute_single_clip_with_sides(
                     break
             exhausted = max_maker_reprice_attempts >= 0 and maker_attempt >= max_maker_reprice_attempts
             if exhausted or not maker_fill_error_is_repriceable(exc):
-                if (verify_hedge_fill or maker_price_guard is not None) and maker_venue in {"aster", "lighter", "hyperliquid", "mexc"} and isinstance(maker_result, dict):
+                if (verify_hedge_fill or maker_price_guard is not None) and maker_venue in {"aster", "lighter", "hyperliquid", "mexc", "mexc_spot"} and isinstance(maker_result, dict):
                     cleanup_errors = await cleanup_active_makers()
                     final_fill = terminal_fill_quantity(maker_cancel_result)
                     if not cleanup_errors and final_fill is not None and final_fill > 0:
@@ -1051,7 +1109,7 @@ async def execute_single_clip_with_sides(
                 cancel_raw.get("status", "") if isinstance(cancel_raw, dict) else ""
             ).lower()
             baseline_available = extract_baseline_position(placed_result) is not None
-            if maker_venue in {"aster", "lighter", "hyperliquid", "mexc"}:
+            if maker_venue in {"aster", "lighter", "hyperliquid", "mexc", "mexc_spot"}:
                 final_fill = terminal_fill_quantity(cancel_result)
                 if final_fill is None:
                     await raise_after_maker_cleanup(RuntimeError(
@@ -1094,6 +1152,11 @@ async def execute_single_clip_with_sides(
             print(f"[reprice] cancel ok — placing new order (attempt {maker_attempt + 2})", flush=True)
             if maker_price_guard is None:
                 await asyncio.sleep(1.0)
+                if require_bounded_hedge and maker_price_refresher is not None:
+                    # The pre-cancel comparison quote may already be stale after
+                    # cancellation/reconciliation. Refresh both legs again now;
+                    # the entrypoint callback also refuses to widen the fixed cap.
+                    fresh_price = await maker_price_refresher()
             elif not isinstance(exc, MakerPriceRecheck) and maker_price_refresher is not None:
                 # A regular fill timeout may follow the maker book. A price-band
                 # breach instead clamps the actual submitted price to the nearest safe tick.
@@ -1213,6 +1276,7 @@ async def execute_single_clip_with_sides(
     elif require_maker_fill_confirmation or order_result_looks_filled(maker_result):
         mark_maker_closed(maker_result)
 
+    final_maker_response = None
     if verify_hedge_fill:
         # Even a broker FILLED message may describe only the first trade.
         # Resolve any remaining maker before reading its final position delta.
@@ -1229,11 +1293,12 @@ async def execute_single_clip_with_sides(
                 mark_maker_closed(maker_result)
             except BaseException as exc:
                 await raise_after_maker_cleanup(exc)
-        if maker_venue in {"aster", "lighter", "hyperliquid", "mexc"}:
+        if maker_venue in {"aster", "lighter", "hyperliquid", "mexc", "mexc_spot"}:
             final_fill = None
             for response in (maker_cancel_result, maker_fill_result, maker_result):
                 final_fill = terminal_fill_quantity(response)
                 if final_fill is not None:
+                    final_maker_response = response
                     break
             if final_fill is None:
                 query = getattr(maker_adapter, "get_order_execution", None)
@@ -1243,6 +1308,7 @@ async def execute_single_clip_with_sides(
                     lambda: query(order_result=maker_result, symbol=symbol),
                 )
                 final_fill = terminal_fill_quantity(final_status)
+                final_maker_response = final_status
             if final_fill is None or final_fill <= 0:
                 raise RuntimeError(f"FAIL-CLOSED invalid final maker fill: {final_fill}")
             # Use the order's terminal total, never a lagging partial position
@@ -1271,9 +1337,42 @@ async def execute_single_clip_with_sides(
         partial_fill = executed_quantity < requested_quantity
         print(f"[maker-reconcile] final {maker_venue} quantity={executed_quantity}", flush=True)
 
+    maker_final_average = extract_actual_average_price(final_maker_response)
     state_machine.to_hedging_taker_leg()
+    if require_bounded_hedge:
+        # A confirmed VWAP is preferred; a post-only order's submitted limit is
+        # a conservative fallback (BUY fills <= limit, SELL fills >= limit).
+        # Earlier partial-fill averages may cover fewer units than the final
+        # cancellation total. Never use them to relax the protection boundary.
+        maker_reference = maker_final_average or Decimal(str(resolved_maker_price))
+        hedge_limit_price = str(cap_hedge_to_maker(
+            hedge_limit_price, maker_price=maker_reference, maker_side=maker_side,
+        ))
     first_hedge_call_ns = None
     last_error: Exception | None = None
+    hedge_quote_summary: dict[str, object] | None = None
+
+    async def validate_fresh_hedge_quote(remaining: Decimal) -> dict | None:
+        """Refresh immediately before every IOC without changing its hard cap."""
+        nonlocal hedge_quote_summary
+        if hedge_quote_refresher is None:
+            return None
+        book = await hedge_quote_refresher()
+        age = validate_quote_age(
+            book, label="hedge", max_age_ms=max_quote_age_ms,
+        )
+        executable = executable_price(book, side=taker_side, quantity=remaining)
+        assert_hedge_limit_still_marketable(
+            executable, side=taker_side, limit_price=hedge_limit_price,
+        )
+        hedge_quote_summary = {
+            **age,
+            "executable_price": format(executable, "f"),
+            "quantity": format(remaining, "f"),
+            "immutable_limit_price": str(hedge_limit_price),
+        }
+        return hedge_quote_summary
+
     for attempt in range(max_hedge_retries + 1):
         try:
             hedge_clip_usd = clip_usd * float(executed_quantity / requested_quantity)
@@ -1295,30 +1394,59 @@ async def execute_single_clip_with_sides(
                     quantity=executed_quantity, clip_usd=hedge_clip_usd,
                     baseline=taker_position_baseline, reduce_only=taker_reduce_only,
                     max_attempts=max(3, max_hedge_retries + 1),
+                    limit_price=hedge_limit_price, market_type=taker_market_type,
+                    # The exchange-enforced IOC cap is authoritative after a
+                    # fill. Do not wait on a REST quote or reject a bounded
+                    # attempt just because cached liquidity disappeared.
+                    before_attempt=None if require_bounded_hedge else validate_fresh_hedge_quote,
                 )
             else:
                 hedge_result = await taker_adapter.place_market_order(**taker_kwargs)
                 if not isinstance(hedge_result, dict) or not hedge_result.get("ok", False):
                     raise RuntimeError(f"hedge order rejected: {hedge_result}")
             hedge_returned_ns = time.monotonic_ns()
+            first_hedge_call_ns = hedge_result.get("first_dispatch_ns", first_hedge_call_ns)
             execution_timing = {
                 "maker_confirmation_source": maker_confirmation_source,
                 "maker_observed_to_hedge_call_ms": (first_hedge_call_ns - maker_observed_ns) / 1_000_000,
                 "hedge_call_duration_ms": (hedge_returned_ns - first_hedge_call_ns) / 1_000_000,
             }
+            if hedge_result.get("first_submit_ns") is not None:
+                execution_timing["maker_observed_to_submit_ms"] = (
+                    hedge_result["first_submit_ns"] - maker_observed_ns
+                ) / 1_000_000
+            request_timing = hedge_result.get("request_timing")
+            if isinstance(request_timing, dict):
+                execution_timing["taker_requests"] = request_timing
             if verify_hedge_fill:
-                await confirm_pair_execution(
-                    maker_adapter, taker_adapter, symbol=symbol,
-                    maker_baseline=maker_position_baseline, taker_baseline=taker_position_baseline,
-                    maker_side=maker_side, quantity=executed_quantity,
-                )
-            maker_avg_price = (
+                try:
+                    await confirm_pair_execution(
+                        maker_adapter, taker_adapter, symbol=symbol,
+                        maker_baseline=maker_position_baseline, taker_baseline=taker_position_baseline,
+                        maker_side=maker_side, quantity=executed_quantity,
+                        maker_market_type=maker_market_type, taker_market_type=taker_market_type,
+                    )
+                except Exception as exc:
+                    # The IOC's terminal fill is stronger evidence than a
+                    # lagging aggregate position endpoint.  Preserve it so a
+                    # residual report never claims the whole hedge is missing
+                    # (and never encourages an unsafe duplicate hedge).
+                    proven = Decimal(str(hedge_result.get("filled_quantity", "0")))
+                    if not proven.is_finite() or proven < 0:
+                        proven = Decimal("0")
+                    raise HedgeFailure(
+                        "hedge fill confirmed but live pair position confirmation unresolved: "
+                        f"confirmed_hedge={proven} target={executed_quantity}; {exc}",
+                        confirmed=min(executed_quantity, proven), uncertain=True,
+                        attempts=list(hedge_result.get("attempts") or []),
+                    ) from exc
+            maker_avg_price = (maker_final_average if require_bounded_hedge else (
                 extract_average_price(maker_fill_result)
                 or extract_average_price(maker_result)
                 or (Decimal(str(resolved_maker_price)) if resolved_maker_price is not None else None)
-            )
+            ))
             taker_avg_price = extract_actual_average_price(hedge_result)
-            if taker_avg_price is None:
+            if taker_avg_price is None and not hedge_result.get("aggregate_fill"):
                 # Query AFTER dispatch, never before the urgent hedge. An ACK
                 # often has no fill price (Aster); keep N/A if status is missing.
                 query = getattr(taker_adapter, "get_order_execution", None)
@@ -1331,8 +1459,10 @@ async def execute_single_clip_with_sides(
                         pass
             execution_price_summary = {
                 "maker_avg_price_confirmed": (
+                    maker_final_average is not None if require_bounded_hedge else (
                     extract_actual_average_price(maker_fill_result) is not None
                     or extract_actual_average_price(maker_result) is not None
+                    )
                 ),
                 "maker_avg_price": format_decimal(maker_avg_price) if maker_avg_price is not None else None,
                 "taker_avg_price": format_decimal(taker_avg_price) if taker_avg_price is not None else None,
@@ -1342,6 +1472,19 @@ async def execute_single_clip_with_sides(
                     else None
                 ),
                 "pre_trade": pre_trade_price_summary,
+                "quote_age": quote_age_summary,
+                "hedge_quote": hedge_quote_summary,
+                "hedge_limit_price": str(hedge_limit_price) if hedge_limit_price is not None else None,
+                "planned_adverse_gap_bps": (
+                    format(adverse_price_gap(
+                        Decimal(str(resolved_maker_price)), Decimal(str(planned_hedge_price)), maker_side,
+                    ) * Decimal(10_000), "f")
+                    if resolved_maker_price is not None and planned_hedge_price is not None else None
+                ),
+                "realized_adverse_gap_bps": (
+                    format(adverse_price_gap(maker_avg_price, taker_avg_price, maker_side) * Decimal(10_000), "f")
+                    if maker_avg_price is not None and taker_avg_price is not None else None
+                ),
             }
             if executed_quantity > requested_quantity:
                 raise RuntimeError(
@@ -1370,8 +1513,32 @@ async def execute_single_clip_with_sides(
             last_error = exc
             if verify_hedge_fill or attempt >= max_hedge_retries:
                 state_machine.to_emergency_exit()
+                report_error = None
+                if residual_report_path is not None:
+                    confirmed = getattr(exc, "confirmed_quantity", Decimal("0"))
+                    try:
+                        append_residual_report(residual_report_path, {
+                            "symbol": symbol,
+                            "maker_venue": maker_venue,
+                            "taker_venue": taker_venue,
+                            "maker_side": maker_side,
+                            "taker_side": taker_side,
+                            "maker_filled_quantity": format(executed_quantity, "f"),
+                            "hedge_confirmed_quantity": format(Decimal(str(confirmed)), "f"),
+                            "hedge_remaining_quantity": format(
+                                max(Decimal("0"), executed_quantity - Decimal(str(confirmed))), "f"
+                            ),
+                            "hedge_limit_price": str(hedge_limit_price),
+                            "outcome_uncertain": bool(getattr(exc, "uncertain", True)),
+                            "error": str(exc),
+                        })
+                    except Exception as write_exc:
+                        report_error = str(write_exc)
                 await raise_after_maker_cleanup(
-                    RuntimeError(f"hedge failed on {taker_venue}: {exc}")
+                    RuntimeError(
+                        f"hedge failed on {taker_venue}: {exc}"
+                        + (f"; residual report write failed: {report_error}" if report_error else "")
+                    )
                 )
             state_machine.to_retrying_hedge()
             await asyncio.sleep(0)

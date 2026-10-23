@@ -19,7 +19,8 @@ from hydra_basis.execution_engine.order_service import (
 def _params(**over):
     base = dict(kind="perp_perp", symbol="BTC", short_venue="aster", long_venue="hyperliquid",
                 exec_mode="maker_taker", leverage=3, total_size=Decimal("0.5"),
-                clip_size=Decimal("0.1"), interval_ms=500, debounce_ms=300)
+                clip_size=Decimal("0.1"), interval_ms=500, debounce_ms=300,
+                max_hedge_slippage_bps=Decimal(20), max_quote_age_ms=Decimal(1000), max_maker_reprices=3)
     base.update(over)
     return OpenParams(**base)
 

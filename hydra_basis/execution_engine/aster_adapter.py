@@ -4,7 +4,7 @@ import threading
 from contextlib import asynccontextmanager
 import os
 import time
-from decimal import Decimal, ROUND_FLOOR
+from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR
 from urllib.parse import urlencode
 
 import aiohttp
@@ -18,6 +18,7 @@ from eth_account.messages import encode_typed_data
 from hydra_basis.execution_engine.order_fill import poll_until_filled
 from hydra_basis.execution_engine.order_stream import OrderEventStream, decode_aster_order
 from hydra_basis.execution_engine.hedge_safety import wait_for_terminal_order
+from hydra_basis.execution_engine.aster_depth_stream import AsterDepthStream
 
 ASTER_EXECUTION_SUFFIXES = ("USDT", "USDC", "USD")
 
@@ -107,6 +108,7 @@ class AsterExecutionAdapter:
         self._leveraged_symbols: set[str] = set()
         self._session: aiohttp.ClientSession | None = None
         self._fill_stream: OrderEventStream | None = None
+        self._hedge_depth: AsterDepthStream | None = None
 
     @asynccontextmanager
     async def _request_session(self):
@@ -115,6 +117,9 @@ class AsterExecutionAdapter:
         yield self._session
 
     async def close(self) -> None:
+        if self._hedge_depth is not None:
+            await self._hedge_depth.close()
+            self._hedge_depth = None
         if self._fill_stream is not None:
             await self._fill_stream.close()
             self._fill_stream = None
@@ -127,6 +132,28 @@ class AsterExecutionAdapter:
         await self.warm_up()
         await self.ensure_isolated_margin(symbol)
         await self.ensure_leverage(symbol)
+
+    async def prepare_hedge_quotes(self, symbol: str) -> None:
+        if self._hedge_depth is not None:
+            return
+        raw_symbol = await self._resolve_raw_symbol(symbol)
+        async def connect():
+            async with self._request_session() as session:
+                return await session.ws_connect(
+                    f"wss://fstream.asterdex.com/ws/{raw_symbol.lower()}@depth20@100ms", heartbeat=20)
+        stream = AsterDepthStream(connect=connect, symbol=raw_symbol)
+        await stream.start()
+        self._hedge_depth = stream
+
+    async def hedge_quote(self) -> dict:
+        if self._hedge_depth is None:
+            raise RuntimeError("Aster hedge depth not started")
+        return self._hedge_depth.snapshot()
+
+    async def wait_for_hedge_quote(self) -> None:
+        if self._hedge_depth is None:
+            raise RuntimeError("Aster hedge depth not started")
+        await self._hedge_depth.wait_for_update()
 
     async def _user_stream_request(self, method: str) -> dict:
         params = self.build_signed_params({})
@@ -566,14 +593,22 @@ class AsterExecutionAdapter:
         if limit_price is not None:
             # IOC limit: fills only at limit_price or better; the rest is cancelled.
             quantity = await self._format_quantity(symbol, amount, market=False)
+            tick = Decimal(await self.get_price_tick_size(symbol))
+            raw_limit = Decimal(str(limit_price))
+            rounding = ROUND_FLOOR if side.upper() == "BUY" else ROUND_CEILING
+            bounded_limit = (raw_limit / tick).to_integral_value(rounding=rounding) * tick
             await self.ensure_isolated_margin(symbol)
             await self.ensure_leverage(symbol)
+            submit_ns = time.monotonic_ns()
             data = await self._post_order({
                 "symbol": raw_symbol, "side": side.upper(), "type": "LIMIT", "timeInForce": "IOC",
-                "quantity": quantity, "price": limit_price,
+                "quantity": quantity, "price": format(bounded_limit.normalize(), "f"),
                 **({"reduceOnly": "true"} if reduce_only else {}),
             })
-            return {"ok": True, "order_id": data.get("orderId"), "raw": data}
+            return {"ok": True, "order_id": data.get("orderId"), "raw": data,
+                    "request_timing": {"order_submit_ms": (time.monotonic_ns() - submit_ns) / 1_000_000,
+                                       "order_submit_started_ns": submit_ns,
+                                       "post_order_status_ms": 0.0, "status_query_performed": False}}
         quantity = await self._format_quantity(symbol, amount, market=True)
         await self.ensure_isolated_margin(symbol)
         await self.ensure_leverage(symbol)

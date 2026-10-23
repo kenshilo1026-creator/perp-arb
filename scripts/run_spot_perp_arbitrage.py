@@ -28,10 +28,14 @@ from hydra_basis.execution_engine.market_data import (
     fetch_mexc_spot_orderbook,
     fetch_orderbook_snapshot,
 )
-from hydra_basis.execution_engine.maker_price_guard import MakerPriceGuard, adverse_price_gap
+from hydra_basis.execution_engine.maker_price_guard import MakerPriceGuard, create_maker_guard, adverse_price_gap
 from hydra_basis.execution_engine.mexc_spot_adapter import MexcSpotExecutionAdapter
 from hydra_basis.execution_engine.order_stream import format_stream_error
 from hydra_basis.execution_engine.order_service import Deps, progress_printer, run_batched_execution
+from hydra_basis.execution_engine.quote_safety import (
+    assert_hedge_limit_still_marketable, bounded_hedge_limit, executable_price,
+    validate_quote_pair_age,
+)
 from hydra_basis.execution_engine.risk import compute_spread_pct
 from hydra_basis.execution_engine.state_machine import ExecutionStateMachine
 from hydra_basis.execution_engine.variational_broker import VariationalCommandBrokerServer
@@ -41,7 +45,6 @@ from scripts.place_order import (
     MAKER_FILL_TIMEOUT_SECONDS,
     VARIATIONAL_MAKER_REPRICE_MIN_CHANGE_PCT,
     assert_variational_pair_balanced,
-    maker_reprice_attempts_for_venue,
     _executed_quantity_from_result,
     _registry_fallback_leg,
     build_adapter_for_venue,
@@ -336,6 +339,22 @@ def format_spot_perp_execution_summary(
         lines.append(f"實際不利成交價差（以 Maker 均價為分母）: {gap:.4%}")
         if gap > Decimal("0.002"):
             lines.append("警告：實際成交價差超過 0.20%；Maker 掛單保護不限制市價對沖的滑點")
+    planned_bps = summary.get("planned_adverse_gap_bps")
+    realized_bps = summary.get("realized_adverse_gap_bps")
+    if planned_bps not in (None, ""):
+        lines.append(f"計劃方向性不利價差: {Decimal(str(planned_bps)):.2f} bps")
+    if realized_bps not in (None, ""):
+        lines.append(f"實際方向性不利價差: {Decimal(str(realized_bps)):.2f} bps")
+    quote_age = summary.get("quote_age")
+    if isinstance(quote_age, dict):
+        lines.append(
+            "報價年齡: "
+            f"maker={Decimal(str(quote_age['maker_age_ms'])):.2f} ms；"
+            f"taker={Decimal(str(quote_age['taker_age_ms'])):.2f} ms；"
+            f"limit={Decimal(str(quote_age['max_age_ms'])):.2f} ms"
+        )
+    if summary.get("hedge_limit_price") not in (None, ""):
+        lines.append(f"對沖最差限價: {summary['hedge_limit_price']}")
     timing = result.get("execution_timing")
     if isinstance(timing, dict):
         lines.append(
@@ -344,6 +363,15 @@ def format_spot_perp_execution_summary(
             f"對沖呼叫至回傳 {timing['hedge_call_duration_ms']:.2f} ms"
             "（非兩所實際成交時間差）"
         )
+        requests = timing.get("taker_requests")
+        if timing.get("maker_observed_to_submit_ms") is not None:
+            lines.append(f"收到 Maker 成交 → 開始提交對沖: {timing['maker_observed_to_submit_ms']:.2f} ms")
+        if isinstance(requests, dict):
+            lines.append(
+                f"對沖請求拆解（各次累計）：送單至回覆 {requests['order_submit_ms']:.2f} ms；"
+                f"下單後狀態查詢 {requests['post_order_status_ms']:.2f} ms"
+                "（送單回覆不等於成交時刻）"
+            )
     return lines
 
 
@@ -437,6 +465,9 @@ async def execute_spot_perp_plan(
     broker_url: str | None = None,
     registry_path: Path = POSITION_REGISTRY_PATH,
     allow_large_price_gap: bool = False,
+    max_hedge_slippage_bps: Decimal | None = None,
+    max_quote_age_ms: Decimal | None = None,
+    max_maker_reprices: int | None = None,
 ) -> dict[str, object]:
     maker_adapter = build_spot_perp_adapter(
         plan.maker_venue,
@@ -452,6 +483,13 @@ async def execute_spot_perp_plan(
     )
     assert_maker_limit_supported(maker_adapter, plan.maker_venue)
     try:
+        if max_hedge_slippage_bps is None or max_quote_age_ms is None or max_maker_reprices is None:
+            raise RuntimeError(
+                "live spot-perp requires explicit max_hedge_slippage_bps, max_quote_age_ms, "
+                "and max_maker_reprices"
+            )
+        if max_hedge_slippage_bps < 0 or max_quote_age_ms <= 0 or max_maker_reprices < 0:
+            raise RuntimeError("invalid explicit hedge safety limits")
         # Do setup while both legs are still unfilled. In particular, an Aster
         # taker must not fetch metadata/set margin/leverage after a spot fill.
         for adapter in (maker_adapter, taker_adapter):
@@ -461,6 +499,9 @@ async def execute_spot_perp_plan(
                 await prepare(plan.symbol)
             elif callable(warm_up):
                 await warm_up()
+        prepare_bounded = getattr(taker_adapter, "prepare_bounded_hedge", None)
+        if callable(prepare_bounded):
+            await prepare_bounded(plan.symbol)
         prepare_stream = getattr(maker_adapter, "prepare_maker_fill_stream", None)
         if callable(prepare_stream):
             try:
@@ -469,18 +510,59 @@ async def execute_spot_perp_plan(
             except Exception as exc:
                 # Do not print exception text: websocket URLs contain listen keys.
                 print(f"[fill-stream] {plan.maker_venue}: {format_stream_error(exc)}; using REST fallback", flush=True)
-        fresh_maker_price = await refresh_spot_perp_maker_price(plan)
+        fresh_spot_book, fresh_perp_book = await fetch_plan_books(
+            symbol=plan.symbol, short_venue=plan.short_venue, clip_usd=plan.clip_usd,
+        )
+        fresh_maker_book = (
+            fresh_spot_book if plan.maker_venue == MEXC_SPOT_VENUE else fresh_perp_book
+        )
+        fresh_taker_book = (
+            fresh_spot_book if plan.taker_venue == MEXC_SPOT_VENUE else fresh_perp_book
+        )
+        fresh_maker_price = maker_limit_price(fresh_maker_book, plan.maker_side)
+        hedge_executable_price = executable_price(
+            fresh_taker_book, side=plan.taker_side, quantity=plan.quantity,
+        )
+        hedge_limit_price = bounded_hedge_limit(
+            hedge_executable_price,
+            side=plan.taker_side,
+            max_slippage_bps=max_hedge_slippage_bps,
+        )
+        print(
+            "hedge bound: "
+            f"executable={decimal_to_plain(hedge_executable_price)} "
+            f"limit={decimal_to_plain(hedge_limit_price)} "
+            f"slippage_bps={max_hedge_slippage_bps}",
+            flush=True,
+        )
         async def guard_books() -> tuple[dict, dict]:
             spot, perp = await fetch_plan_books(
                 symbol=plan.symbol, short_venue=plan.short_venue, clip_usd=plan.clip_usd,
             )
-            return perp, spot
+            return (spot, perp) if plan.maker_venue == MEXC_SPOT_VENUE else (perp, spot)
 
-        maker_guard = MakerPriceGuard(
-            fetch_books=guard_books,
-            tick_size=lambda: maker_adapter.get_price_tick_size(plan.symbol),
-            maker_side=plan.maker_side, taker_side=plan.taker_side,
-        ) if plan.maker_venue == "aster" else None
+        maker_guard = await create_maker_guard(
+            maker_adapter=maker_adapter, taker_adapter=taker_adapter, symbol=plan.symbol,
+            fetch_books=guard_books, maker_side=plan.maker_side, taker_side=plan.taker_side,
+            quantity=plan.quantity, hedge_limit_price=hedge_limit_price,
+            max_quote_age_ms=max_quote_age_ms,
+        )
+
+        async def refresh_bounded_maker_price() -> str:
+            spot, perp = await fetch_plan_books(
+                symbol=plan.symbol, short_venue=plan.short_venue, clip_usd=plan.clip_usd,
+            )
+            maker_book = spot if plan.maker_venue == MEXC_SPOT_VENUE else perp
+            taker_book = spot if plan.taker_venue == MEXC_SPOT_VENUE else perp
+            validate_quote_pair_age(maker_book, taker_book, max_age_ms=max_quote_age_ms)
+            refreshed_hedge = executable_price(
+                taker_book, side=plan.taker_side, quantity=plan.quantity,
+            )
+            assert_hedge_limit_still_marketable(
+                refreshed_hedge, side=plan.taker_side, limit_price=hedge_limit_price,
+            )
+            return maker_limit_price(maker_book, plan.maker_side)
+
         # For close mode, treating spot as the "short venue" makes the existing
         # side mapper emit spot SELL and perp BUY.
         side_short_venue = plan.short_venue if plan.mode == "open" else MEXC_SPOT_VENUE
@@ -498,18 +580,18 @@ async def execute_spot_perp_plan(
             max_hedge_retries=2,
             state_machine=ExecutionStateMachine(),
             maker_price=fresh_maker_price,
-            maker_orderbook=plan.maker_orderbook,
-            taker_orderbook=plan.taker_orderbook,
+            maker_orderbook=fresh_maker_book,
+            taker_orderbook=fresh_taker_book,
             require_maker_fill_confirmation=True,
             maker_fill_timeout_seconds=MAKER_FILL_TIMEOUT_SECONDS,
             maker_fill_poll_interval_seconds=0.2,
-            max_maker_reprice_attempts=maker_reprice_attempts_for_venue(plan.maker_venue),
+            max_maker_reprice_attempts=max_maker_reprices,
             maker_reprice_min_change_pct=(
                 VARIATIONAL_MAKER_REPRICE_MIN_CHANGE_PCT
                 if plan.maker_venue == "variational"
                 else 0.0
             ),
-            maker_price_refresher=lambda: refresh_spot_perp_maker_price(plan),
+            maker_price_refresher=refresh_bounded_maker_price,
             maker_price_guard=maker_guard,
             max_execution_price_gap_pct=(
                 plan.maker_taker_price_gap_pct
@@ -517,6 +599,16 @@ async def execute_spot_perp_plan(
                 else float(SPOT_PERP_MAX_PRE_TRADE_PRICE_GAP)
             ),
             min_hedge_notional_usd=float(SPOT_PERP_MIN_HEDGE_NOTIONAL_USD),
+            maker_reduce_only=plan.mode == "close" and plan.maker_venue != MEXC_SPOT_VENUE,
+            taker_reduce_only=plan.mode == "close" and plan.taker_venue != MEXC_SPOT_VENUE,
+            verify_hedge_fill=True,
+            require_bounded_hedge=True,
+            hedge_limit_price=decimal_to_plain(hedge_limit_price),
+            planned_hedge_price=decimal_to_plain(hedge_executable_price),
+            max_quote_age_ms=float(max_quote_age_ms),
+            maker_market_type="spot" if plan.maker_venue == MEXC_SPOT_VENUE else "perp",
+            taker_market_type="spot" if plan.taker_venue == MEXC_SPOT_VENUE else "perp",
+            residual_report_path=Path("data/hedge_residuals.jsonl"),
         )
         if plan.mode != "open" or not result.get("ok", False):
             return result
@@ -584,6 +676,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--variational-broker-host", default=VARIATIONAL_BROKER_HOST)
     parser.add_argument("--variational-broker-port", type=int, default=VARIATIONAL_BROKER_PORT)
     parser.add_argument("--variational-extension-timeout", type=float, default=VARIATIONAL_EXTENSION_TIMEOUT_SECONDS)
+    parser.add_argument("--max-hedge-slippage-bps", type=Decimal, default=None,
+                        help="required with --live; explicit worst-price allowance in basis points")
+    parser.add_argument("--max-quote-age-ms", type=Decimal, default=None,
+                        help="required with --live; maximum local monotonic quote age")
+    parser.add_argument("--max-maker-reprices", type=int, default=None,
+                        help="required with --live; finite cancel/reprice attempts")
     parser.add_argument("--live", action="store_true")
     return parser.parse_args()
 
@@ -655,6 +753,19 @@ async def run_spot_perp_arbitrage() -> None:
         print("dry-run only. Add --live to place real orders.")
         return
 
+    safety_limits = (
+        getattr(args, "max_hedge_slippage_bps", None),
+        getattr(args, "max_quote_age_ms", None),
+        getattr(args, "max_maker_reprices", None),
+    )
+    if any(value is None for value in safety_limits):
+        raise RuntimeError(
+            "--live requires --max-hedge-slippage-bps, --max-quote-age-ms, "
+            "and --max-maker-reprices"
+        )
+    if safety_limits[0] < 0 or safety_limits[1] <= 0 or safety_limits[2] < 0:
+        raise RuntimeError("invalid explicit hedge safety limits")
+
     print(f"Type exactly {LIVE_CONFIRMATION_PHRASE!r} to continue:")
     if input("> ") != LIVE_CONFIRMATION_PHRASE:
         print("cancelled")
@@ -698,6 +809,9 @@ async def run_spot_perp_arbitrage() -> None:
                 leverage=leverage,
                 broker_url=broker_url,
                 allow_large_price_gap=allow_large_price_gap,
+                max_hedge_slippage_bps=safety_limits[0],
+                max_quote_age_ms=safety_limits[1],
+                max_maker_reprices=safety_limits[2],
             )
             for line in format_spot_perp_execution_summary(plan=batch_plan, result=result):
                 print(line)

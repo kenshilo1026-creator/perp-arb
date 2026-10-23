@@ -221,29 +221,34 @@ class GuardExecutionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(adapter._post_order.call_args.args[0]["reduceOnly"], "true")
 
     async def test_spot_perp_open_allows_favourable_gap_and_close_caps_adverse_gap(self):
+        from hydra_basis.execution_engine.quote_safety import stamp_quote
         for mode, spot, perp, expected in (
             ("open", {"bid": 0.0999, "ask": 0.1}, {"bid": 1.09, "ask": 1.1}, "1.1000"),
             ("close", {"bid": 0.2262, "ask": 0.2263}, {"bid": 0.2276, "ask": 0.228}, "0.2266"),
         ):
             with self.subTest(mode=mode):
+                def depth(b):
+                    return stamp_quote({**b, "bids": [(b["bid"], 1000)], "asks": [(b["ask"], 1000)]})
+                spot, perp = depth(spot), depth(perp)
                 plan = build_spot_perp_plan(symbol="TOKEN", mode=mode, short_venue="aster",
-                    quantity=D("100"), clip_usd=100, spot_book=spot, perp_book=perp)
-                maker = SimpleNamespace(
-                    get_price_tick_size=AsyncMock(return_value="0.0001"),
-                    place_limit_order=AsyncMock(return_value={"ok": True, "raw": {
-                        "status": "FILLED", "executedQty": "100"}}),
-                )
-                taker = SimpleNamespace(place_market_order=AsyncMock(return_value={"ok": True}))
+                    quantity=D(100), clip_usd=100, spot_book=spot, perp_book=perp)
+                maker = SimpleNamespace(get_price_tick_size=AsyncMock(return_value="0.0001"),
+                                        place_limit_order=AsyncMock())
+                async def execute(**kwargs):
+                    guard = kwargs["maker_price_guard"]
+                    self.assertEqual(guard.quantity, D(100))
+                    self.assertEqual(D(await guard.prepare(kwargs["maker_price"])), D(expected))
+                    self.assertTrue(kwargs["require_bounded_hedge"])
+                    return {"ok": True}
                 with patch("scripts.run_spot_perp_arbitrage.build_spot_perp_adapter",
-                           side_effect=lambda venue, **kw: maker if venue == "aster" else taker), \
-                     patch("scripts.run_spot_perp_arbitrage.fetch_plan_books", new=AsyncMock(return_value=(spot, perp))), \
-                     patch("scripts.run_spot_perp_arbitrage.fetch_required_live_position", new=AsyncMock(return_value={})), \
-                     patch("scripts.run_spot_perp_arbitrage.record_successful_live_legs", return_value="test"):
-                    result = await execute_spot_perp_plan(plan=plan, leverage=1)
+                           side_effect=[maker, SimpleNamespace()]), patch(
+                           "scripts.run_spot_perp_arbitrage.fetch_plan_books", new=AsyncMock(return_value=(spot, perp))), patch(
+                           "scripts.run_spot_perp_arbitrage.execute_single_clip", new=execute), patch(
+                           "scripts.run_spot_perp_arbitrage.fetch_required_live_position", new=AsyncMock(return_value={})), patch(
+                           "scripts.run_spot_perp_arbitrage.record_successful_live_legs", return_value="test"):
+                    result = await execute_spot_perp_plan(plan=plan, leverage=1,
+                        max_hedge_slippage_bps=20, max_quote_age_ms=1000, max_maker_reprices=3)
                 self.assertTrue(result["ok"])
-                self.assertEqual(D(maker.place_limit_order.call_args.kwargs["price"]), D(expected))
-                self.assertTrue(maker.place_limit_order.call_args.kwargs["post_only"])
-                self.assertEqual(taker.place_market_order.call_args.kwargs["side"], plan.taker_side)
 
 
 if __name__ == "__main__":

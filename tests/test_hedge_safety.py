@@ -46,7 +46,7 @@ class HedgeSafetyTests(unittest.IsolatedAsyncioTestCase):
 
     async def hedge(self, adapter, **kwargs):
         return await execute_confirmed_market_order(
-            adapter, symbol="TEST", side="BUY", quantity=Decimal("10000"),
+            adapter, limit_price="1", symbol="TEST", side="BUY", quantity=Decimal("10000"),
             clip_usd=1000, baseline=Decimal("0"), poll_delay=0,
             confirmation_attempts=3, **kwargs,
         )
@@ -128,7 +128,7 @@ class HedgeSafetyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(adapter.place_market_order.await_count, 2)
 
     async def execute_pair(self, maker, taker, **kwargs):
-        return await execute_single_clip_with_sides(
+        return await execute_single_clip_with_sides(hedge_limit_price="1",
             symbol="TEST", clip_usd=1000, quantity=Decimal("10000"),
             maker_venue="variational", taker_venue="hyperliquid",
             maker_side="SELL", taker_side="BUY", maker_adapter=maker,
@@ -205,14 +205,13 @@ class HedgeSafetyTests(unittest.IsolatedAsyncioTestCase):
             return {"ok": True, "status": "cancelled"}
 
         maker.cancel_order = AsyncMock(side_effect=cancel)
-        result = await execute_close_position_plan(
-            plan=ClosePositionPlan(
-                symbol="2Z", quantity=Decimal("10000"), maker_venue="variational",
-                taker_venue="hyperliquid", maker_price="0.1", clip_usd=1000,
-                side_by_venue={"variational": "BUY", "hyperliquid": "SELL"}, spread_by_venue={},
-            ),
-            adapters={"variational": maker, "hyperliquid": taker},
-            symbol="2Z", venues=["variational", "hyperliquid"],
+        result = await execute_single_clip_with_sides(
+            symbol="2Z", quantity=Decimal("10000"), clip_usd=1000,
+            maker_venue="variational", taker_venue="hyperliquid",
+            maker_side="BUY", taker_side="SELL", maker_adapter=maker, taker_adapter=taker,
+            maker_price="0.1", state_machine=ExecutionStateMachine(), max_hedge_retries=0,
+            require_maker_fill_confirmation=True, verify_hedge_fill=True,
+            hedge_limit_price="0.0998", maker_reduce_only=True, taker_reduce_only=True,
         )
         self.assertTrue(result["hedge_verified"])
         self.assertEqual(maker.quantity, -20000)
@@ -376,7 +375,7 @@ class HedgeSafetyTests(unittest.IsolatedAsyncioTestCase):
             return {"ok": True, "terminal": False, "filled": True, "status": "FILLED"}
 
         taker.place_market_order = place_market
-        result = await execute_single_clip_with_sides(
+        result = await execute_single_clip_with_sides(hedge_limit_price="1",
             symbol="TEST", clip_usd=1000, quantity=Decimal("10000"),
             maker_venue="hyperliquid", taker_venue="variational",
             maker_side="SELL", taker_side="BUY", maker_adapter=maker,

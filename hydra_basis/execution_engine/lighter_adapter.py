@@ -4,7 +4,7 @@ import asyncio
 import inspect
 import os
 import time
-from decimal import Decimal, ROUND_FLOOR
+from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR
 
 import aiohttp
 
@@ -69,7 +69,12 @@ def build_lighter_market_order_request(
     base_amount = int(
         (quantity * Decimal(str(base_amount_multiplier))).to_integral_value(rounding=ROUND_FLOOR)
     )
-    price_i = int((price * Decimal(str(price_multiplier))).to_integral_value(rounding=ROUND_FLOOR))
+    # The caller's price is a hard worst-price bound.  BUY may round down and
+    # SELL may round up; the opposite direction would silently loosen the cap.
+    price_rounding = ROUND_FLOOR if side_normalized == "buy" else ROUND_CEILING
+    price_i = int(
+        (price * Decimal(str(price_multiplier))).to_integral_value(rounding=price_rounding)
+    )
     if base_amount <= 0:
         raise RuntimeError("lighter base amount rounds to zero")
 
@@ -113,7 +118,10 @@ def build_lighter_limit_order_request(
     base_amount = int(
         (quantity * Decimal(str(base_amount_multiplier))).to_integral_value(rounding=ROUND_FLOOR)
     )
-    price_i = int((price * Decimal(str(price_multiplier))).to_integral_value(rounding=ROUND_FLOOR))
+    price_rounding = ROUND_FLOOR if side_normalized == "buy" else ROUND_CEILING
+    price_i = int(
+        (price * Decimal(str(price_multiplier))).to_integral_value(rounding=price_rounding)
+    )
     if base_amount <= 0:
         raise RuntimeError("lighter base amount rounds to zero")
     if price_i <= 0:

@@ -6,6 +6,7 @@ import math
 import time
 from dataclasses import dataclass
 from decimal import Decimal
+from pathlib import Path
 
 try:
     from _bootstrap import ensure_project_root_on_path
@@ -19,7 +20,7 @@ from hydra_basis.execution_engine.aster_adapter import AsterExecutionAdapter
 import aiohttp
 
 from hydra_basis.execution_engine.executor import execute_single_clip, execute_single_clip_with_sides, passive_limit_price_from_orderbook, execution_sides_for_signal
-from hydra_basis.execution_engine.maker_price_guard import MakerPriceGuard
+from hydra_basis.execution_engine.maker_price_guard import MakerPriceGuard, create_maker_guard
 from hydra_basis.execution_engine.order_service import Deps, progress_printer, run_batched_execution
 from hydra_basis.execution_engine.order_fill import extract_filled_quantity
 from hydra_basis.execution_engine.market_data import fetch_orderbook_snapshot
@@ -42,6 +43,10 @@ from hydra_basis.risk_management.models import PositionLeg, close_side_for_posit
 from hydra_basis.risk_management.recording import record_successful_live_legs
 from hydra_basis.config import EXECUTION_VENUES_PATH, MONITOR_SIGNALS_PATH, POSITION_REGISTRY_PATH
 from hydra_basis.execution_engine.signal_store import load_best_signal_for_symbol
+from hydra_basis.execution_engine.quote_safety import (
+    assert_hedge_limit_still_marketable, bounded_hedge_limit, executable_price,
+    validate_quote_pair_age,
+)
 
 load_environment()
 
@@ -218,6 +223,31 @@ def print_execution_prices(result: dict, *, maker_venue: str, taker_venue: str) 
     print(f"市價方成交({taker_venue}): {taker_price}")
     if gap:
         print(f"成交價差: {float(gap):.2%}")
+    planned_bps = summary.get("planned_adverse_gap_bps")
+    realized_bps = summary.get("realized_adverse_gap_bps")
+    if planned_bps not in (None, ""):
+        print(f"計劃方向性不利價差: {Decimal(str(planned_bps)):.2f} bps")
+    if realized_bps not in (None, ""):
+        print(f"實際方向性不利價差: {Decimal(str(realized_bps)):.2f} bps")
+    quote_age = summary.get("quote_age")
+    if isinstance(quote_age, dict):
+        print(
+            "報價年齡: "
+            f"maker={Decimal(str(quote_age['maker_age_ms'])):.2f} ms "
+            f"taker={Decimal(str(quote_age['taker_age_ms'])):.2f} ms "
+            f"limit={Decimal(str(quote_age['max_age_ms'])):.2f} ms"
+        )
+    if summary.get("hedge_limit_price") not in (None, ""):
+        print(f"對沖最差限價: {summary['hedge_limit_price']}")
+    timing = result.get("execution_timing")
+    if isinstance(timing, dict):
+        print(
+            "對沖延遲: "
+            f"maker觀察至送單={timing['maker_observed_to_hedge_call_ms']:.2f} ms "
+            f"送單呼叫={timing['hedge_call_duration_ms']:.2f} ms"
+        )
+        if timing.get("maker_observed_to_submit_ms") is not None:
+            print(f"收到 Maker 成交 → 開始提交對沖: {timing['maker_observed_to_submit_ms']:.2f} ms")
 
 
 def normalize_execution_mode(value: str) -> str:
@@ -453,11 +483,61 @@ async def execute_close_position_plan(
     adapters: dict[str, object],
     symbol: str,
     venues: list[str],
+    max_hedge_slippage_bps: Decimal | None = None,
+    max_quote_age_ms: Decimal | None = None,
+    max_maker_reprices: int | None = None,
 ) -> dict[str, object]:
+    if max_hedge_slippage_bps is None or max_quote_age_ms is None or max_maker_reprices is None:
+        raise RuntimeError(
+            "live close requires explicit max_hedge_slippage_bps, max_quote_age_ms, "
+            "and max_maker_reprices"
+        )
+    if max_hedge_slippage_bps < 0 or max_quote_age_ms <= 0 or max_maker_reprices < 0:
+        raise RuntimeError("invalid explicit hedge safety limits")
+    for adapter in adapters.values():
+        prepare = getattr(adapter, "prepare_execution", None)
+        warm_up = getattr(adapter, "warm_up", None)
+        if callable(prepare):
+            await prepare(symbol)
+        elif callable(warm_up):
+            await warm_up()
+    prepare_bounded = getattr(adapters[plan.taker_venue], "prepare_bounded_hedge", None)
+    if callable(prepare_bounded):
+        await prepare_bounded(symbol)
     maker_side = plan.side_by_venue[plan.maker_venue]
+    taker_side = plan.side_by_venue[plan.taker_venue]
+    fresh_books = await fetch_close_orderbooks(
+        symbol=symbol, venues=venues, clip_usd=plan.clip_usd,
+    )
+    fresh_maker_book = fresh_books[plan.maker_venue]
+    fresh_taker_book = fresh_books[plan.taker_venue]
+    hedge_executable_price = executable_price(
+        fresh_taker_book, side=taker_side, quantity=plan.quantity,
+    )
+    hedge_limit_price = bounded_hedge_limit(
+        hedge_executable_price, side=taker_side,
+        max_slippage_bps=max_hedge_slippage_bps,
+    )
+    print(
+        "hedge bound: "
+        f"executable={format(hedge_executable_price, 'f')} "
+        f"limit={format(hedge_limit_price, 'f')} "
+        f"slippage_bps={max_hedge_slippage_bps}",
+        flush=True,
+    )
 
     async def _refresh_close_maker_price() -> str:
         fresh_books = await fetch_close_orderbooks(symbol=symbol, venues=venues, clip_usd=plan.clip_usd)
+        validate_quote_pair_age(
+            fresh_books[plan.maker_venue], fresh_books[plan.taker_venue],
+            max_age_ms=max_quote_age_ms,
+        )
+        refreshed_hedge = executable_price(
+            fresh_books[plan.taker_venue], side=taker_side, quantity=plan.quantity,
+        )
+        assert_hedge_limit_still_marketable(
+            refreshed_hedge, side=taker_side, limit_price=hedge_limit_price,
+        )
         return passive_limit_price_from_orderbook(fresh_books[plan.maker_venue], maker_side)
 
     async def _refresh_variational_maker_price() -> str:
@@ -472,19 +552,19 @@ async def execute_close_position_plan(
         initial_maker_price = await _refresh_variational_maker_price()
     else:
         close_price_refresher = _refresh_close_maker_price
-        initial_maker_price = plan.maker_price
+        initial_maker_price = passive_limit_price_from_orderbook(fresh_maker_book, maker_side)
 
-    taker_side = plan.side_by_venue[plan.taker_venue]
     taker_adapter = adapters[plan.taker_venue]
     async def guard_books() -> tuple[dict, dict]:
         books = await fetch_close_orderbooks(symbol=symbol, venues=venues, clip_usd=plan.clip_usd)
         return books[plan.maker_venue], books[plan.taker_venue]
 
-    maker_guard = MakerPriceGuard(
-        fetch_books=guard_books,
-        tick_size=lambda: adapters[plan.maker_venue].get_price_tick_size(symbol),
-        maker_side=maker_side, taker_side=taker_side,
-    ) if plan.maker_venue == "aster" else None
+    maker_guard = await create_maker_guard(
+        maker_adapter=adapters[plan.maker_venue], taker_adapter=taker_adapter, symbol=symbol,
+        fetch_books=guard_books, maker_side=maker_side, taker_side=taker_side,
+        quantity=plan.quantity, hedge_limit_price=hedge_limit_price,
+        max_quote_age_ms=max_quote_age_ms,
+    )
     taker_pre_hook = None
     prepare_fn = getattr(taker_adapter, "prepare_market_order", None)
     if plan.taker_venue == "variational" and callable(prepare_fn):
@@ -511,9 +591,11 @@ async def execute_close_position_plan(
         max_hedge_retries=0,
         state_machine=ExecutionStateMachine(),
         maker_price=initial_maker_price,
+        maker_orderbook=fresh_maker_book,
+        taker_orderbook=fresh_taker_book,
         require_maker_fill_confirmation=True,
         maker_fill_timeout_seconds=MAKER_FILL_TIMEOUT_SECONDS,
-        max_maker_reprice_attempts=maker_reprice_attempts_for_venue(plan.maker_venue),
+        max_maker_reprice_attempts=max_maker_reprices,
         maker_reprice_min_change_pct=(
             VARIATIONAL_MAKER_REPRICE_MIN_CHANGE_PCT
             if plan.maker_venue == "variational"
@@ -525,6 +607,11 @@ async def execute_close_position_plan(
         maker_reduce_only=True,
         taker_reduce_only=True,
         verify_hedge_fill=True,
+        require_bounded_hedge=True,
+        hedge_limit_price=format(hedge_limit_price, "f"),
+        planned_hedge_price=format(hedge_executable_price, "f"),
+        max_quote_age_ms=float(max_quote_age_ms),
+        residual_report_path=Path("data/hedge_residuals.jsonl"),
     )
 
 
@@ -592,6 +679,9 @@ async def execute_open_clip(
     clip_usd: float,
     batch_clip_size: Decimal,
     broker_url: str | None = None,
+    max_hedge_slippage_bps: Decimal | None = None,
+    max_quote_age_ms: Decimal | None = None,
+    max_maker_reprices: int | None = None,
 ) -> dict[str, object]:
     """Execute one maker+taker open clip. Module-level so both the CLI and the
     web UI can drive it; the body is the former ``execute_one_batch`` closure with
@@ -600,9 +690,23 @@ async def execute_open_clip(
     maker_adapter = build_adapter_for_venue(maker_venue, leverage=leverage, broker_url=broker_url)
     taker_adapter = build_adapter_for_venue(taker_venue, leverage=leverage, broker_url=broker_url)
     try:
-        warm_up = getattr(taker_adapter, "warm_up", None)
-        if callable(warm_up):
-            await warm_up()
+        if max_hedge_slippage_bps is None or max_quote_age_ms is None or max_maker_reprices is None:
+            raise RuntimeError(
+                "live open requires explicit max_hedge_slippage_bps, max_quote_age_ms, "
+                "and max_maker_reprices"
+            )
+        if max_hedge_slippage_bps < 0 or max_quote_age_ms <= 0 or max_maker_reprices < 0:
+            raise RuntimeError("invalid explicit hedge safety limits")
+        for adapter in (maker_adapter, taker_adapter):
+            prepare = getattr(adapter, "prepare_execution", None)
+            warm_up = getattr(adapter, "warm_up", None)
+            if callable(prepare):
+                await prepare(symbol)
+            elif callable(warm_up):
+                await warm_up()
+        prepare_bounded = getattr(taker_adapter, "prepare_bounded_hedge", None)
+        if callable(prepare_bounded):
+            await prepare_bounded(symbol)
         async with aiohttp.ClientSession(headers={"User-Agent": "funding-arb-execution-open/0.1"}) as _sess:
             _fresh = await asyncio.gather(
                 fetch_orderbook_snapshot(_sess, venue=maker_venue, symbol=symbol, clip_usd=batch_clip_usd),
@@ -620,23 +724,51 @@ async def execute_open_clip(
             short_venue=short_venue,
             long_venue=long_venue,
         )
+        hedge_executable_price = executable_price(
+            taker_book, side=taker_side, quantity=batch_clip_size,
+        )
+        hedge_limit_price = bounded_hedge_limit(
+            hedge_executable_price,
+            side=taker_side,
+            max_slippage_bps=max_hedge_slippage_bps,
+        )
+        print(
+            "hedge bound: "
+            f"executable={format(hedge_executable_price, 'f')} "
+            f"limit={format(hedge_limit_price, 'f')} "
+            f"slippage_bps={max_hedge_slippage_bps}",
+            flush=True,
+        )
         async def guard_books() -> tuple[dict, dict]:
             books = await fetch_close_orderbooks(
                 symbol=symbol, venues=[maker_venue, taker_venue], clip_usd=batch_clip_usd,
             )
             return books[maker_venue], books[taker_venue]
 
-        maker_guard = MakerPriceGuard(
-            fetch_books=guard_books,
-            tick_size=lambda: maker_adapter.get_price_tick_size(symbol),
-            maker_side=maker_side, taker_side=taker_side,
-        ) if maker_venue == "aster" else None
-        use_maker_orderbook = None if maker_venue == "variational" else maker_book
+        maker_guard = await create_maker_guard(
+            maker_adapter=maker_adapter, taker_adapter=taker_adapter, symbol=symbol,
+            fetch_books=guard_books, maker_side=maker_side, taker_side=taker_side,
+            quantity=batch_clip_size, hedge_limit_price=hedge_limit_price,
+            max_quote_age_ms=max_quote_age_ms,
+        )
+        use_maker_orderbook = maker_book
 
         async def _refresh_open_maker_price() -> str:
             async with aiohttp.ClientSession(headers={"User-Agent": "funding-arb-execution-open/0.1"}) as _s:
-                fresh_book = await fetch_orderbook_snapshot(_s, venue=maker_venue, symbol=symbol, clip_usd=batch_clip_usd)
-            return passive_limit_price_from_orderbook(fresh_book, maker_side)
+                fresh_maker_book, fresh_taker_book = await asyncio.gather(
+                    fetch_orderbook_snapshot(_s, venue=maker_venue, symbol=symbol, clip_usd=batch_clip_usd),
+                    fetch_orderbook_snapshot(_s, venue=taker_venue, symbol=symbol, clip_usd=batch_clip_usd),
+                )
+            validate_quote_pair_age(
+                fresh_maker_book, fresh_taker_book, max_age_ms=max_quote_age_ms,
+            )
+            refreshed_hedge = executable_price(
+                fresh_taker_book, side=taker_side, quantity=batch_clip_size,
+            )
+            assert_hedge_limit_still_marketable(
+                refreshed_hedge, side=taker_side, limit_price=hedge_limit_price,
+            )
+            return passive_limit_price_from_orderbook(fresh_maker_book, maker_side)
 
         async def _refresh_variational_open_maker_price() -> str:
             return await maker_adapter.get_limit_price_preview(symbol=symbol)
@@ -673,13 +805,18 @@ async def execute_open_clip(
             # deltas so an acknowledged-but-unfilled hedge or a maker cancel
             # race cannot silently carry an imbalance into the next batch.
             verify_hedge_fill=True,
+            require_bounded_hedge=True,
+            hedge_limit_price=format(hedge_limit_price, "f"),
+            planned_hedge_price=format(hedge_executable_price, "f"),
+            max_quote_age_ms=float(max_quote_age_ms),
+            residual_report_path=Path("data/hedge_residuals.jsonl"),
             state_machine=ExecutionStateMachine(),
             maker_price=initial_maker_price,
             maker_orderbook=use_maker_orderbook,
             taker_orderbook=taker_book,
             require_maker_fill_confirmation=True,
             maker_fill_timeout_seconds=MAKER_FILL_TIMEOUT_SECONDS,
-            max_maker_reprice_attempts=maker_reprice_attempts_for_venue(maker_venue),
+            max_maker_reprice_attempts=max_maker_reprices,
             maker_reprice_min_change_pct=(
                 VARIATIONAL_MAKER_REPRICE_MIN_CHANGE_PCT
                 if maker_venue == "variational"
@@ -690,6 +827,7 @@ async def execute_open_clip(
             taker_pre_hook=taker_pre_hook,
             max_execution_price_gap_pct=float("inf") if gap_overridden else MAX_PRE_TRADE_PRICE_GAP,
         )
+        print_execution_prices(result, maker_venue=maker_venue, taker_venue=taker_venue)
         if result.get("ok", False):
             strategy_id = await record_open_execution_from_live_positions(
                 execution_result=result,
@@ -717,6 +855,9 @@ async def run_open_execution_once(
     cli_long_venue: str | None = None,
     cli_maker_venue: str | None = None,
     cli_taker_venue: str | None = None,
+    max_hedge_slippage_bps: Decimal | None = None,
+    max_quote_age_ms: Decimal | None = None,
+    max_maker_reprices: int | None = None,
 ) -> None:
     symbol = cli_ticker.upper() if cli_ticker else prompt_text("ticker").upper()
     total_size = prompt_decimal("total_size_token")
@@ -801,6 +942,9 @@ async def run_open_execution_once(
             clip_usd=clip_usd,
             batch_clip_size=batch_clip_size,
             broker_url=broker_url,
+            max_hedge_slippage_bps=max_hedge_slippage_bps,
+            max_quote_age_ms=max_quote_age_ms,
+            max_maker_reprices=max_maker_reprices,
         )
 
     async def run_batches(*, broker_url: str | None = None) -> dict:
@@ -855,7 +999,12 @@ async def run_open_execution_once(
         raise RuntimeError(_open_result.get("error", "open execution failed"))
 
 
-async def run_close_execution_once(*, cli_ticker: str | None = None) -> None:
+async def run_close_execution_once(
+    *, cli_ticker: str | None = None,
+    max_hedge_slippage_bps: Decimal | None = None,
+    max_quote_age_ms: Decimal | None = None,
+    max_maker_reprices: int | None = None,
+) -> None:
     symbol = cli_ticker.upper() if cli_ticker else prompt_text("ticker").upper()
 
     async with VariationalCommandBrokerServer(
@@ -965,10 +1114,21 @@ async def run_close_execution_once(*, cli_ticker: str | None = None) -> None:
             }
             try:
                 for adapter in exec_adapters.values():
+                    prepare = getattr(adapter, "prepare_execution", None)
                     warm_up = getattr(adapter, "warm_up", None)
-                    if callable(warm_up):
+                    if callable(prepare):
+                        await prepare(symbol)
+                    elif callable(warm_up):
                         await warm_up()
-                result = await execute_close_position_plan(plan=plan, adapters=exec_adapters, symbol=symbol, venues=venues)
+                prepare_bounded = getattr(exec_adapters[plan.taker_venue], "prepare_bounded_hedge", None)
+                if callable(prepare_bounded):
+                    await prepare_bounded(symbol)
+                result = await execute_close_position_plan(
+                    plan=plan, adapters=exec_adapters, symbol=symbol, venues=venues,
+                    max_hedge_slippage_bps=max_hedge_slippage_bps,
+                    max_quote_age_ms=max_quote_age_ms,
+                    max_maker_reprices=max_maker_reprices,
+                )
             finally:
                 for adapter in exec_adapters.values():
                     await close_adapter_if_supported(adapter)
@@ -998,12 +1158,30 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--long_venue", type=str, default=None, help="venue to go long on")
     parser.add_argument("--maker_venue", type=str, default=None, help="force this venue as maker (limit order)")
     parser.add_argument("--taker_venue", type=str, default=None, help="force this venue as taker (market order)")
+    parser.add_argument("--max-hedge-slippage-bps", type=Decimal, default=None,
+                        help="required for live execution; explicit worst-price allowance in basis points")
+    parser.add_argument("--max-quote-age-ms", type=Decimal, default=None,
+                        help="required for live execution; maximum local monotonic quote age")
+    parser.add_argument("--max-maker-reprices", type=int, default=None,
+                        help="required for live execution; finite cancel/reprice attempts")
     return parser.parse_args()
 
 
 async def run_place_order(args: argparse.Namespace) -> None:
     mode_value = getattr(args, "mode", None) or prompt_text("mode [open/close/開倉/平倉]")
     mode = normalize_execution_mode(mode_value)
+    limits = (
+        getattr(args, "max_hedge_slippage_bps", None),
+        getattr(args, "max_quote_age_ms", None),
+        getattr(args, "max_maker_reprices", None),
+    )
+    if any(value is None for value in limits):
+        raise RuntimeError(
+            "live execution requires --max-hedge-slippage-bps, --max-quote-age-ms, "
+            "and --max-maker-reprices"
+        )
+    if limits[0] < 0 or limits[1] <= 0 or limits[2] < 0:
+        raise RuntimeError("invalid explicit hedge safety limits")
     if mode == "open":
         await run_open_execution_once(
             cli_ticker=args.ticker,
@@ -1011,9 +1189,17 @@ async def run_place_order(args: argparse.Namespace) -> None:
             cli_long_venue=args.long_venue,
             cli_maker_venue=args.maker_venue,
             cli_taker_venue=args.taker_venue,
+            max_hedge_slippage_bps=limits[0],
+            max_quote_age_ms=limits[1],
+            max_maker_reprices=limits[2],
         )
     else:
-        await run_close_execution_once(cli_ticker=args.ticker)
+        await run_close_execution_once(
+            cli_ticker=args.ticker,
+            max_hedge_slippage_bps=limits[0],
+            max_quote_age_ms=limits[1],
+            max_maker_reprices=limits[2],
+        )
 
 
 def main() -> None:

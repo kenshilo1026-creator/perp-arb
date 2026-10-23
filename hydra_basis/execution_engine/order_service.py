@@ -16,6 +16,7 @@ from hydra_basis.execution_engine.market_data import fetch_orderbook_snapshot
 from hydra_basis.execution_engine.models import ExecutionSignal
 from hydra_basis.execution_engine.runtime import prepare_execution_preview_for_size
 from hydra_basis.execution_engine.signal_store import load_best_signal_for_symbol
+from hydra_basis.execution_engine.quote_safety import validate_hedge_limits
 
 VALID_EXEC_MODES = {"maker_taker", "taker"}
 
@@ -35,6 +36,9 @@ class OpenParams:
     clip_size: Decimal
     interval_ms: int
     debounce_ms: int
+    max_hedge_slippage_bps: Decimal | None = None
+    max_quote_age_ms: Decimal | None = None
+    max_maker_reprices: int | None = None
 
 
 @dataclass
@@ -45,6 +49,16 @@ class CloseParams:
     clip_size: Decimal
     interval_ms: int
     debounce_ms: int
+    max_hedge_slippage_bps: Decimal | None = None
+    max_quote_age_ms: Decimal | None = None
+    max_maker_reprices: int | None = None
+
+
+def hedge_limits(params):
+    return validate_hedge_limits(
+        max_hedge_slippage_bps=params.max_hedge_slippage_bps,
+        max_quote_age_ms=params.max_quote_age_ms, max_maker_reprices=params.max_maker_reprices,
+    )
 
 
 @dataclass
@@ -247,6 +261,8 @@ async def run_batched_execution(
 
 
 async def execute_open(params: OpenParams, *, live: bool, on_progress, deps: Deps | None = None) -> dict:
+    if live:
+        hedge_limits(params)
     validate_open_params(params)
     if params.exec_mode == "taker":
         return {"ok": False, "error": "taker-only 尚未實作 (TODO)", "not_implemented": True}
@@ -270,6 +286,7 @@ async def execute_open(params: OpenParams, *, live: bool, on_progress, deps: Dep
             # done inside execute_open_clip). Lazy import to avoid an import cycle.
             from scripts.place_order import execute_open_clip
             return await execute_open_clip(
+                **hedge_limits(params),
                 symbol=params.symbol,
                 short_venue=preview.short_venue,
                 long_venue=preview.long_venue,
@@ -357,6 +374,8 @@ async def build_spot_perp_preview(params: OpenParams) -> Preview:
 
 
 async def execute_spot_perp_open(params: OpenParams, *, live: bool, on_progress, deps: Deps | None = None) -> dict:
+    if live:
+        hedge_limits(params)
     validate_open_params(params)
     if params.exec_mode == "taker":
         return {"ok": False, "error": "taker-only 尚未實作 (TODO)", "not_implemented": True}
@@ -391,6 +410,7 @@ async def execute_spot_perp_open(params: OpenParams, *, live: bool, on_progress,
                 return {"ok": True, "executed_quantity": str(this_clip), "dry_run": True,
                         "summary": {"maker_avg_price": plan.maker_price, "taker_avg_price": None}}
             return await execute_spot_perp_plan(
+                **hedge_limits(params),
                 plan=plan, leverage=params.leverage, broker_url=broker_url, allow_large_price_gap=False)
         return _run_batch
 
@@ -413,6 +433,8 @@ async def execute_spot_perp_open(params: OpenParams, *, live: bool, on_progress,
 
 
 async def execute_close(params: CloseParams, *, live: bool, on_progress, deps: Deps | None = None) -> dict:
+    if live:
+        hedge_limits(params)
     """Scan live positions for the symbol, auto-select the single SHORT+LONG pair,
     and close it batch-by-batch. Multiple pairs are deferred to the CLI. Reuses
     the same close plan/execute helpers the CLI uses; lazy imports avoid a cycle."""
@@ -489,6 +511,7 @@ async def execute_close(params: CloseParams, *, live: bool, on_progress, deps: D
                     if callable(warm_up):
                         await warm_up()
                 return await execute_close_position_plan(
+                    **hedge_limits(params),
                     plan=plan, adapters=exec_adapters, symbol=symbol, venues=venues)
             finally:
                 for adapter in exec_adapters.values():

@@ -1,6 +1,7 @@
 """Regression coverage for partial close fills, cancel races and hedge remainders."""
 import asyncio
 import unittest
+from hydra_basis.execution_engine.quote_safety import stamp_quote
 from decimal import Decimal
 from unittest.mock import AsyncMock, patch
 
@@ -173,12 +174,17 @@ class Leg:
 
 class CloseFlowTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
+        async def books(**kwargs):
+            return {v: stamp_quote({"bid": .169, "ask": .17, "bids": [(.169, 100000)], "asks": [(.17, 100000)]}) for v in kwargs["venues"]}
+        books_patch = patch("scripts.place_order.fetch_close_orderbooks", new=books)
+        books_patch.start()
+        self.addCleanup(books_patch.stop)
         patcher = patch("asyncio.sleep", new=AsyncMock())
         patcher.start()
         self.addCleanup(patcher.stop)
 
     async def run_pair(self, maker, taker, **overrides):
-        kwargs = dict(symbol="ANSEM", clip_usd=340, quantity=Decimal("2000"), maker_venue="aster",
+        kwargs = dict(hedge_limit_price="1", symbol="ANSEM", clip_usd=340, quantity=Decimal("2000"), maker_venue="aster",
                       taker_venue="lighter", maker_side="SELL", taker_side="BUY", maker_adapter=maker,
                       taker_adapter=taker, max_hedge_retries=0, state_machine=ExecutionStateMachine(),
                       require_maker_fill_confirmation=True, maker_fill_timeout_seconds=0,
@@ -321,7 +327,7 @@ class CloseFlowTests(unittest.IsolatedAsyncioTestCase):
                                      taker_venue=taker_venue, maker_price="0.17", clip_usd=340,
                                      side_by_venue={"aster": "SELL", "lighter": "BUY"}, spread_by_venue={})
             with patch("scripts.place_order.execute_single_clip_with_sides", new=AsyncMock()) as execute:
-                await execute_close_position_plan(plan=plan, adapters={"aster": object(), "lighter": object()},
+                await execute_close_position_plan(max_hedge_slippage_bps=20, max_quote_age_ms=1000, max_maker_reprices=3, plan=plan, adapters={"aster": object(), "lighter": object()},
                                                   symbol="ANSEM", venues=["aster", "lighter"])
             for key in ("maker_reduce_only", "taker_reduce_only", "verify_hedge_fill"):
                 self.assertTrue(execute.call_args.kwargs[key])

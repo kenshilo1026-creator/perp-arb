@@ -1,5 +1,6 @@
 import unittest
 from decimal import Decimal as D
+from hydra_basis.execution_engine.quote_safety import stamp_quote
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
@@ -67,17 +68,17 @@ class LatencyTests(unittest.IsolatedAsyncioTestCase):
                                 prepare_maker_fill_stream=stream)
         taker = SimpleNamespace(warm_up=warm)
         with patch("scripts.run_spot_perp_arbitrage.build_spot_perp_adapter", side_effect=[maker, taker]), \
-             patch("scripts.run_spot_perp_arbitrage.refresh_spot_perp_maker_price", new=AsyncMock(return_value="0.2101")), \
+             patch("scripts.run_spot_perp_arbitrage.fetch_plan_books", new=AsyncMock(return_value=(stamp_quote({"bid": .2092, "ask": .2093, "bids": [(.2092, 1000)], "asks": [(.2093, 1000)]}), stamp_quote({"bid": .2101, "ask": .2105, "bids": [(.2101, 1000)], "asks": [(.2105, 1000)]})))), \
              patch("scripts.run_spot_perp_arbitrage.execute_single_clip", new=execute):
-            await execute_spot_perp_plan(plan=plan(), leverage=1)
+            await execute_spot_perp_plan(max_hedge_slippage_bps=20, max_quote_age_ms=1000, max_maker_reprices=3, plan=plan(), leverage=1)
 
     async def test_stream_start_failure_keeps_rest_execution_available(self):
         maker = SimpleNamespace(place_limit_order=AsyncMock(),
             prepare_maker_fill_stream=AsyncMock(side_effect=RuntimeError("subscription unavailable")))
         with patch("scripts.run_spot_perp_arbitrage.build_spot_perp_adapter", side_effect=[maker, SimpleNamespace()]), \
-             patch("scripts.run_spot_perp_arbitrage.refresh_spot_perp_maker_price", new=AsyncMock(return_value="0.2101")), \
+             patch("scripts.run_spot_perp_arbitrage.fetch_plan_books", new=AsyncMock(return_value=(stamp_quote({"bid": .2092, "ask": .2093, "bids": [(.2092, 1000)], "asks": [(.2093, 1000)]}), stamp_quote({"bid": .2101, "ask": .2105, "bids": [(.2101, 1000)], "asks": [(.2105, 1000)]})))), \
              patch("scripts.run_spot_perp_arbitrage.execute_single_clip", new=AsyncMock(return_value={"ok": True})) as execute:
-            self.assertTrue((await execute_spot_perp_plan(plan=plan(), leverage=1))["ok"])
+            self.assertTrue((await execute_spot_perp_plan(max_hedge_slippage_bps=20, max_quote_age_ms=1000, max_maker_reprices=3, plan=plan(), leverage=1))["ok"])
             execute.assert_awaited_once()
 
     async def test_setup_failure_does_not_dispatch_maker(self):
@@ -86,7 +87,7 @@ class LatencyTests(unittest.IsolatedAsyncioTestCase):
         with patch("scripts.run_spot_perp_arbitrage.build_spot_perp_adapter", side_effect=[maker, SimpleNamespace()]), \
              patch("scripts.run_spot_perp_arbitrage.execute_single_clip", new=AsyncMock()) as execute:
             with self.assertRaisesRegex(RuntimeError, "setup failed"):
-                await execute_spot_perp_plan(plan=plan(), leverage=1)
+                await execute_spot_perp_plan(max_hedge_slippage_bps=20, max_quote_age_ms=1000, max_maker_reprices=3, plan=plan(), leverage=1)
             execute.assert_not_awaited()
             maker.place_limit_order.assert_not_awaited()
 

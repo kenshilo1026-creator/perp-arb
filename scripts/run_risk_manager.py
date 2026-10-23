@@ -5,6 +5,7 @@ import asyncio
 import datetime as dt
 import time
 from decimal import Decimal, InvalidOperation
+from functools import partial
 
 import aiohttp
 
@@ -33,6 +34,7 @@ from hydra_basis.execution_engine.lighter_live import (
 )
 from hydra_basis.execution_engine.mexc_adapter import MexcExecutionAdapter
 from hydra_basis.execution_engine.mexc_spot_adapter import MexcSpotExecutionAdapter
+from hydra_basis.execution_engine.quote_safety import validate_hedge_limits
 from hydra_basis.notifications.telegram import send_telegram
 from hydra_basis.execution_engine.variational_monitor_adapter import VariationalMonitorPositionAdapter
 from hydra_basis.risk_management.closers import MarketTypeRouterCloser
@@ -358,7 +360,14 @@ async def execute_funding_auto_close_with_maker_taker(
     registry: PositionRegistry,
     event,
     dry_run: bool,
+    max_hedge_slippage_bps=None,
+    max_quote_age_ms=None,
+    max_maker_reprices=None,
 ) -> dict[str, object]:
+    limits = {} if dry_run else validate_hedge_limits(
+        max_hedge_slippage_bps=max_hedge_slippage_bps,
+        max_quote_age_ms=max_quote_age_ms, max_maker_reprices=max_maker_reprices,
+    )
     from scripts.place_order import (
         build_close_position_plan,
         execute_close_position_plan,
@@ -458,6 +467,7 @@ async def execute_funding_auto_close_with_maker_taker(
     adapters = {leg.venue: _funding_close_adapter_for_leg(leg) for leg in live_legs}
     try:
         result = await execute_close_position_plan(
+            **limits,
             plan=plan,
             adapters=adapters,
             symbol=plan.symbol,
@@ -751,7 +761,9 @@ async def build_startup_position_snapshot_message(
     return "\n".join(lines)
 
 
-async def run_risk_manager(*, venues: set[str], live: bool) -> None:
+async def run_risk_manager(*, venues: set[str], live: bool,
+                           max_hedge_slippage_bps=None, max_quote_age_ms=None,
+                           max_maker_reprices=None) -> None:
     dry_run = not live
     mark_price_caches = {
         "aster": LiveMarkPriceCache(),
@@ -762,6 +774,10 @@ async def run_risk_manager(*, venues: set[str], live: bool) -> None:
     watchers = build_watchers(venues, closers=closers)
     margin_config = load_margin_topup_config(MARGIN_TOPUP_CONFIG_PATH)
     funding_config = load_funding_risk_config(FUNDING_RISK_CONFIG_PATH)
+    funding_limits = dict(max_hedge_slippage_bps=max_hedge_slippage_bps,
+                          max_quote_age_ms=max_quote_age_ms, max_maker_reprices=max_maker_reprices)
+    if live and funding_config.enabled:
+        validate_hedge_limits(**funding_limits)
     mode = "LIVE" if live else "DRY_RUN"
     # Serializes every load->modify->save of the shared registry file across the
     # concurrent loops so their read-modify-write cycles cannot clobber each other.
@@ -894,7 +910,7 @@ async def run_risk_manager(*, venues: set[str], live: bool) -> None:
                         closers=closers,
                         config=funding_config,
                         dry_run=dry_run,
-                        funding_auto_closer=execute_funding_auto_close_with_maker_taker,
+                        funding_auto_closer=partial(execute_funding_auto_close_with_maker_taker, **funding_limits),
                     )
                 for message in result.get("messages", []):
                     text = f"資費風控\n{message}\nmode={mode}"
@@ -974,13 +990,18 @@ def parse_args() -> argparse.Namespace:
         help="Comma-separated watcher venues to enable.",
     )
     parser.add_argument("--live", action="store_true", help="Actually submit emergency close orders.")
+    parser.add_argument("--max-hedge-slippage-bps", type=Decimal)
+    parser.add_argument("--max-quote-age-ms", type=Decimal)
+    parser.add_argument("--max-maker-reprices", type=int)
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
     venues = {item.strip().lower() for item in args.venues.split(",") if item.strip()}
-    asyncio.run(run_risk_manager(venues=venues, live=args.live))
+    asyncio.run(run_risk_manager(venues=venues, live=args.live,
+        max_hedge_slippage_bps=args.max_hedge_slippage_bps,
+        max_quote_age_ms=args.max_quote_age_ms, max_maker_reprices=args.max_maker_reprices))
 
 
 if __name__ == "__main__":

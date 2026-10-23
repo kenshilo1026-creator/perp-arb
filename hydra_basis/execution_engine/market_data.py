@@ -13,6 +13,7 @@ from hydra_basis.adapters.mexc import mexc_contract_symbol
 from hydra_basis.adapters.tradexyz import fetch_tradexyz_universe
 from hydra_basis.adapters.variational import VARIATIONAL_BASE_URL
 from hydra_basis.symbol_mapping import canonicalize_symbol, venue_symbol
+from hydra_basis.execution_engine.quote_safety import stamp_quote
 
 
 async def fetch_orderbook_snapshot(
@@ -24,26 +25,41 @@ async def fetch_orderbook_snapshot(
 ) -> dict[str, float | int]:
     normalized = venue.lower()
     if normalized == "hyperliquid":
-        return await fetch_hyperliquid_orderbook(session, symbol)
-    if normalized == "mexc":
-        return await fetch_mexc_orderbook(session, symbol)
-    if normalized == "aster":
-        return await fetch_aster_orderbook(session, symbol)
-    if normalized == "lighter":
-        return await fetch_lighter_orderbook(session, symbol)
-    if normalized == "variational":
-        return await fetch_variational_quote(session, canonicalize_symbol(symbol, venue="variational"), clip_usd=clip_usd)
-    if normalized == "trade_xyz":
-        return await fetch_tradexyz_orderbook(session, symbol)
-    if normalized == "entropy":
-        return await fetch_entropy_orderbook(session, symbol)
-    if normalized == "arcus":
+        book = await fetch_hyperliquid_orderbook(session, symbol)
+    elif normalized == "mexc":
+        book = await fetch_mexc_orderbook(session, symbol)
+    elif normalized == "aster":
+        book = await fetch_aster_orderbook(session, symbol)
+    elif normalized == "lighter":
+        book = await fetch_lighter_orderbook(session, symbol)
+    elif normalized == "variational":
+        book = await fetch_variational_quote(session, canonicalize_symbol(symbol, venue="variational"), clip_usd=clip_usd)
+    elif normalized == "trade_xyz":
+        book = await fetch_tradexyz_orderbook(session, symbol)
+    elif normalized == "entropy":
+        book = await fetch_entropy_orderbook(session, symbol)
+    elif normalized == "arcus":
         from hydra_basis.adapters.arcus import fetch_arcus_orderbook
-        return await fetch_arcus_orderbook(session, symbol)
-    if normalized == "ondo":
+        book = await fetch_arcus_orderbook(session, symbol)
+    elif normalized == "ondo":
         from hydra_basis.adapters.ondo import fetch_ondo_orderbook
-        return await fetch_ondo_orderbook(session, symbol)
-    raise RuntimeError(f"unsupported preview venue={venue}")
+        book = await fetch_ondo_orderbook(session, symbol)
+    else:
+        raise RuntimeError(f"unsupported preview venue={venue}")
+    return book if book.get("received_monotonic_ns") else stamp_quote(book)
+
+
+def _normalise_levels(levels: list) -> list[tuple[float, float]]:
+    result = []
+    for level in levels:
+        if isinstance(level, list):
+            price, size = level[0], level[1]
+        else:
+            price = level.get("price", level.get("px"))
+            size = level.get("vol", level.get("size", level.get("sz", level.get("qty"))))
+        if price is not None and size is not None:
+            result.append((float(price), float(size)))
+    return result
 
 
 async def fetch_entropy_orderbook(session: aiohttp.ClientSession, symbol: str) -> dict[str, float | int]:
@@ -53,7 +69,11 @@ async def fetch_entropy_orderbook(session: aiohttp.ClientSession, symbol: str) -
     levels = (data or {}).get("levels") or []
     if len(levels) < 2 or not levels[0] or not levels[1]:
         raise RuntimeError(f"missing entropy orderbook for {symbol}")
-    return {"bid": float(levels[0][0]["px"]), "ask": float(levels[1][0]["px"]), "ts_ms": int(data.get("time") or 0)}
+    return stamp_quote({
+        "bid": float(levels[0][0]["px"]), "ask": float(levels[1][0]["px"]),
+        "bids": _normalise_levels(levels[0]), "asks": _normalise_levels(levels[1]),
+        "ts_ms": int(data.get("time") or 0),
+    })
 
 
 async def fetch_mexc_spot_orderbook(session: aiohttp.ClientSession, symbol: str) -> dict[str, float | int]:
@@ -70,11 +90,13 @@ async def fetch_mexc_spot_orderbook(session: aiohttp.ClientSession, symbol: str)
     asks = data.get("asks") or []
     if not bids or not asks:
         raise RuntimeError(f"missing mexc spot orderbook for {symbol}")
-    return {
+    return stamp_quote({
         "bid": float(bids[0][0]),
         "ask": float(asks[0][0]),
+        "bids": [(float(level[0]), float(level[1])) for level in bids],
+        "asks": [(float(level[0]), float(level[1])) for level in asks],
         "ts_ms": 0,
-    }
+    })
 
 
 async def fetch_hyperliquid_orderbook(session: aiohttp.ClientSession, symbol: str) -> dict[str, float | int]:
@@ -88,11 +110,13 @@ async def fetch_hyperliquid_orderbook(session: aiohttp.ClientSession, symbol: st
     asks = levels[1] if len(levels) > 1 else []
     if not bids or not asks:
         raise RuntimeError(f"missing hyperliquid orderbook for {symbol}")
-    return {
+    return stamp_quote({
         "bid": float(bids[0]["px"]),
         "ask": float(asks[0]["px"]),
+        "bids": [(float(level["px"]), float(level["sz"])) for level in bids],
+        "asks": [(float(level["px"]), float(level["sz"])) for level in asks],
         "ts_ms": int(data.get("time") or 0),
-    }
+    })
 
 
 async def fetch_tradexyz_orderbook(session: aiohttp.ClientSession, symbol: str) -> dict[str, float | int]:
@@ -111,11 +135,13 @@ async def fetch_tradexyz_orderbook(session: aiohttp.ClientSession, symbol: str) 
     asks = levels[1] if len(levels) > 1 else []
     if not bids or not asks:
         raise RuntimeError(f"missing trade_xyz orderbook for {symbol}")
-    return {
+    return stamp_quote({
         "bid": float(bids[0]["px"]),
         "ask": float(asks[0]["px"]),
+        "bids": _normalise_levels(bids),
+        "asks": _normalise_levels(asks),
         "ts_ms": int(data.get("time") or 0),
-    }
+    })
 
 
 async def fetch_mexc_orderbook(session: aiohttp.ClientSession, symbol: str) -> dict[str, float | int]:
@@ -129,11 +155,13 @@ async def fetch_mexc_orderbook(session: aiohttp.ClientSession, symbol: str) -> d
         raise RuntimeError(f"missing mexc orderbook for {symbol}")
     bid = bids[0][0] if isinstance(bids[0], list) else bids[0].get("price")
     ask = asks[0][0] if isinstance(asks[0], list) else asks[0].get("price")
-    return {
+    return stamp_quote({
         "bid": float(bid),
         "ask": float(ask),
+        "bids": _normalise_levels(bids),
+        "asks": _normalise_levels(asks),
         "ts_ms": int(payload.get("timestamp") or payload.get("ts") or 0),
-    }
+    })
 
 
 async def fetch_aster_orderbook(session: aiohttp.ClientSession, symbol: str) -> dict[str, float | int]:
@@ -163,11 +191,15 @@ async def fetch_aster_orderbook(session: aiohttp.ClientSession, symbol: str) -> 
         asks = data.get("asks") or []
         if not bids or not asks:
             continue
-        return {
+        return stamp_quote({
             "bid": float(bids[0][0]),
             "ask": float(asks[0][0]),
-            "ts_ms": int(data.get("T") or data.get("E") or data.get("lastUpdateId") or 0),
-        }
+            "bids": _normalise_levels(bids),
+            "asks": _normalise_levels(asks),
+        # lastUpdateId is a sequence, not a clock.  Only attach a timestamp
+        # when the venue actually supplied an event/transaction epoch time.
+        "ts_ms": int(data.get("T") or data.get("E") or 0),
+        })
     raise last_exc
 
 
@@ -195,11 +227,14 @@ async def fetch_lighter_orderbook(session: aiohttp.ClientSession, symbol: str) -
                 raise RuntimeError(f"missing lighter orderbook for {symbol}")
             bid = bids[0][0] if isinstance(bids[0], list) else bids[0].get("price")
             ask = asks[0][0] if isinstance(asks[0], list) else asks[0].get("price")
-            return {
+            return stamp_quote({
                 "bid": float(bid),
                 "ask": float(ask),
-                "ts_ms": int(payload.get("timestamp") or payload.get("offset") or 0),
-            }
+                "bids": _normalise_levels(bids),
+                "asks": _normalise_levels(asks),
+                # offset is a sequence and must not masquerade as an epoch.
+                "ts_ms": int(payload.get("timestamp") or 0),
+            })
 
 
 def select_variational_quote_fields(listing: dict[str, Any], clip_usd: float) -> tuple[float, float]:
@@ -253,9 +288,10 @@ def parse_variational_quote(data: dict, symbol: str, *, clip_usd: float) -> dict
         if str(listing.get("ticker") or "").upper() != symbol.upper():
             continue
         bid, ask = select_variational_quote_fields(listing, clip_usd)
-        return {
+        return stamp_quote({
             "bid": bid,
             "ask": ask,
+            "size_aware": True,
             "ts_ms": 0,
-        }
+        })
     raise RuntimeError(f"symbol not found on variational: {symbol}")

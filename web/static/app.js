@@ -80,7 +80,10 @@ function bodyFromForm(mode) {
     symbol: $("symbol").value.trim().toUpperCase(), short_venue: $("short-venue").value,
     long_venue: state.kind === "spot_perp" ? "mexc" : $("long-venue").value,
     leverage: +$("leverage").value, total_size: $("total-size").value, clip_size: $("clip-size").value,
-    interval_ms: +$("interval-ms").value, debounce_ms: +$("debounce-ms").value };
+    interval_ms: +$("interval-ms").value, debounce_ms: +$("debounce-ms").value,
+    max_hedge_slippage_bps: $("hedge-slippage-bps").value,
+    max_quote_age_ms: $("quote-age-ms").value,
+    max_maker_reprices: $("maker-reprices").value === "" ? null : +$("maker-reprices").value };
 }
 
 async function doPreview() {

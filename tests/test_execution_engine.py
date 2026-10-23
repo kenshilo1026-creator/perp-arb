@@ -5,6 +5,7 @@ import tempfile
 import os
 from pathlib import Path
 from aiohttp import web
+from hydra_basis.execution_engine.quote_safety import stamp_quote
 from decimal import Decimal
 from unittest import mock
 
@@ -299,6 +300,13 @@ class ExecutionClosePlanTests(unittest.TestCase):
 
 
 class ExecutionCloseFlowTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        async def books(**kwargs):
+            return {v: stamp_quote({"bid": 1.22, "ask": 1.23, "bids": [(1.22, 100000)], "asks": [(1.23, 100000)]}) for v in kwargs["venues"]}
+        patcher = mock.patch("scripts.place_order.fetch_close_orderbooks", new=books)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def plan(self, maker="aster", taker="lighter"):
         return ClosePositionPlan(symbol="BEAT", quantity=Decimal("10"), maker_venue=maker,
                                  taker_venue=taker, maker_price="1.23", clip_usd=12.3,
@@ -311,21 +319,21 @@ class ExecutionCloseFlowTests(unittest.IsolatedAsyncioTestCase):
     async def test_execute_close_plan_passes_safety_and_reprice_options(self):
         plan = self.plan()
         with mock.patch("scripts.place_order.execute_single_clip_with_sides", new=mock.AsyncMock(return_value={"ok": True})) as execute:
-            result = await execute_close_position_plan(plan=plan, adapters={"aster": object(), "lighter": object()},
+            result = await execute_close_position_plan(max_hedge_slippage_bps=20, max_quote_age_ms=1000, max_maker_reprices=3, plan=plan, adapters={"aster": object(), "lighter": object()},
                                                        symbol="BEAT", venues=["aster", "lighter"])
         self.assertTrue(result["ok"])
         options = execute.call_args.kwargs
         self.assertEqual(options["maker_fill_timeout_seconds"], MAKER_FILL_TIMEOUT_SECONDS)
-        self.assertEqual(options["max_maker_reprice_attempts"], MAKER_REPRICE_ATTEMPTS)
+        self.assertEqual(options["max_maker_reprice_attempts"], 3)
         for key in ("require_maker_fill_confirmation", "verify_hedge_fill", "maker_reduce_only", "taker_reduce_only"):
             self.assertTrue(options[key])
         self.assertEqual(options["maker_price"], "1.23")
 
     async def test_variational_close_resolves_preview_before_dispatch(self):
-        maker = mock.Mock()
+        maker = mock.Mock(spec=["get_limit_price_preview"])
         maker.get_limit_price_preview = mock.AsyncMock(return_value="1.25")
         with mock.patch("scripts.place_order.execute_single_clip_with_sides", new=mock.AsyncMock(return_value={"ok": True})) as execute:
-            await execute_close_position_plan(plan=self.plan("variational", "aster"),
+            await execute_close_position_plan(max_hedge_slippage_bps=20, max_quote_age_ms=1000, max_maker_reprices=3, plan=self.plan("variational", "aster"),
                 adapters={"variational": maker, "aster": object()}, symbol="BEAT", venues=["variational", "aster"])
         maker.get_limit_price_preview.assert_awaited_once_with(symbol="BEAT")
         self.assertEqual(execute.call_args.kwargs["maker_price"], "1.25")
@@ -1705,6 +1713,12 @@ class SingleClipExecutorTests(unittest.IsolatedAsyncioTestCase):
 
 
 class MexcSpotExecutionAdapterTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        rules = mock.patch.object(MexcSpotExecutionAdapter, "_load_symbol_rules", new=mock.AsyncMock(
+            return_value={"tick": Decimal("0.01"), "step": Decimal("0.01"), "min_qty": Decimal("0.01")}))
+        rules.start()
+        self.addCleanup(rules.stop)
+
     async def test_signed_spot_request_includes_extended_recv_window(self) -> None:
         class Adapter(MexcSpotExecutionAdapter):
             def _timestamp_ms(self) -> int:
@@ -1730,7 +1744,7 @@ class MexcSpotExecutionAdapterTests(unittest.IsolatedAsyncioTestCase):
                 return None
 
             async def json(self) -> dict:
-                return {"orderId": "spot-1"}
+                return {"orderId": "spot-1", "status": "FILLED", "executedQty": "0.1", "avgPrice": "3000"}
 
         class Session:
             def __init__(self, **kwargs):
@@ -1784,7 +1798,7 @@ class MexcSpotExecutionAdapterTests(unittest.IsolatedAsyncioTestCase):
         adapter = MexcSpotExecutionAdapter(api_key="", api_secret="")
 
         with self.assertRaisesRegex(RuntimeError, "MEXC spot API credentials missing"):
-            await adapter.place_market_order(
+            await adapter.place_market_order(limit_price="3000",
                 symbol="ETH",
                 side="BUY",
                 amount="0.1",
@@ -1797,9 +1811,9 @@ class MexcSpotExecutionAdapterTests(unittest.IsolatedAsyncioTestCase):
         class Adapter(MexcSpotExecutionAdapter):
             async def _post_order(self, params: dict) -> dict:
                 calls.append(dict(params))
-                return {"orderId": "spot-1"}
+                return {"orderId": "spot-1", "status": "FILLED", "executedQty": "0.1", "avgPrice": "3000"}
 
-        result = await Adapter(api_key="k", api_secret="s").place_market_order(
+        result = await Adapter(api_key="k", api_secret="s").place_market_order(limit_price="3000",
             symbol="eth",
             side="BUY",
             amount="0.1",
@@ -1809,7 +1823,7 @@ class MexcSpotExecutionAdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result["ok"])
         self.assertEqual(calls[0]["symbol"], "ETHUSDT")
         self.assertEqual(calls[0]["side"], "BUY")
-        self.assertEqual(calls[0]["type"], "MARKET")
+        self.assertEqual(calls[0]["type"], "IMMEDIATE_OR_CANCEL")
         self.assertEqual(calls[0]["quantity"], "0.1")
 
     async def test_place_market_order_uses_mexc_spot_native_symbol_mapping(self) -> None:
@@ -1818,9 +1832,9 @@ class MexcSpotExecutionAdapterTests(unittest.IsolatedAsyncioTestCase):
         class Adapter(MexcSpotExecutionAdapter):
             async def _post_order(self, params: dict) -> dict:
                 calls.append(dict(params))
-                return {"orderId": "spot-1"}
+                return {"orderId": "spot-1", "status": "FILLED", "executedQty": "0.1", "avgPrice": "3000"}
 
-        result = await Adapter(api_key="k", api_secret="s").place_market_order(
+        result = await Adapter(api_key="k", api_secret="s").place_market_order(limit_price="3000",
             symbol="ASPECTA",
             side="BUY",
             amount="10",
@@ -1898,7 +1912,7 @@ class MexcSpotExecutionAdapterTests(unittest.IsolatedAsyncioTestCase):
         class Adapter(MexcSpotExecutionAdapter):
             async def _delete_order(self, params: dict) -> dict:
                 calls.append(dict(params))
-                return {"orderId": "spot-2", "status": "CANCELED"}
+                return {"orderId": "spot-2", "status": "CANCELED", "executedQty": "0"}
 
         result = await Adapter(api_key="k", api_secret="s").cancel_order(
             order_result={"ok": True, "order_id": "spot-2"},

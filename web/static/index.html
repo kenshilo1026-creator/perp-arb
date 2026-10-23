@@ -38,6 +38,12 @@
     <label>批次間隔(ms) <input id="interval-ms" type="number" value="500" /></label>
     <label>防抖(ms) <input id="debounce-ms" type="number" value="300" /></label>
   </div>
+  <div class="row">
+    <label>對沖滑點上限(bps) <input id="hedge-slippage-bps" type="number" min="0" max="9999" value="20" required /></label>
+    <label>報價最長有效時間(ms) <input id="quote-age-ms" type="number" min="1" value="1000" required /></label>
+    <label>最多改價次數 <input id="maker-reprices" type="number" min="0" step="1" value="3" required /></label>
+  </div>
+  <p>對沖同時限制兩腿不利成交價差為 0.2%（未計手續費）；超出限價可能只成交部分，並停止後續批次。</p>
   <fieldset>
     <legend>歷史 APY</legend>
     <div id="days">

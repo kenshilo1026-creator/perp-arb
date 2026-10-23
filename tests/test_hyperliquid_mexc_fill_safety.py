@@ -88,7 +88,7 @@ class FillSafetyTests(unittest.IsolatedAsyncioTestCase):
         adapter._post_order = AsyncMock(side_effect=[{"data": 123}, {"data": 124}])
         adapter.get_open_position = AsyncMock(return_value={"side": "LONG", "quantity": "4"})
         result = await execute_confirmed_market_order(adapter, symbol="TEST", side="BUY", quantity=Decimal("10"),
-                                                      baseline=Decimal("0"), clip_usd=100, poll_delay=0)
+                                                      baseline=Decimal("0"), clip_usd=100, limit_price="1", poll_delay=0)
         self.assertEqual([c.args[0]["vol"] for c in adapter._post_order.await_args_list], [10, 6])
         self.assertEqual(adapter._get_order_status.await_count, 3)
         self.assertEqual(result["filled_quantity"], "10")
@@ -100,7 +100,7 @@ class FillSafetyTests(unittest.IsolatedAsyncioTestCase):
         adapter.get_open_position = AsyncMock(return_value={"side": "LONG", "quantity": "4"})
         with self.assertRaises(HedgeFailure):
             await execute_confirmed_market_order(adapter, symbol="TEST", side="BUY", quantity=Decimal("10"),
-                                                 baseline=Decimal("0"), clip_usd=100, confirmation_attempts=2)
+                                                 baseline=Decimal("0"), clip_usd=100, limit_price="1", confirmation_attempts=2)
         adapter._post_order.assert_awaited_once()
 
     async def execute_cancel_race(self, venue, *, final_fill="4", exhausted=False):
@@ -116,7 +116,7 @@ class FillSafetyTests(unittest.IsolatedAsyncioTestCase):
             symbol="TEST", quantity=Decimal("10"), clip_usd=100, maker_venue=venue, taker_venue="mexc",
             maker_side="BUY", taker_side="SELL", maker_adapter=maker, taker_adapter=taker,
             max_hedge_retries=0, state_machine=ExecutionStateMachine(), require_maker_fill_confirmation=True,
-            max_maker_reprice_attempts=0 if exhausted else 1, verify_hedge_fill=True,
+            max_maker_reprice_attempts=0 if exhausted else 1, verify_hedge_fill=True, hedge_limit_price=Decimal("1"),
         )
         maker.place_limit_order.assert_awaited_once()
         self.assertEqual(result["executed_quantity"], final_fill)
@@ -154,7 +154,7 @@ class FillSafetyTests(unittest.IsolatedAsyncioTestCase):
             symbol="TEST", quantity=Decimal("10"), clip_usd=100, maker_venue="hyperliquid", taker_venue="mexc",
             maker_side="BUY", taker_side="SELL", maker_adapter=maker, taker_adapter=taker,
             max_hedge_retries=0, state_machine=ExecutionStateMachine(), require_maker_fill_confirmation=True,
-            max_maker_reprice_attempts=1, verify_hedge_fill=True,
+            max_maker_reprice_attempts=1, verify_hedge_fill=True, hedge_limit_price=Decimal("1"),
         )
         self.assertTrue(result["ok"])
         self.assertEqual(maker.place_limit_order.await_count, 2)
@@ -176,7 +176,7 @@ class FillSafetyTests(unittest.IsolatedAsyncioTestCase):
                 symbol="TEST", quantity=Decimal("10"), clip_usd=100, maker_venue="hyperliquid", taker_venue="mexc",
                 maker_side="BUY", taker_side="SELL", maker_adapter=maker, taker_adapter=taker,
                 max_hedge_retries=0, state_machine=state, require_maker_fill_confirmation=True,
-                verify_hedge_fill=True,
+                verify_hedge_fill=True, hedge_limit_price=Decimal("1"),
             )
         self.assertNotEqual(state.state, "completed")
         taker._post_order.assert_awaited_once()

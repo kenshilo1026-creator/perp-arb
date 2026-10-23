@@ -14,9 +14,22 @@ STATIC_DIR = Path(__file__).parent / "static"
 ALLOWED_HOSTS = {"127.0.0.1", "localhost", "testserver"}
 
 
+def _hedge_limits_from_body(body):
+    result = {}
+    for key in ("max_hedge_slippage_bps", "max_quote_age_ms"):
+        value = body.get(key)
+        result[key] = Decimal(str(value)) if value not in (None, "") else None
+    value = body.get("max_maker_reprices")
+    if value not in (None, "") and (isinstance(value, bool) or Decimal(str(value)) != int(value)):
+        raise ValueError("max_maker_reprices must be an integer")
+    result["max_maker_reprices"] = int(value) if value not in (None, "") else None
+    return result
+
+
 def _open_params_from_body(body: dict) -> order_service.OpenParams:
     long_venue = "mexc" if body["kind"] == "spot_perp" else body["long_venue"]
     return order_service.OpenParams(
+        **_hedge_limits_from_body(body),
         kind=body["kind"],
         symbol=str(body["symbol"]).upper(),
         short_venue=body["short_venue"],
@@ -100,6 +113,7 @@ def create_app() -> FastAPI:
 
             if body.get("mode") == "close":
                 params = order_service.CloseParams(
+                    **_hedge_limits_from_body(body),
                     kind=body["kind"], symbol=str(body["symbol"]).upper(),
                     total_size=Decimal(str(body["total_size"])), clip_size=Decimal(str(body["clip_size"])),
                     interval_ms=int(body["interval_ms"]), debounce_ms=int(body["debounce_ms"]))

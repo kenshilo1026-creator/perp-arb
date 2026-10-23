@@ -69,14 +69,14 @@ def decode_aster_order(message: dict) -> dict | None:
     }
 
 
-def _protobuf_fields(data: bytes) -> dict[int, bytes | int]:
+def _protobuf_items(data: bytes) -> list[tuple[int, bytes | int]]:
     """Read the scalar fields used by MEXC's private-order protobuf schema.
 
     Unknown scalar fields are skipped; malformed/truncated frames fail closed.
     Schema: https://github.com/mexcdevelop/websocket-proto
     """
     position = 0
-    fields = {}
+    fields = []
 
     def varint():
         nonlocal position
@@ -97,18 +97,22 @@ def _protobuf_fields(data: bytes) -> dict[int, bytes | int]:
         if not number:
             raise ValueError("invalid protobuf field")
         if wire == 0:
-            fields[number] = varint()
+            fields.append((number, varint()))
         elif wire in (1, 2, 5):
             length = varint() if wire == 2 else (8 if wire == 1 else 4)
             end = position + length
             if end > len(data):
                 raise ValueError("truncated protobuf field")
             if wire == 2:
-                fields[number] = data[position:end]
+                fields.append((number, data[position:end]))
             position = end
         else:
             raise ValueError("unsupported protobuf wire type")
     return fields
+
+
+def _protobuf_fields(data: bytes) -> dict[int, bytes | int]:
+    return dict(_protobuf_items(data))
 
 
 MEXC_ORDER_CHANNEL = "spot@private.orders.v3.api.pb"

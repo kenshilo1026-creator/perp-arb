@@ -222,6 +222,12 @@ class SpotPerpArbitrageScriptTests(unittest.TestCase):
 
 
 class MexcSpotAdapterForSpotPerpTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        patcher = patch.object(MexcSpotExecutionAdapter, "_load_symbol_rules", new=AsyncMock(
+            return_value={"tick": Decimal("0.01"), "step": Decimal("0.01"), "min_qty": Decimal("0.01")}))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     async def test_place_market_order_enriches_raw_with_filled_order_status(self) -> None:
         get_calls: list[dict] = []
 
@@ -238,7 +244,7 @@ class MexcSpotAdapterForSpotPerpTests(unittest.IsolatedAsyncioTestCase):
                     "cummulativeQuoteQty": "84.2",
                 }
 
-        result = await Adapter(api_key="k", api_secret="s").place_market_order(
+        result = await Adapter(api_key="k", api_secret="s").place_market_order(limit_price="3000",
             symbol="eth",
             side="BUY",
             amount="10",
@@ -346,12 +352,86 @@ class MissingMakerCancelAdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payloads, [[98765]])
 
 
+
+
+def execution_book(bid, ask):
+    from hydra_basis.execution_engine.quote_safety import stamp_quote
+    return stamp_quote({"bid": bid, "ask": ask, "ts_ms": 0,
+                        "bids": [(bid, 100000)], "asks": [(ask, 100000)]})
+
+
+class BoundedRecordingAdapter:
+    def __init__(self, venue, mode, events, prices, timeouts=0):
+        self.venue, self.mode, self.events, self.prices = venue, mode, events, prices
+        self.position = Decimal(0) if mode == "open" else (Decimal(10) if venue == "mexc_spot" else Decimal(-10))
+        self.timeouts, self.count = timeouts, 0
+
+    async def get_price_tick_size(self, symbol): return "0.01"
+
+    async def place_limit_order(self, *, post_only=False, **kwargs):
+        assert post_only
+        self.events.append(f"{self.venue}:place_limit")
+        self.prices.append(kwargs["price"])
+        self.count += 1
+        return {"ok": True, "order_id": str(self.count)}
+
+    async def wait_for_order_fill(self, **kwargs):
+        self.events.append(f"{self.venue}:wait_fill")
+        if self.timeouts:
+            self.timeouts -= 1
+            raise RuntimeError("maker fill timeout")
+        quantity = Decimal(kwargs["amount"])
+        self.position += quantity if kwargs["side"] == "BUY" else -quantity
+        return {"ok": True, "filled": True, "status": "FILLED", "filled_quantity": str(quantity),
+                "avg_price": self.prices[-1]}
+
+    async def cancel_order(self, **kwargs):
+        self.events.append(f"{self.venue}:cancel")
+        return {"ok": True, "raw": {"status": "CANCELED", "executedQty": "0"}}
+
+    async def place_market_order(self, *, limit_price=None, **kwargs):
+        assert limit_price is not None
+        self.events.append(f"{self.venue}:place_market")
+        quantity = Decimal(kwargs["amount"])
+        self.position += quantity if kwargs["side"] == "BUY" else -quantity
+        return {"ok": True, "terminal": True, "filled_quantity": str(quantity), "avg_price": limit_price}
+
+    async def get_open_position(self, *, symbol, market_type):
+        if self.position == 0: return None
+        return {"symbol": symbol, "market_type": market_type,
+                "side": "LONG" if self.position > 0 else "SHORT", "quantity": str(abs(self.position))}
+
+
 class SpotPerpArbitrageRecordingTests(unittest.IsolatedAsyncioTestCase):
+    async def execute_recording_case(self, *, mode="open", fresh_ask=10.1, timeouts=0,
+                                     allow_large=False, insufficient=False):
+        events, prices = [], []
+        adapters = {v: BoundedRecordingAdapter(v, mode, events, prices, timeouts if v == "aster" else 0)
+                    for v in ("aster", "mexc_spot")}
+        async def books(**kwargs):
+            spot = execution_book(9.99, 10.01)
+            if insufficient:
+                spot["asks"] = [(10.01, 1)]
+            return spot, execution_book(9.9, 11.1 if "aster:cancel" in events else fresh_ask)
+        plan = build_spot_perp_plan(symbol="BEAT", mode=mode, short_venue="aster",
+            quantity=Decimal(10), clip_usd=100,
+            spot_book=execution_book(9.99, 10.01), perp_book=execution_book(9.9, 12.1 if allow_large else 10.1))
+        with TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "position_registry.json"
+            with patch("scripts.run_spot_perp_arbitrage.build_spot_perp_adapter",
+                       side_effect=lambda venue, **kw: adapters[venue]), patch(
+                       "scripts.run_spot_perp_arbitrage.fetch_plan_books", new=books):
+                result = await execute_spot_perp_plan(plan=plan, leverage=1, registry_path=path,
+                    max_hedge_slippage_bps=20, max_quote_age_ms=1000, max_maker_reprices=3,
+                    allow_large_price_gap=allow_large)
+            registry = PositionRegistry.load(path) if path.exists() else None
+        return result, events, prices, registry
+
     async def test_close_mode_does_not_prompt_for_leverage(self) -> None:
         printed: list[str] = []
         prompts: list[str] = []
         executed: list[int] = []
-        args = SimpleNamespace(
+        args = SimpleNamespace(max_hedge_slippage_bps=20, max_quote_age_ms=1000, max_maker_reprices=3,
             mode="close",
             symbol="BEAT",
             short_venue="aster",
@@ -400,7 +480,7 @@ class SpotPerpArbitrageRecordingTests(unittest.IsolatedAsyncioTestCase):
     async def test_live_run_large_gap_stops_when_user_confirms_stop(self) -> None:
         printed: list[str] = []
         prompts: list[str] = []
-        args = SimpleNamespace(
+        args = SimpleNamespace(max_hedge_slippage_bps=20, max_quote_age_ms=1000, max_maker_reprices=3,
             mode="open",
             symbol="BEAT",
             short_venue="hyperliquid",
@@ -447,7 +527,7 @@ class SpotPerpArbitrageRecordingTests(unittest.IsolatedAsyncioTestCase):
                 "taker_avg_price": "10.01",
             },
         })
-        args = SimpleNamespace(
+        args = SimpleNamespace(max_hedge_slippage_bps=20, max_quote_age_ms=1000, max_maker_reprices=3,
             mode="open",
             symbol="BEAT",
             short_venue="hyperliquid",
@@ -485,7 +565,7 @@ class SpotPerpArbitrageRecordingTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_live_run_splits_total_size_into_multiple_clips(self) -> None:
         execute_plans: list[tuple[Decimal, float]] = []
-        args = SimpleNamespace(
+        args = SimpleNamespace(max_hedge_slippage_bps=20, max_quote_age_ms=1000, max_maker_reprices=3,
             mode="open",
             symbol="BEAT",
             short_venue="aster",
@@ -525,7 +605,7 @@ class SpotPerpArbitrageRecordingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([qty for qty, _ in execute_plans], [Decimal("10"), Decimal("10"), Decimal("5")])
 
     async def test_live_run_rejects_final_batch_below_min_notional_before_ordering(self) -> None:
-        args = SimpleNamespace(
+        args = SimpleNamespace(max_hedge_slippage_bps=20, max_quote_age_ms=1000, max_maker_reprices=3,
             mode="open",
             symbol="BEAT",
             short_venue="aster",
@@ -556,262 +636,30 @@ class SpotPerpArbitrageRecordingTests(unittest.IsolatedAsyncioTestCase):
                 await run_spot_perp_arbitrage()
 
     async def test_waits_for_maker_fill_before_taker_market_order(self) -> None:
-        events: list[str] = []
 
-        class Adapter:
-            async def get_price_tick_size(self, symbol):
-                return "0.01"
-
-            def __init__(self, venue: str) -> None:
-                self.venue = venue
-
-            async def place_limit_order(self, **kwargs):
-                events.append(f"{self.venue}:place_limit")
-                return {"ok": True, "order_id": f"{self.venue}-maker"}
-
-            async def wait_for_order_fill(self, **kwargs):
-                events.append(f"{self.venue}:wait_fill")
-                return {"ok": True, "filled": True, "status": "FILLED"}
-
-            async def place_market_order(self, **kwargs):
-                events.append(f"{self.venue}:place_market")
-                return {"ok": True, "order_id": f"{self.venue}-taker"}
-
-            async def get_open_position(self, *, symbol: str, market_type: str):
-                if self.venue == "mexc_spot":
-                    return {"symbol": symbol, "market_type": market_type, "side": "LONG", "quantity": "10"}
-                return {"symbol": symbol, "market_type": market_type, "side": "SHORT", "quantity": "10"}
-
-        plan = build_spot_perp_plan(
-            symbol="BEAT",
-            mode="open",
-            short_venue="aster",
-            quantity=Decimal("10"),
-            clip_usd=100.0,
-            spot_book={"bid": 9.99, "ask": 10.01, "ts_ms": 1},
-            perp_book={"bid": 9.9, "ask": 10.1, "ts_ms": 1},
-        )
-
-        with TemporaryDirectory() as temp_dir:
-            registry_path = Path(temp_dir) / "position_registry.json"
-            with patch(
-                "scripts.run_spot_perp_arbitrage.build_spot_perp_adapter",
-                side_effect=lambda venue, **kwargs: Adapter(venue),
-            ), patch(
-                "scripts.run_spot_perp_arbitrage.fetch_plan_books",
-                new=AsyncMock(return_value=(
-                    {"bid": 9.99, "ask": 10.01, "ts_ms": 1},
-                    {"bid": 9.9, "ask": 10.1, "ts_ms": 1},
-                )),
-            ):
-                result = await execute_spot_perp_plan(
-                    plan=plan,
-                    leverage=1,
-                    registry_path=registry_path,
-                )
-
+        result, events, _, _ = await self.execute_recording_case()
         self.assertTrue(result["ok"])
-        self.assertEqual(
-            events[:3],
-            ["aster:place_limit", "aster:wait_fill", "mexc_spot:place_market"],
-        )
+        self.assertEqual(events[:3], ["aster:place_limit", "aster:wait_fill", "mexc_spot:place_market"])
 
-    async def test_rejects_large_pre_trade_price_gap_before_maker_order(self) -> None:
-        events: list[str] = []
+    async def test_insufficient_hedge_depth_blocks_before_maker_order(self) -> None:
 
-        class Adapter:
-            async def get_price_tick_size(self, symbol):
-                return "0.01"
-
-            def __init__(self, venue: str) -> None:
-                self.venue = venue
-
-            async def place_limit_order(self, **kwargs):
-                events.append(f"{self.venue}:place_limit")
-                return {"ok": True, "order_id": f"{self.venue}-maker"}
-
-            async def place_market_order(self, **kwargs):
-                events.append(f"{self.venue}:place_market")
-                return {"ok": True}
-
-        plan = build_spot_perp_plan(
-            symbol="BEAT",
-            mode="open",
-            short_venue="hyperliquid",
-            quantity=Decimal("10"),
-            clip_usd=100.0,
-            spot_book={"bid": 9.99, "ask": 10.01, "ts_ms": 1},
-            perp_book={"bid": 11.9, "ask": 12.1, "ts_ms": 1},
-        )
-
-        with TemporaryDirectory() as temp_dir:
-            registry_path = Path(temp_dir) / "position_registry.json"
-            with patch(
-                "scripts.run_spot_perp_arbitrage.build_spot_perp_adapter",
-                side_effect=lambda venue, **kwargs: Adapter(venue),
-            ), patch(
-                "scripts.run_spot_perp_arbitrage.fetch_plan_books",
-                new=AsyncMock(return_value=(
-                    {"bid": 9.99, "ask": 10.01, "ts_ms": 1},
-                    {"bid": 11.9, "ask": 12.1, "ts_ms": 1},
-                )),
-            ):
-                with self.assertRaisesRegex(RuntimeError, "pre-trade maker/taker price gap"):
-                    await execute_spot_perp_plan(
-                        plan=plan,
-                        leverage=1,
-                        registry_path=registry_path,
-                    )
-
-        self.assertEqual(events, [])
+        with self.assertRaisesRegex(RuntimeError, "insufficient executable hedge depth"):
+            await self.execute_recording_case(insufficient=True)
 
     async def test_allows_large_pre_trade_price_gap_when_user_approved(self) -> None:
-        events: list[str] = []
 
-        class Adapter:
-            async def get_price_tick_size(self, symbol):
-                return "0.01"
-
-            def __init__(self, venue: str) -> None:
-                self.venue = venue
-
-            async def place_limit_order(self, **kwargs):
-                events.append(f"{self.venue}:place_limit")
-                return {"ok": True, "order_id": f"{self.venue}-maker"}
-
-            async def wait_for_order_fill(self, **kwargs):
-                events.append(f"{self.venue}:wait_fill")
-                return {"ok": True, "filled": True, "status": "FILLED"}
-
-            async def place_market_order(self, **kwargs):
-                events.append(f"{self.venue}:place_market")
-                return {"ok": True}
-
-            async def get_open_position(self, *, symbol: str, market_type: str):
-                if self.venue == "mexc_spot":
-                    return {"symbol": symbol, "market_type": market_type, "side": "LONG", "quantity": "10"}
-                return {"symbol": symbol, "market_type": market_type, "side": "SHORT", "quantity": "10"}
-
-        plan = build_spot_perp_plan(
-            symbol="BEAT",
-            mode="open",
-            short_venue="aster",
-            quantity=Decimal("10"),
-            clip_usd=100.0,
-            spot_book={"bid": 9.99, "ask": 10.01, "ts_ms": 1},
-            perp_book={"bid": 11.9, "ask": 12.1, "ts_ms": 1},
-        )
-
-        with TemporaryDirectory() as temp_dir:
-            registry_path = Path(temp_dir) / "position_registry.json"
-            with patch(
-                "scripts.run_spot_perp_arbitrage.build_spot_perp_adapter",
-                side_effect=lambda venue, **kwargs: Adapter(venue),
-            ), patch(
-                "scripts.run_spot_perp_arbitrage.fetch_plan_books",
-                new=AsyncMock(return_value=(
-                    {"bid": 9.99, "ask": 10.01, "ts_ms": 1},
-                    {"bid": 9.9, "ask": 10.1, "ts_ms": 1},
-                )),
-            ):
-                result = await execute_spot_perp_plan(
-                    plan=plan,
-                    leverage=1,
-                    registry_path=registry_path,
-                    allow_large_price_gap=True,
-                )
-
+        result, events, _, _ = await self.execute_recording_case(allow_large=True)
         self.assertTrue(result["ok"])
-        self.assertEqual(
-            events[:3],
-            ["aster:place_limit", "aster:wait_fill", "mexc_spot:place_market"],
-        )
+        self.assertEqual(events[:3], ["aster:place_limit", "aster:wait_fill", "mexc_spot:place_market"])
+        self.assertLessEqual(Decimal(result["execution_price_summary"]["realized_adverse_gap_bps"]), 20)
 
     async def test_maker_timeout_cancels_refreshes_price_and_replaces_order(self) -> None:
-        events: list[str] = []
-        prices: list[str | None] = []
-        fetch_calls = 0
 
-        class Adapter:
-            async def get_price_tick_size(self, symbol):
-                return "0.01"
-
-            def __init__(self, venue: str) -> None:
-                self.venue = venue
-                self.order_id = 0
-
-            async def place_limit_order(self, **kwargs):
-                events.append(f"{self.venue}:place_limit")
-                prices.append(kwargs.get("price"))
-                self.order_id += 1
-                return {"ok": True, "order_id": f"{self.venue}-{self.order_id}"}
-
-            async def wait_for_order_fill(self, **kwargs):
-                events.append(f"{self.venue}:wait_fill")
-                if len([event for event in events if event.endswith(":wait_fill")]) == 1:
-                    raise RuntimeError("maker fill timeout")
-                return {"ok": True, "filled": True, "status": "FILLED"}
-
-            async def cancel_order(self, **kwargs):
-                events.append(f"{self.venue}:cancel")
-                return {"ok": True, "raw": {"status": "CANCELED", "executedQty": "0"}}
-
-            async def place_market_order(self, **kwargs):
-                events.append(f"{self.venue}:place_market")
-                return {"ok": True}
-
-            async def get_open_position(self, *, symbol: str, market_type: str):
-                if self.venue == "mexc_spot":
-                    return {"symbol": symbol, "market_type": market_type, "side": "LONG", "quantity": "10"}
-                return {"symbol": symbol, "market_type": market_type, "side": "SHORT", "quantity": "10"}
-
-        async def fake_fetch_plan_books(*, symbol: str, short_venue: str, clip_usd: float):
-            nonlocal fetch_calls
-            fetch_calls += 1
-            return (
-                {"bid": 9.99, "ask": 10.01, "ts_ms": fetch_calls},
-                {"bid": 9.9, "ask": 11.1 if "aster:cancel" in events else 10.1, "ts_ms": fetch_calls},
-            )
-
-        plan = build_spot_perp_plan(
-            symbol="BEAT",
-            mode="open",
-            short_venue="aster",
-            quantity=Decimal("10"),
-            clip_usd=100.0,
-            spot_book={"bid": 9.99, "ask": 10.01, "ts_ms": 1},
-            perp_book={"bid": 9.9, "ask": 10.1, "ts_ms": 1},
-        )
-
-        with TemporaryDirectory() as temp_dir:
-            registry_path = Path(temp_dir) / "position_registry.json"
-            with patch(
-                "scripts.run_spot_perp_arbitrage.build_spot_perp_adapter",
-                side_effect=lambda venue, **kwargs: Adapter(venue),
-            ), patch(
-                "scripts.run_spot_perp_arbitrage.fetch_plan_books",
-                new=AsyncMock(side_effect=fake_fetch_plan_books),
-            ):
-                result = await execute_spot_perp_plan(
-                    plan=plan,
-                    leverage=1,
-                    registry_path=registry_path,
-                    allow_large_price_gap=True,
-                )
-
+        result, events, prices, _ = await self.execute_recording_case(timeouts=1)
         self.assertTrue(result["ok"])
-        self.assertEqual(
-            events[:6],
-            [
-                "aster:place_limit",
-                "aster:wait_fill",
-                "aster:cancel",
-                "aster:place_limit",
-                "aster:wait_fill",
-                "mexc_spot:place_market",
-            ],
-        )
-        self.assertEqual(prices, ["10.1", "11.1"])
+        self.assertEqual(events[:6], ["aster:place_limit", "aster:wait_fill", "aster:cancel",
+                                     "aster:place_limit", "aster:wait_fill", "mexc_spot:place_market"])
+        self.assertEqual([Decimal(x) for x in prices], [Decimal("10.1"), Decimal("11.1")])
 
     async def test_maker_timeout_retries_transient_cancel_before_replacing_order(self) -> None:
         events: list[str] = []
@@ -1625,167 +1473,26 @@ class SpotPerpArbitrageRecordingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(calls, ["maker_submit", "taker_market", "maker_cancel"])
 
     async def test_execution_fetches_fresh_maker_price_before_first_order(self) -> None:
-        prices: list[str | None] = []
 
-        class Adapter:
-            async def get_price_tick_size(self, symbol):
-                return "0.01"
-
-            def __init__(self, venue: str) -> None:
-                self.venue = venue
-
-            async def place_limit_order(self, **kwargs):
-                prices.append(kwargs.get("price"))
-                return {"ok": True, "order_id": f"{self.venue}-maker"}
-
-            async def wait_for_order_fill(self, **kwargs):
-                return {"ok": True, "filled": True, "status": "FILLED"}
-
-            async def place_market_order(self, **kwargs):
-                return {"ok": True}
-
-            async def get_open_position(self, *, symbol: str, market_type: str):
-                if self.venue == "mexc_spot":
-                    return {"symbol": symbol, "market_type": market_type, "side": "LONG", "quantity": "10"}
-                return {"symbol": symbol, "market_type": market_type, "side": "SHORT", "quantity": "10"}
-
-        async def fake_fetch_plan_books(*, symbol: str, short_venue: str, clip_usd: float):
-            return (
-                {"bid": 9.99, "ask": 10.01, "ts_ms": 2},
-                {"bid": 9.9, "ask": 10.09, "ts_ms": 2},
-            )
-
-        plan = build_spot_perp_plan(
-            symbol="BEAT",
-            mode="open",
-            short_venue="aster",
-            quantity=Decimal("10"),
-            clip_usd=100.0,
-            spot_book={"bid": 9.99, "ask": 10.01, "ts_ms": 1},
-            perp_book={"bid": 9.9, "ask": 10.1, "ts_ms": 1},
-        )
-
-        with TemporaryDirectory() as temp_dir:
-            registry_path = Path(temp_dir) / "position_registry.json"
-            with patch(
-                "scripts.run_spot_perp_arbitrage.build_spot_perp_adapter",
-                side_effect=lambda venue, **kwargs: Adapter(venue),
-            ), patch(
-                "scripts.run_spot_perp_arbitrage.fetch_plan_books",
-                new=AsyncMock(side_effect=fake_fetch_plan_books),
-            ):
-                result = await execute_spot_perp_plan(
-                    plan=plan,
-                    leverage=1,
-                    registry_path=registry_path,
-                    allow_large_price_gap=True,
-                )
-
+        result, _, prices, _ = await self.execute_recording_case(fresh_ask=10.09)
         self.assertTrue(result["ok"])
-        self.assertEqual(prices, ["10.09"])
+        self.assertEqual([Decimal(x) for x in prices], [Decimal("10.09")])
 
     async def test_open_execution_records_live_spot_and_perp_legs(self) -> None:
-        class Adapter:
-            async def get_price_tick_size(self, symbol):
-                return "0.01"
 
-            def __init__(self, venue: str) -> None:
-                self.venue = venue
-
-            async def place_limit_order(self, **kwargs):
-                return {"ok": True, "filled": True, "status": "FILLED", "order_id": f"{self.venue}-maker"}
-
-            async def wait_for_order_fill(self, **kwargs):
-                return {"ok": True, "raw": {"filled": True, "status": "FILLED"}}
-
-            async def place_market_order(self, **kwargs):
-                return {"ok": True, "order_id": f"{self.venue}-taker"}
-
-            async def get_open_position(self, *, symbol: str, market_type: str):
-                if self.venue == "mexc_spot":
-                    return {"symbol": symbol, "market_type": market_type, "side": "LONG", "quantity": "10.1"}
-                return {"symbol": symbol, "market_type": market_type, "side": "SHORT", "quantity": "9.8"}
-
-        plan = build_spot_perp_plan(
-            symbol="BEAT",
-            mode="open",
-            short_venue="aster",
-            quantity=Decimal("10"),
-            clip_usd=100.0,
-            spot_book={"bid": 9.99, "ask": 10.01, "ts_ms": 1},
-            perp_book={"bid": 9.9, "ask": 10.1, "ts_ms": 1},
-        )
-
-        with TemporaryDirectory() as temp_dir:
-            registry_path = Path(temp_dir) / "position_registry.json"
-            with patch(
-                "scripts.run_spot_perp_arbitrage.build_spot_perp_adapter",
-                side_effect=lambda venue, **kwargs: Adapter(venue),
-            ), patch(
-                "scripts.run_spot_perp_arbitrage.fetch_plan_books",
-                new=AsyncMock(return_value=(
-                    {"bid": 9.99, "ask": 10.01, "ts_ms": 1},
-                    {"bid": 9.9, "ask": 10.1, "ts_ms": 1},
-                )),
-            ):
-                result = await execute_spot_perp_plan(
-                    plan=plan,
-                    leverage=1,
-                    registry_path=registry_path,
-                )
-
-            self.assertTrue(result["ok"])
-            self.assertEqual(result["recorded_strategy_id"], result["strategy_id"])
-            registry = PositionRegistry.load(registry_path)
-            short_leg = registry.get_leg(f"{result['strategy_id']}:aster:perp:short")
-            spot_leg = registry.get_leg(f"{result['strategy_id']}:mexc_spot:spot:long")
-            self.assertEqual(short_leg.quantity, "9.8")
-            self.assertEqual(spot_leg.quantity, "10.1")
+        result, _, _, registry = await self.execute_recording_case()
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["recorded_strategy_id"], result["strategy_id"])
+        short = registry.get_leg(f"{result['strategy_id']}:aster:perp:short")
+        spot = registry.get_leg(f"{result['strategy_id']}:mexc_spot:spot:long")
+        self.assertEqual(Decimal(short.quantity), 10)
+        self.assertEqual(Decimal(spot.quantity), 10)
 
     async def test_close_execution_does_not_record_new_open_legs(self) -> None:
-        class Adapter:
-            async def get_price_tick_size(self, symbol):
-                return "0.01"
 
-            async def place_limit_order(self, **kwargs):
-                return {"ok": True, "filled": True, "status": "FILLED"}
-
-            async def wait_for_order_fill(self, **kwargs):
-                return {"ok": True, "raw": {"filled": True, "status": "FILLED"}}
-
-            async def place_market_order(self, **kwargs):
-                return {"ok": True}
-
-        plan = build_spot_perp_plan(
-            symbol="BEAT",
-            mode="close",
-            short_venue="aster",
-            quantity=Decimal("10"),
-            clip_usd=100.0,
-            spot_book={"bid": 9.99, "ask": 10.01, "ts_ms": 1},
-            perp_book={"bid": 9.9, "ask": 10.1, "ts_ms": 1},
-        )
-
-        with TemporaryDirectory() as temp_dir:
-            registry_path = Path(temp_dir) / "position_registry.json"
-            with patch(
-                "scripts.run_spot_perp_arbitrage.build_spot_perp_adapter",
-                side_effect=lambda venue, **kwargs: Adapter(),
-            ), patch(
-                "scripts.run_spot_perp_arbitrage.fetch_plan_books",
-                new=AsyncMock(return_value=(
-                    {"bid": 9.99, "ask": 10.01, "ts_ms": 1},
-                    {"bid": 9.9, "ask": 10.1, "ts_ms": 1},
-                )),
-            ):
-                result = await execute_spot_perp_plan(
-                    plan=plan,
-                    leverage=1,
-                    registry_path=registry_path,
-                )
-
-            self.assertTrue(result["ok"])
-            self.assertFalse(registry_path.exists())
+        result, _, _, registry = await self.execute_recording_case(mode="close")
+        self.assertTrue(result["ok"])
+        self.assertIsNone(registry)
 
     async def test_place_order_records_live_perp_pair_after_successful_open(self) -> None:
         class Adapter:

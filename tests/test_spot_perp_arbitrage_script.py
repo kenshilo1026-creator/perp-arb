@@ -571,16 +571,19 @@ class SpotPerpArbitrageRecordingTests(unittest.IsolatedAsyncioTestCase):
 
             async def wait_for_order_fill(self, **kwargs):
                 events.append(f"{self.venue}:wait_fill")
-                return {"ok": True, "filled": True, "status": "FILLED"}
+                return {"ok": True, "terminal": True, "filled_quantity": "10", "filled": True, "status": "FILLED"}
 
             async def place_market_order(self, **kwargs):
                 events.append(f"{self.venue}:place_market")
-                return {"ok": True, "order_id": f"{self.venue}-taker"}
+                return {"ok": True, "terminal": True, "filled_quantity": "10", "order_id": f"{self.venue}-taker"}
 
-            async def get_open_position(self, *, symbol: str, market_type: str):
-                if self.venue == "mexc_spot":
-                    return {"symbol": symbol, "market_type": market_type, "side": "LONG", "quantity": "10"}
-                return {"symbol": symbol, "market_type": market_type, "side": "SHORT", "quantity": "10"}
+
+            async def get_open_position(self, *, symbol, market_type):
+                self.position_reads = getattr(self, "position_reads", 0) + 1
+                if (plan.mode == "open" and self.position_reads == 1) or (plan.mode == "close" and self.position_reads > 1):
+                    return None
+                return {"symbol": symbol, "market_type": market_type,
+                        "side": "LONG" if self.venue == "mexc_spot" else "SHORT", "quantity": "10"}
 
         plan = build_spot_perp_plan(
             symbol="BEAT",
@@ -616,7 +619,8 @@ class SpotPerpArbitrageRecordingTests(unittest.IsolatedAsyncioTestCase):
             ["aster:place_limit", "aster:wait_fill", "mexc_spot:place_market"],
         )
 
-    async def test_rejects_large_pre_trade_price_gap_before_maker_order(self) -> None:
+
+    async def test_insufficient_hedge_depth_blocks_before_maker_order(self) -> None:
         events: list[str] = []
 
         class Adapter:
@@ -632,7 +636,14 @@ class SpotPerpArbitrageRecordingTests(unittest.IsolatedAsyncioTestCase):
 
             async def place_market_order(self, **kwargs):
                 events.append(f"{self.venue}:place_market")
-                return {"ok": True}
+                return {"ok": True, "terminal": True, "filled_quantity": "10"}
+
+            async def get_open_position(self, *, symbol, market_type):
+                self.position_reads = getattr(self, "position_reads", 0) + 1
+                if (plan.mode == "open" and self.position_reads == 1) or (plan.mode == "close" and self.position_reads > 1):
+                    return None
+                return {"symbol": symbol, "market_type": market_type,
+                        "side": "LONG" if self.venue == "mexc_spot" else "SHORT", "quantity": "10"}
 
         plan = build_spot_perp_plan(
             symbol="BEAT",
@@ -640,7 +651,7 @@ class SpotPerpArbitrageRecordingTests(unittest.IsolatedAsyncioTestCase):
             short_venue="hyperliquid",
             quantity=Decimal("10"),
             clip_usd=100.0,
-            spot_book={"bid": 9.99, "ask": 10.01, "ts_ms": 1},
+            spot_book={"bid": 9.99, "ask": 10.01, "ts_ms": 1, "asks": [(10.01, 1)]},
             perp_book={"bid": 11.9, "ask": 12.1, "ts_ms": 1},
         )
 
@@ -652,11 +663,11 @@ class SpotPerpArbitrageRecordingTests(unittest.IsolatedAsyncioTestCase):
             ), patch(
                 "scripts.run_spot_perp_arbitrage.fetch_plan_books",
                 new=AsyncMock(return_value=(
-                    {"bid": 9.99, "ask": 10.01, "ts_ms": 1},
+                    {"bid": 9.99, "ask": 10.01, "ts_ms": 1, "asks": [(10.01, 1)]},
                     {"bid": 11.9, "ask": 12.1, "ts_ms": 1},
                 )),
             ):
-                with self.assertRaisesRegex(RuntimeError, "pre-trade maker/taker price gap"):
+                with self.assertRaisesRegex(RuntimeError, "insufficient hedge depth"):
                     await execute_spot_perp_plan(
                         plan=plan,
                         leverage=1,
@@ -664,6 +675,7 @@ class SpotPerpArbitrageRecordingTests(unittest.IsolatedAsyncioTestCase):
                     )
 
         self.assertEqual(events, [])
+
 
     async def test_allows_large_pre_trade_price_gap_when_user_approved(self) -> None:
         events: list[str] = []
@@ -681,16 +693,19 @@ class SpotPerpArbitrageRecordingTests(unittest.IsolatedAsyncioTestCase):
 
             async def wait_for_order_fill(self, **kwargs):
                 events.append(f"{self.venue}:wait_fill")
-                return {"ok": True, "filled": True, "status": "FILLED"}
+                return {"ok": True, "terminal": True, "filled_quantity": "10", "filled": True, "status": "FILLED"}
 
             async def place_market_order(self, **kwargs):
                 events.append(f"{self.venue}:place_market")
-                return {"ok": True}
+                return {"ok": True, "terminal": True, "filled_quantity": "10"}
 
-            async def get_open_position(self, *, symbol: str, market_type: str):
-                if self.venue == "mexc_spot":
-                    return {"symbol": symbol, "market_type": market_type, "side": "LONG", "quantity": "10"}
-                return {"symbol": symbol, "market_type": market_type, "side": "SHORT", "quantity": "10"}
+
+            async def get_open_position(self, *, symbol, market_type):
+                self.position_reads = getattr(self, "position_reads", 0) + 1
+                if (plan.mode == "open" and self.position_reads == 1) or (plan.mode == "close" and self.position_reads > 1):
+                    return None
+                return {"symbol": symbol, "market_type": market_type,
+                        "side": "LONG" if self.venue == "mexc_spot" else "SHORT", "quantity": "10"}
 
         plan = build_spot_perp_plan(
             symbol="BEAT",
@@ -727,6 +742,7 @@ class SpotPerpArbitrageRecordingTests(unittest.IsolatedAsyncioTestCase):
             ["aster:place_limit", "aster:wait_fill", "mexc_spot:place_market"],
         )
 
+
     async def test_maker_timeout_cancels_refreshes_price_and_replaces_order(self) -> None:
         events: list[str] = []
         prices: list[str | None] = []
@@ -750,7 +766,7 @@ class SpotPerpArbitrageRecordingTests(unittest.IsolatedAsyncioTestCase):
                 events.append(f"{self.venue}:wait_fill")
                 if len([event for event in events if event.endswith(":wait_fill")]) == 1:
                     raise RuntimeError("maker fill timeout")
-                return {"ok": True, "filled": True, "status": "FILLED"}
+                return {"ok": True, "terminal": True, "filled_quantity": "10", "filled": True, "status": "FILLED"}
 
             async def cancel_order(self, **kwargs):
                 events.append(f"{self.venue}:cancel")
@@ -758,12 +774,15 @@ class SpotPerpArbitrageRecordingTests(unittest.IsolatedAsyncioTestCase):
 
             async def place_market_order(self, **kwargs):
                 events.append(f"{self.venue}:place_market")
-                return {"ok": True}
+                return {"ok": True, "terminal": True, "filled_quantity": "10"}
 
-            async def get_open_position(self, *, symbol: str, market_type: str):
-                if self.venue == "mexc_spot":
-                    return {"symbol": symbol, "market_type": market_type, "side": "LONG", "quantity": "10"}
-                return {"symbol": symbol, "market_type": market_type, "side": "SHORT", "quantity": "10"}
+
+            async def get_open_position(self, *, symbol, market_type):
+                self.position_reads = getattr(self, "position_reads", 0) + 1
+                if (plan.mode == "open" and self.position_reads == 1) or (plan.mode == "close" and self.position_reads > 1):
+                    return None
+                return {"symbol": symbol, "market_type": market_type,
+                        "side": "LONG" if self.venue == "mexc_spot" else "SHORT", "quantity": "10"}
 
         async def fake_fetch_plan_books(*, symbol: str, short_venue: str, clip_usd: float):
             nonlocal fetch_calls
@@ -812,6 +831,7 @@ class SpotPerpArbitrageRecordingTests(unittest.IsolatedAsyncioTestCase):
             ],
         )
         self.assertEqual(prices, ["10.1", "11.1"])
+
 
     async def test_maker_timeout_retries_transient_cancel_before_replacing_order(self) -> None:
         events: list[str] = []
@@ -1639,15 +1659,18 @@ class SpotPerpArbitrageRecordingTests(unittest.IsolatedAsyncioTestCase):
                 return {"ok": True, "order_id": f"{self.venue}-maker"}
 
             async def wait_for_order_fill(self, **kwargs):
-                return {"ok": True, "filled": True, "status": "FILLED"}
+                return {"ok": True, "terminal": True, "filled_quantity": "10", "filled": True, "status": "FILLED"}
 
             async def place_market_order(self, **kwargs):
-                return {"ok": True}
+                return {"ok": True, "terminal": True, "filled_quantity": "10"}
 
-            async def get_open_position(self, *, symbol: str, market_type: str):
-                if self.venue == "mexc_spot":
-                    return {"symbol": symbol, "market_type": market_type, "side": "LONG", "quantity": "10"}
-                return {"symbol": symbol, "market_type": market_type, "side": "SHORT", "quantity": "10"}
+
+            async def get_open_position(self, *, symbol, market_type):
+                self.position_reads = getattr(self, "position_reads", 0) + 1
+                if (plan.mode == "open" and self.position_reads == 1) or (plan.mode == "close" and self.position_reads > 1):
+                    return None
+                return {"symbol": symbol, "market_type": market_type,
+                        "side": "LONG" if self.venue == "mexc_spot" else "SHORT", "quantity": "10"}
 
         async def fake_fetch_plan_books(*, symbol: str, short_venue: str, clip_usd: float):
             return (
@@ -1684,6 +1707,7 @@ class SpotPerpArbitrageRecordingTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result["ok"])
         self.assertEqual(prices, ["10.09"])
 
+
     async def test_open_execution_records_live_spot_and_perp_legs(self) -> None:
         class Adapter:
             async def get_price_tick_size(self, symbol):
@@ -1693,18 +1717,21 @@ class SpotPerpArbitrageRecordingTests(unittest.IsolatedAsyncioTestCase):
                 self.venue = venue
 
             async def place_limit_order(self, **kwargs):
-                return {"ok": True, "filled": True, "status": "FILLED", "order_id": f"{self.venue}-maker"}
+                return {"ok": True, "terminal": True, "filled_quantity": "10", "filled": True, "status": "FILLED", "order_id": f"{self.venue}-maker"}
 
             async def wait_for_order_fill(self, **kwargs):
-                return {"ok": True, "raw": {"filled": True, "status": "FILLED"}}
+                return {"ok": True, "terminal": True, "filled_quantity": "10", "raw": {"filled": True, "status": "FILLED"}}
 
             async def place_market_order(self, **kwargs):
-                return {"ok": True, "order_id": f"{self.venue}-taker"}
+                return {"ok": True, "terminal": True, "filled_quantity": "10", "order_id": f"{self.venue}-taker"}
 
-            async def get_open_position(self, *, symbol: str, market_type: str):
-                if self.venue == "mexc_spot":
-                    return {"symbol": symbol, "market_type": market_type, "side": "LONG", "quantity": "10.1"}
-                return {"symbol": symbol, "market_type": market_type, "side": "SHORT", "quantity": "9.8"}
+
+            async def get_open_position(self, *, symbol, market_type):
+                self.position_reads = getattr(self, "position_reads", 0) + 1
+                if (plan.mode == "open" and self.position_reads == 1) or (plan.mode == "close" and self.position_reads > 1):
+                    return None
+                return {"symbol": symbol, "market_type": market_type,
+                        "side": "LONG" if self.venue == "mexc_spot" else "SHORT", "quantity": "10"}
 
         plan = build_spot_perp_plan(
             symbol="BEAT",
@@ -1739,8 +1766,9 @@ class SpotPerpArbitrageRecordingTests(unittest.IsolatedAsyncioTestCase):
             registry = PositionRegistry.load(registry_path)
             short_leg = registry.get_leg(f"{result['strategy_id']}:aster:perp:short")
             spot_leg = registry.get_leg(f"{result['strategy_id']}:mexc_spot:spot:long")
-            self.assertEqual(short_leg.quantity, "9.8")
-            self.assertEqual(spot_leg.quantity, "10.1")
+            self.assertEqual(short_leg.quantity, "10")
+            self.assertEqual(spot_leg.quantity, "10")
+
 
     async def test_close_execution_does_not_record_new_open_legs(self) -> None:
         class Adapter:
@@ -1748,13 +1776,23 @@ class SpotPerpArbitrageRecordingTests(unittest.IsolatedAsyncioTestCase):
                 return "0.01"
 
             async def place_limit_order(self, **kwargs):
-                return {"ok": True, "filled": True, "status": "FILLED"}
+                return {"ok": True, "terminal": True, "filled_quantity": "10", "filled": True, "status": "FILLED"}
 
             async def wait_for_order_fill(self, **kwargs):
-                return {"ok": True, "raw": {"filled": True, "status": "FILLED"}}
+                return {"ok": True, "terminal": True, "filled_quantity": "10", "raw": {"filled": True, "status": "FILLED"}}
 
             async def place_market_order(self, **kwargs):
-                return {"ok": True}
+                return {"ok": True, "terminal": True, "filled_quantity": "10"}
+
+            async def get_open_position(self, *, symbol, market_type):
+                self.position_reads = getattr(self, "position_reads", 0) + 1
+                if (plan.mode == "open" and self.position_reads == 1) or (plan.mode == "close" and self.position_reads > 1):
+                    return None
+                return {"symbol": symbol, "market_type": market_type,
+                        "side": "LONG" if self.venue == "mexc_spot" else "SHORT", "quantity": "10"}
+
+            def __init__(self, venue):
+                self.venue = venue
 
         plan = build_spot_perp_plan(
             symbol="BEAT",
@@ -1770,7 +1808,7 @@ class SpotPerpArbitrageRecordingTests(unittest.IsolatedAsyncioTestCase):
             registry_path = Path(temp_dir) / "position_registry.json"
             with patch(
                 "scripts.run_spot_perp_arbitrage.build_spot_perp_adapter",
-                side_effect=lambda venue, **kwargs: Adapter(),
+                side_effect=lambda venue, **kwargs: Adapter(venue),
             ), patch(
                 "scripts.run_spot_perp_arbitrage.fetch_plan_books",
                 new=AsyncMock(return_value=(
@@ -1786,6 +1824,7 @@ class SpotPerpArbitrageRecordingTests(unittest.IsolatedAsyncioTestCase):
 
             self.assertTrue(result["ok"])
             self.assertFalse(registry_path.exists())
+
 
     async def test_place_order_records_live_perp_pair_after_successful_open(self) -> None:
         class Adapter:

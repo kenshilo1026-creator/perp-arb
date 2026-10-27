@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from decimal import Decimal
 from typing import Awaitable, Callable
 
@@ -13,8 +14,36 @@ class HedgeFailure(RuntimeError):
         self.attempts = attempts
 
 
-async def position_quantity(adapter, symbol: str) -> Decimal:
-    position = await adapter.get_open_position(symbol=symbol, market_type="perp")
+def merge_hedge_fills(results: list[dict]) -> dict:
+    """Combine disjoint, confirmed hedge quantities (including early partials)."""
+    from hydra_basis.execution_engine.executor import extract_actual_average_price
+    total, quote = Decimal(0), Decimal(0)
+    priced = True
+    attempts, timings = [], []
+    for result in results:
+        quantity = Decimal(result["filled_quantity"])
+        total += quantity
+        price = extract_actual_average_price(result)
+        if quantity > 0:
+            if price is None:
+                priced = False
+            else:
+                quote += quantity * price
+        attempts.extend(result.get("attempts", []))
+        timings.extend(result.get("request_timings", []))
+    combined = {"ok": True, "terminal": True, "aggregate_fill": True,
+                "filled_quantity": str(total), "attempts": attempts, "request_timings": timings}
+    if priced and total > 0:
+        combined["avg_price"] = str(quote / total)
+    for key in ("first_dispatch_ns", "first_submit_ns"):
+        values = [r[key] for r in results if r.get(key) is not None]
+        if values:
+            combined[key] = min(values)
+    return combined
+
+
+async def position_quantity(adapter, symbol: str, *, market_type: str = "perp") -> Decimal:
+    position = await adapter.get_open_position(symbol=symbol, market_type=market_type)
     if position is None:
         return Decimal("0")
     if not isinstance(position, dict) or position.get("side") not in {"LONG", "SHORT"}:
@@ -36,7 +65,7 @@ def terminal_fill_quantity(result: object) -> Decimal | None:
     if result.get("terminal") is False:
         return None
     terminal = result.get("terminal") is True or str(result.get("status", "")).upper() in {
-        "FILLED", "CANCELED", "CANCELLED", "REJECTED", "EXPIRED",
+        "FILLED", "CANCELED", "CANCELLED", "PARTIALLY_CANCELED", "REJECTED", "EXPIRED",
     }
     if terminal:
         # Never use a historical trade buried in diagnostics as this order's
@@ -61,6 +90,7 @@ async def confirm_pair_execution(
     maker_adapter, taker_adapter, *, symbol: str, maker_baseline: Decimal,
     taker_baseline: Decimal, maker_side: str, quantity: Decimal,
     attempts: int = 20, poll_delay: float = 0.5,
+    maker_market_type: str = "perp", taker_market_type: str = "perp",
 ) -> None:
     direction = Decimal("1") if maker_side.upper() == "BUY" else Decimal("-1")
     expected_maker = maker_baseline + direction * quantity
@@ -69,7 +99,8 @@ async def confirm_pair_execution(
     for attempt in range(max(1, attempts)):
         try:
             maker, taker = await asyncio.gather(
-                position_quantity(maker_adapter, symbol), position_quantity(taker_adapter, symbol),
+                position_quantity(maker_adapter, symbol, market_type=maker_market_type),
+                position_quantity(taker_adapter, symbol, market_type=taker_market_type),
             )
             last = f"maker={maker} taker={taker} expected={expected_maker}/{expected_taker}"
             if maker == expected_maker and taker == expected_taker:
@@ -108,6 +139,7 @@ async def execute_confirmed_market_order(
     adapter, *, symbol: str, side: str, quantity: Decimal, clip_usd: float,
     baseline: Decimal, reduce_only: bool = False, max_attempts: int = 3,
     confirmation_attempts: int = 20, poll_delay: float = 0.5,
+    market_type: str = "perp", retry_delay: float = 0.0,
 ) -> dict:
     """Retry only a proven terminal remainder; never retry an unknown submission.
 
@@ -120,6 +152,39 @@ async def execute_confirmed_market_order(
     confirmed = Decimal("0")
     direction = Decimal("1") if side.upper() == "BUY" else Decimal("-1")
     attempts: list[dict] = []
+    def completed(*, source=None):
+        # Import lazily to share the strict fill-price parser without a module cycle.
+        from hydra_basis.execution_engine.executor import extract_actual_average_price
+        total_quote, priced_quantity = Decimal(0), Decimal(0)
+        timings = []
+        for record in attempts:
+            fill = record.get("order_status") or record.get("result")
+            qty = terminal_fill_quantity(fill)
+            avg = extract_actual_average_price(fill)
+            if qty is not None and qty > 0 and avg is not None:
+                total_quote += qty * avg
+                priced_quantity += qty
+            timing = (record.get("result") or {}).get("request_timing")
+            if isinstance(timing, dict):
+                timings.append(timing)
+        result = {"ok": True, "terminal": True, "filled_quantity": str(quantity),
+                  "aggregate_fill": True, "attempts": attempts,
+                  "first_dispatch_ns": attempts[0]["dispatch_ns"],
+                  "request_timings": timings}
+        if source:
+            result["source"] = source
+        if priced_quantity == quantity:
+            result["avg_price"] = str(total_quote / quantity)
+        if timings:
+            result["request_timing"] = {
+                "order_submit_ms": sum(t.get("order_submit_ms", 0) for t in timings),
+                "post_order_status_ms": sum(t.get("post_order_status_ms", 0) for t in timings),
+                "status_query_performed": any(t.get("status_query_performed") for t in timings),
+            }
+            if "order_submit_started_ns" in timings[0]:
+                result["first_submit_ns"] = timings[0]["order_submit_started_ns"]
+        return result
+
     for attempt in range(max(1, max_attempts)):
         remaining = quantity - confirmed
         kwargs = dict(symbol=symbol, side=side, amount=str(remaining),
@@ -128,12 +193,13 @@ async def execute_confirmed_market_order(
             kwargs["reduce_only"] = True
         result = None
         error = None
+        dispatch_ns = time.monotonic_ns()
         try:
             result = await adapter.place_market_order(**kwargs)
         except Exception as exc:
             error = str(exc)
             result = getattr(exc, "order_result", None)
-        record = {"amount": str(remaining), "result": result, "error": error}
+        record = {"amount": str(remaining), "result": result, "error": error, "dispatch_ns": dispatch_ns}
         attempts.append(record)
         terminal_quantity = terminal_fill_quantity(result)
         if terminal_quantity is None:
@@ -150,11 +216,10 @@ async def execute_confirmed_market_order(
                     except Exception as exc:
                         record["status_error"] = str(exc)
                 try:
-                    delta = (await position_quantity(adapter, symbol) - baseline) * direction
+                    delta = (await position_quantity(adapter, symbol, market_type=market_type) - baseline) * direction
                     record["live_filled_quantity"] = str(delta)
                     if delta == quantity:
-                        return {"ok": True, "filled_quantity": str(delta),
-                                "source": "live_position_delta", "attempts": attempts}
+                        return completed(source="live_position_delta")
                     if delta < 0 or delta > quantity:
                         record["position_error"] = "unexpected position movement"
                         break
@@ -168,8 +233,7 @@ async def execute_confirmed_market_order(
                                    uncertain=True, attempts=attempts)
             confirmed += terminal_quantity
             if confirmed == quantity:
-                return {"ok": True, "terminal": True, "filled_quantity": str(confirmed),
-                        "attempts": attempts, "raw": result}
+                return completed()
             print(f"[hedge-reconcile] terminal fill={terminal_quantity} remaining={quantity - confirmed}", flush=True)
         else:
             raise HedgeFailure(
@@ -179,7 +243,7 @@ async def execute_confirmed_market_order(
                 confirmed=confirmed, uncertain=True, attempts=attempts,
             )
         if attempt + 1 < max_attempts:
-            await asyncio.sleep(poll_delay)
+            await asyncio.sleep(retry_delay)
     raise HedgeFailure(
         f"hedge incomplete for {symbol}; confirmed={confirmed} remaining={quantity - confirmed}",
         confirmed=confirmed, uncertain=False, attempts=attempts,

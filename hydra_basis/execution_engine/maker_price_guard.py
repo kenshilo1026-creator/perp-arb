@@ -2,17 +2,42 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR, ROUND_HALF_UP
 from typing import Awaitable, Callable
 
 
 MAKER_TAKER_MAX_GAP = Decimal("0.002")
-MAKER_PRICE_CHECK_SECONDS = 1.0
+MAKER_PRICE_CHECK_SECONDS = 0.1
 MAKER_QUOTE_TIMEOUT_SECONDS = 3.0
 
 
 class MakerPriceRecheck(RuntimeError):
     """Cancel and reconcile the resting order before attempting another quote."""
+
+
+async def create_maker_guard(*, maker_adapter, taker_adapter, symbol, fetch_books,
+                             maker_side, taker_side, quantity):
+    """Only prices a resting maker. It must never gate a hedge after a fill."""
+    tick = getattr(maker_adapter, "get_price_tick_size", None)
+    if not callable(tick):
+        return None
+    for adapter in (maker_adapter, taker_adapter):
+        prepare = getattr(adapter, "prepare_hedge_quotes", None)
+        if callable(prepare):
+            await prepare(symbol)
+    maker_quote = getattr(maker_adapter, "hedge_quote", None)
+    taker_quote = getattr(taker_adapter, "hedge_quote", None)
+    async def books():
+        if callable(maker_quote) and callable(taker_quote):
+            return await maker_quote(), await taker_quote()
+        maker, taker = await fetch_books()
+        return (await maker_quote() if callable(maker_quote) else maker,
+                await taker_quote() if callable(taker_quote) else taker)
+    return MakerPriceGuard(fetch_books=books, tick_size=lambda: tick(symbol),
+        maker_side=maker_side, taker_side=taker_side, quantity=quantity,
+        fetch_taker_book=taker_quote if callable(taker_quote) else None,
+        wait_for_update=getattr(taker_adapter, "wait_for_hedge_quote", None))
 
 
 def adverse_price_gap(maker: Decimal, taker: Decimal, side: str) -> Decimal:
@@ -37,10 +62,10 @@ def bounded_maker_price(*, desired: Decimal, taker: Decimal, bid: Decimal,
     nearest = (desired / tick).to_integral_value(rounding=ROUND_HALF_UP)
     if side.upper() == "BUY":
         lower = Decimal(1)
-        upper = (taker / (1 - max_gap) / tick).to_integral_value(rounding=ROUND_FLOOR)
+        upper = (taker / (1 - max_gap) / tick).to_integral_value(rounding=ROUND_CEILING) - 1
         upper = min(upper, (ask / tick).to_integral_value(rounding=ROUND_CEILING) - 1)
     elif side.upper() == "SELL":
-        lower = (taker / (1 + max_gap) / tick).to_integral_value(rounding=ROUND_CEILING)
+        lower = (taker / (1 + max_gap) / tick).to_integral_value(rounding=ROUND_FLOOR) + 1
         lower = max(lower, (bid / tick).to_integral_value(rounding=ROUND_FLOOR) + 1)
         upper = max(lower, nearest)
     else:
@@ -54,13 +79,18 @@ class MakerPriceGuard:
     def __init__(self, *, fetch_books: Callable[[], Awaitable[tuple[dict, dict]]],
                  tick_size: Callable[[], Awaitable[str]], maker_side: str,
                  taker_side: str, max_gap: Decimal = MAKER_TAKER_MAX_GAP,
-                 check_seconds: float = MAKER_PRICE_CHECK_SECONDS) -> None:
+                 check_seconds: float = MAKER_PRICE_CHECK_SECONDS,
+                 quantity: Decimal | None = None,
+                 fetch_taker_book=None, wait_for_update=None) -> None:
         self.fetch_books = fetch_books
         self.tick_size = tick_size
         self.maker_side = maker_side
         self.taker_side = taker_side
         self.max_gap = max_gap
         self.check_seconds = check_seconds
+        self.quantity = quantity
+        self.fetch_taker_book = fetch_taker_book
+        self.wait_for_update = wait_for_update
         self.taker_book: dict | None = None
         if {maker_side.upper(), taker_side.upper()} != {"BUY", "SELL"}:
             raise ValueError("maker price guard requires opposite BUY/SELL sides")
@@ -70,6 +100,25 @@ class MakerPriceGuard:
     def taker_price(self, book: dict) -> Decimal:
         if self.taker_side.upper() not in {"BUY", "SELL"}:
             raise RuntimeError(f"unsupported taker side: {self.taker_side}")
+        age = Decimal(str(book.get("age_ms", 0)))
+        source = book.get("ts_ms", 0)
+        if not age.is_finite() or age < 0 or age > 1000:
+            raise RuntimeError("stale hedge quote")
+        if source and int(source) > 946684800000 and abs(time.time()*1000 - int(source)) > 1000:
+            raise RuntimeError("stale hedge source timestamp")
+        levels = book.get("asks" if self.taker_side.upper() == "BUY" else "bids")
+        if self.quantity is not None and levels:
+            remaining, quote = self.quantity, Decimal(0)
+            for p, q in levels:
+                p, q = Decimal(str(p)), Decimal(str(q))
+                if not p.is_finite() or not q.is_finite() or p <= 0 or q < 0:
+                    raise RuntimeError("invalid hedge depth")
+                take = min(remaining, q)
+                quote += take * p
+                remaining -= take
+                if remaining == 0:
+                    return quote / self.quantity
+            raise RuntimeError("insufficient hedge depth for full maker quantity")
         price = Decimal(str(book["ask" if self.taker_side.upper() == "BUY" else "bid"]))
         if not price.is_finite() or price <= 0:
             raise RuntimeError("invalid taker quote")
@@ -95,12 +144,16 @@ class MakerPriceGuard:
     async def check(self, submitted_price: str) -> None:
         maker = Decimal(submitted_price)
         try:
-            _, book = await self._books()
+            if self.fetch_taker_book is not None:
+                async with asyncio.timeout(MAKER_QUOTE_TIMEOUT_SECONDS):
+                    book = await self.fetch_taker_book()
+            else:
+                _, book = await self._books()
             taker = self.taker_price(book)
         except Exception as exc:
             raise MakerPriceRecheck(f"maker quote unavailable; cancel before refresh: {exc}") from exc
         gap = adverse_price_gap(maker, taker, self.maker_side)
-        if gap > self.max_gap:
+        if gap >= self.max_gap:
             raise MakerPriceRecheck(
                 f"adverse maker/taker gap {gap:.4%} > {self.max_gap:.2%}: maker={maker} taker={taker}"
             )
@@ -108,7 +161,10 @@ class MakerPriceGuard:
     async def watch(self, submitted_price: str) -> None:
         while True:
             await self.check(submitted_price)
-            await asyncio.sleep(self.check_seconds)
+            if self.wait_for_update is not None:
+                await self.wait_for_update()
+            else:
+                await asyncio.sleep(self.check_seconds)
 
 
 async def wait_with_price_guard(fill_wait: Awaitable[dict], guard: MakerPriceGuard,

@@ -166,7 +166,7 @@ class HedgeSafetyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["executed_quantity"], "10000")
         self.assertEqual(maker.quantity, -35000)
         self.assertEqual(taker.quantity, 35000)
-        self.assertEqual([o["amount"] for o in taker.orders], ["10000"])
+        self.assertEqual([o["amount"] for o in taker.orders], ["5000", "5000"])
 
     async def test_existing_mismatch_blocks_before_maker_order(self):
         maker = self.maker()

@@ -219,6 +219,16 @@ class HyperliquidExecutionAdapter:
             raise RuntimeError(f"hyperliquid mid price not found: {symbol}")
         return float(mid)
 
+    async def get_price_tick_size(self, symbol: str) -> str:
+        decimals = await self._get_sz_decimals(symbol)
+        mid = Decimal(str(await self._get_mid_price(symbol)))
+        if not mid.is_finite() or mid <= 0:
+            raise RuntimeError("invalid hyperliquid price for tick size")
+        # Integer prices are always valid; fractional prices permit five
+        # significant figures and at most 6 - szDecimals decimal places.
+        return str(max(Decimal(10) ** -(6 - decimals),
+                       min(Decimal(1), Decimal(10) ** (mid.adjusted() - 4))))
+
     def _next_nonce(self) -> int:
         signer = self._wallet.address.lower() if hasattr(self, "_wallet") else ""
         now = int(time.time() * 1000)

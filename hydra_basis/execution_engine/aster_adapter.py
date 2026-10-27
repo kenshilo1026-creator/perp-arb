@@ -8,6 +8,8 @@ from decimal import Decimal, ROUND_FLOOR
 from urllib.parse import urlencode
 
 import aiohttp
+
+from hydra_basis.execution_engine.aster_depth_stream import AsterDepthStream
 from eth_account import Account
 try:
     from eth_account.messages import encode_structured_data
@@ -106,6 +108,7 @@ class AsterExecutionAdapter:
         self._isolated_symbols: set[str] = set()
         self._leveraged_symbols: set[str] = set()
         self._session: aiohttp.ClientSession | None = None
+        self._hedge_depth = None
         self._fill_stream: OrderEventStream | None = None
 
     @asynccontextmanager
@@ -115,6 +118,9 @@ class AsterExecutionAdapter:
         yield self._session
 
     async def close(self) -> None:
+        if self._hedge_depth is not None:
+            await self._hedge_depth.close()
+            self._hedge_depth = None
         if self._fill_stream is not None:
             await self._fill_stream.close()
             self._fill_stream = None
@@ -127,6 +133,28 @@ class AsterExecutionAdapter:
         await self.warm_up()
         await self.ensure_isolated_margin(symbol)
         await self.ensure_leverage(symbol)
+
+    async def prepare_hedge_quotes(self, symbol: str) -> None:
+        if self._hedge_depth is not None:
+            return
+        raw_symbol = await self._resolve_raw_symbol(symbol)
+        async def connect():
+            async with self._request_session() as session:
+                return await session.ws_connect(
+                    f"wss://fstream.asterdex.com/ws/{raw_symbol.lower()}@depth20@100ms", heartbeat=20)
+        stream = AsterDepthStream(connect=connect, symbol=raw_symbol)
+        await stream.start()
+        self._hedge_depth = stream
+
+    async def hedge_quote(self) -> dict:
+        if self._hedge_depth is None:
+            raise RuntimeError("Aster hedge depth not started")
+        return self._hedge_depth.snapshot()
+
+    async def wait_for_hedge_quote(self) -> None:
+        if self._hedge_depth is None:
+            raise RuntimeError("Aster hedge depth not started")
+        await self._hedge_depth.wait_for_update()
 
     async def _user_stream_request(self, method: str) -> dict:
         params = self.build_signed_params({})
@@ -577,6 +605,7 @@ class AsterExecutionAdapter:
         quantity = await self._format_quantity(symbol, amount, market=True)
         await self.ensure_isolated_margin(symbol)
         await self.ensure_leverage(symbol)
+        started = time.monotonic_ns()
         data = await self._post_order({
             "symbol": raw_symbol,
             "side": side.upper(),
@@ -584,7 +613,10 @@ class AsterExecutionAdapter:
             "quantity": quantity,
             **({"reduceOnly": "true"} if reduce_only else {}),
         })
-        return {"ok": True, "order_id": data.get("orderId"), "raw": data}
+        return {"ok": True, "order_id": data.get("orderId"), "raw": data,
+                "request_timing": {"order_submit_started_ns": started,
+                    "order_submit_ms": (time.monotonic_ns() - started) / 1_000_000,
+                    "post_order_status_ms": 0.0, "status_query_performed": False}}
 
     async def close_position(
         self,

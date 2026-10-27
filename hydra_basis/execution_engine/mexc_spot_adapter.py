@@ -10,9 +10,27 @@ from urllib.parse import urlencode
 
 import aiohttp
 
+from hydra_basis.execution_engine.mexc_depth_stream import MexcSpotDepthStream
+
 from hydra_basis.symbol_mapping import canonicalize_symbol, venue_symbol
 from hydra_basis.execution_engine.order_fill import poll_until_filled
+from hydra_basis.execution_engine.hedge_safety import wait_for_terminal_order, terminal_fill_quantity
 from hydra_basis.execution_engine.order_stream import OrderEventStream, OrderStreamError, decode_mexc_order, MEXC_ORDER_CHANNEL
+
+
+def market_fill_has_average(data: dict) -> bool:
+    if str(data.get("status", "")).upper() != "FILLED":
+        return False
+    try:
+        quantity = Decimal(str(data.get("executedQty") or "0"))
+        if not quantity.is_finite() or quantity <= 0:
+            return False
+        values = (Decimal(str(data.get(key) or "0"))
+                  for key in ("avgPrice", "cummulativeQuoteQty", "cumulativeQuoteQty"))
+        return any(value.is_finite() and value > 0 for value in values)
+    except (ArithmeticError, ValueError, TypeError):
+        # Optional fill metadata must not turn an accepted order into a retry.
+        return False
 
 
 class MexcSpotExecutionAdapter:
@@ -38,7 +56,9 @@ class MexcSpotExecutionAdapter:
         )
         self.recv_window_ms = recv_window_ms
         self._session: aiohttp.ClientSession | None = None
+        self._hedge_depth = None
         self._fill_stream: OrderEventStream | None = None
+        self._symbol_rules = {}
         self._listen_key: str | None = None
 
     @asynccontextmanager
@@ -48,6 +68,9 @@ class MexcSpotExecutionAdapter:
         yield self._session
 
     async def close(self) -> None:
+        if self._hedge_depth is not None:
+            await self._hedge_depth.close()
+            self._hedge_depth = None
         if self._fill_stream is not None:
             await self._fill_stream.close()
             self._fill_stream = None
@@ -67,6 +90,101 @@ class MexcSpotExecutionAdapter:
             async with session.get(f"{self.BASE_URL}/api/v3/ping") as response:
                 response.raise_for_status()
                 await response.read()
+
+    async def prepare_hedge_quotes(self, symbol: str) -> None:
+        if self._hedge_depth is not None:
+            return
+        async def connect():
+            async with self._request_session() as session:
+                return await session.ws_connect("wss://wbs-api.mexc.com/ws", heartbeat=20)
+
+        stream = MexcSpotDepthStream(connect=connect, symbol=self._spot_symbol(symbol))
+        await stream.start()
+        self._hedge_depth = stream
+
+    async def hedge_quote(self) -> dict:
+        if self._hedge_depth is None:
+            raise RuntimeError("MEXC hedge depth not started")
+        return self._hedge_depth.snapshot()
+
+    async def wait_for_hedge_quote(self) -> None:
+        if self._hedge_depth is None:
+            raise RuntimeError("MEXC hedge depth not started")
+        await self._hedge_depth.wait_for_update()
+
+    async def _load_symbol_rules(self, symbol: str) -> dict[str, Decimal]:
+        spot_symbol = self._spot_symbol(symbol)
+        if spot_symbol in self._symbol_rules:
+            return self._symbol_rules[spot_symbol]
+        async with self._request_session() as session:
+            async with session.get(
+                f"{self.BASE_URL}/api/v3/exchangeInfo", params={"symbol": spot_symbol},
+                timeout=aiohttp.ClientTimeout(total=5),
+            ) as response:
+                data = await response.json(content_type=None)
+                if response.status != 200:
+                    raise RuntimeError(f"mexc spot exchangeInfo {response.status}: {data}")
+        symbols = data.get("symbols") or []
+        if len(symbols) != 1:
+            raise RuntimeError(f"mexc spot symbol rules unavailable for {spot_symbol}")
+        filters = {item.get("filterType"): item for item in symbols[0].get("filters") or []}
+        price_filter = filters.get("PRICE_FILTER") or {}
+        lot_filter = filters.get("LOT_SIZE") or {}
+        info = symbols[0]
+        def precision_step(key):
+            value = int(info[key])
+            if not 0 <= value <= 18:
+                raise RuntimeError(f"invalid mexc spot precision: {key}")
+            return Decimal(10) ** -value
+        rules = {
+            "tick": Decimal(str(price_filter["tickSize"])) if price_filter.get("tickSize") else precision_step("quotePrecision"),
+            "step": Decimal(str(lot_filter["stepSize"])) if lot_filter.get("stepSize") else precision_step("baseAssetPrecision"),
+            "min_qty": Decimal(str(lot_filter.get("minQty") or info.get("baseSizePrecision") or "0")),
+            "min_notional": Decimal(str(info.get("quoteAmountPrecision") or "0")),
+        }
+        if any(not value.is_finite() or value <= 0 for value in (rules["tick"], rules["step"])):
+            raise RuntimeError(f"invalid mexc spot symbol rules for {spot_symbol}")
+        self._symbol_rules[spot_symbol] = rules
+        return rules
+
+    async def get_price_tick_size(self, symbol: str) -> str:
+        return str((await self._load_symbol_rules(symbol))["tick"])
+
+    async def get_order_execution(self, *, order_result: dict, symbol: str) -> dict:
+        order_id = order_result.get("order_id") or order_result.get("orderId")
+        if order_id is None:
+            raw = order_result.get("raw")
+            if isinstance(raw, dict):
+                order_id = raw.get("orderId")
+        if order_id is None:
+            raise RuntimeError("mexc spot order status requires order_id")
+        data = await self._get_order({"symbol": self._spot_symbol(symbol), "orderId": order_id})
+        if data.get("orderId") is not None and str(data["orderId"]) != str(order_id):
+            raise RuntimeError("mexc spot order status identity mismatch")
+        if data.get("symbol") is not None and data["symbol"] != self._spot_symbol(symbol):
+            raise RuntimeError("mexc spot order status symbol mismatch")
+        try:
+            filled = Decimal(str(data["executedQty"]))
+            if not filled.is_finite() or filled < 0:
+                raise ValueError("invalid cumulative fill")
+        except (KeyError, ValueError, ArithmeticError) as exc:
+            raise RuntimeError("mexc spot cumulative fill unavailable") from exc
+        status = str(data.get("status") or "").upper()
+        result = {
+            "status": status,
+            "terminal": status in {"FILLED", "CANCELED", "CANCELLED", "PARTIALLY_CANCELED", "REJECTED", "EXPIRED"},
+            "filled_quantity": str(filled),
+            "order_id": order_id,
+            "raw": data,
+        }
+        if market_fill_has_average(data):
+            average = Decimal(str(data.get("avgPrice") or "0"))
+            if average <= 0:
+                average = Decimal(str(
+                    data.get("cummulativeQuoteQty") or data.get("cumulativeQuoteQty")
+                )) / Decimal(str(data.get("executedQty")))
+            result["avg_price"] = str(average)
+        return result
 
     async def _user_stream_request(self, method: str) -> dict:
         params = {"listenKey": self._listen_key} if method != "POST" else {}
@@ -229,26 +347,30 @@ class MexcSpotExecutionAdapter:
     async def place_market_order(
         self, *, symbol: str, side: str, amount: str, clip_usd: float
     ) -> dict:
-        data = await self._post_order(
-            {
-                "symbol": self._spot_symbol(symbol),
-                "side": side.strip().upper(),
-                "type": "MARKET",
-                "quantity": amount,
-            }
-        )
-        data = await self._enrich_order_with_status(symbol=symbol, order_data=data)
-        return {"ok": True, "order_id": data.get("orderId"), "raw": data}
+        started = time.monotonic_ns()
+        data = await self._post_order({
+            "symbol": self._spot_symbol(symbol), "side": side.strip().upper(),
+            "type": "MARKET", "quantity": amount,
+        })
+        submitted = time.monotonic_ns()
+        needs_status = not market_fill_has_average(data)
+        if needs_status:
+            data = await self._enrich_order_with_status(symbol=symbol, order_data=data)
+        return {"ok": True, "order_id": data.get("orderId"), "raw": data,
+                "request_timing": {"order_submit_started_ns": started,
+                    "order_submit_ms": (submitted - started) / 1_000_000,
+                    "post_order_status_ms": (time.monotonic_ns() - submitted) / 1_000_000 if needs_status else 0,
+                    "status_query_performed": needs_status}}
 
     async def place_limit_order(
-        self, *, symbol: str, side: str, amount: str, clip_usd: float, price: str
+        self, *, symbol: str, side: str, amount: str, clip_usd: float, price: str, post_only: bool = False
     ) -> dict:
         data = await self._post_order(
             {
                 "symbol": self._spot_symbol(symbol),
                 "side": side.strip().upper(),
-                "type": "LIMIT",
-                "timeInForce": "GTC",
+                "type": "LIMIT_MAKER" if post_only else "LIMIT",
+                **({} if post_only else {"timeInForce": "GTC"}),
                 "quantity": amount,
                 "price": price,
             }
@@ -313,7 +435,11 @@ class MexcSpotExecutionAdapter:
         )
         if data.get("cancelRejectedAsFilled"):
             data = await self._enrich_order_with_status(symbol=symbol, order_data=data)
-        return {"ok": True, "order_id": data.get("orderId", order_id), "raw": data}
+        final = await wait_for_terminal_order(
+            lambda: self.get_order_execution(order_result={"order_id": order_id}, symbol=symbol), initial=data,
+        )
+        return {"ok": True, "order_id": order_id, "raw": final,
+                "terminal": True, "filled_quantity": str(terminal_fill_quantity(final))}
 
     async def get_open_position(self, *, symbol: str, market_type: str) -> dict | None:
         if market_type != "spot":

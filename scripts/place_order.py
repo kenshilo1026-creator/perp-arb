@@ -19,7 +19,7 @@ from hydra_basis.execution_engine.aster_adapter import AsterExecutionAdapter
 import aiohttp
 
 from hydra_basis.execution_engine.executor import execute_single_clip, execute_single_clip_with_sides, passive_limit_price_from_orderbook, execution_sides_for_signal
-from hydra_basis.execution_engine.maker_price_guard import MakerPriceGuard
+from hydra_basis.execution_engine.maker_price_guard import MakerPriceGuard, create_maker_guard
 from hydra_basis.execution_engine.order_service import Deps, progress_printer, run_batched_execution
 from hydra_basis.execution_engine.order_fill import extract_filled_quantity
 from hydra_basis.execution_engine.market_data import fetch_orderbook_snapshot
@@ -480,11 +480,11 @@ async def execute_close_position_plan(
         books = await fetch_close_orderbooks(symbol=symbol, venues=venues, clip_usd=plan.clip_usd)
         return books[plan.maker_venue], books[plan.taker_venue]
 
-    maker_guard = MakerPriceGuard(
-        fetch_books=guard_books,
-        tick_size=lambda: adapters[plan.maker_venue].get_price_tick_size(symbol),
-        maker_side=maker_side, taker_side=taker_side,
-    ) if plan.maker_venue == "aster" else None
+    maker_guard = await create_maker_guard(
+        maker_adapter=adapters[plan.maker_venue], taker_adapter=taker_adapter,
+        symbol=symbol, fetch_books=guard_books,
+        maker_side=maker_side, taker_side=taker_side, quantity=plan.quantity,
+    )
     taker_pre_hook = None
     prepare_fn = getattr(taker_adapter, "prepare_market_order", None)
     if plan.taker_venue == "variational" and callable(prepare_fn):
@@ -626,11 +626,11 @@ async def execute_open_clip(
             )
             return books[maker_venue], books[taker_venue]
 
-        maker_guard = MakerPriceGuard(
-            fetch_books=guard_books,
-            tick_size=lambda: maker_adapter.get_price_tick_size(symbol),
-            maker_side=maker_side, taker_side=taker_side,
-        ) if maker_venue == "aster" else None
+        maker_guard = await create_maker_guard(
+            maker_adapter=maker_adapter, taker_adapter=taker_adapter,
+            symbol=symbol, fetch_books=guard_books,
+            maker_side=maker_side, taker_side=taker_side, quantity=batch_clip_size,
+        )
         use_maker_orderbook = None if maker_venue == "variational" else maker_book
 
         async def _refresh_open_maker_price() -> str:

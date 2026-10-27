@@ -322,7 +322,7 @@ class ExecutionCloseFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(options["maker_price"], "1.23")
 
     async def test_variational_close_resolves_preview_before_dispatch(self):
-        maker = mock.Mock()
+        maker = mock.Mock(spec=["get_limit_price_preview"])
         maker.get_limit_price_preview = mock.AsyncMock(return_value="1.25")
         with mock.patch("scripts.place_order.execute_single_clip_with_sides", new=mock.AsyncMock(return_value={"ok": True})) as execute:
             await execute_close_position_plan(plan=self.plan("variational", "aster"),
@@ -1898,7 +1898,7 @@ class MexcSpotExecutionAdapterTests(unittest.IsolatedAsyncioTestCase):
         class Adapter(MexcSpotExecutionAdapter):
             async def _delete_order(self, params: dict) -> dict:
                 calls.append(dict(params))
-                return {"orderId": "spot-2", "status": "CANCELED"}
+                return {"orderId": "spot-2", "status": "CANCELED", "executedQty": "0"}
 
         result = await Adapter(api_key="k", api_secret="s").cancel_order(
             order_result={"ok": True, "order_id": "spot-2"},

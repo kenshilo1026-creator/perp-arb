@@ -233,7 +233,14 @@ class GuardExecutionTests(unittest.IsolatedAsyncioTestCase):
                     place_limit_order=AsyncMock(return_value={"ok": True, "raw": {
                         "status": "FILLED", "executedQty": "100"}}),
                 )
-                taker = SimpleNamespace(place_market_order=AsyncMock(return_value={"ok": True}))
+                maker.get_open_position = AsyncMock(side_effect=[
+                    None if mode == "open" else {"side": "SHORT", "quantity": "100"},
+                    {"side": "SHORT", "quantity": "100"} if mode == "open" else None])
+                taker = SimpleNamespace(place_market_order=AsyncMock(return_value={
+                    "ok": True, "terminal": True, "filled_quantity": "100"}),
+                    get_open_position=AsyncMock(side_effect=[
+                        None if mode == "open" else {"side": "LONG", "quantity": "100"},
+                        {"side": "LONG", "quantity": "100"} if mode == "open" else None]))
                 with patch("scripts.run_spot_perp_arbitrage.build_spot_perp_adapter",
                            side_effect=lambda venue, **kw: maker if venue == "aster" else taker), \
                      patch("scripts.run_spot_perp_arbitrage.fetch_plan_books", new=AsyncMock(return_value=(spot, perp))), \

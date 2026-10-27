@@ -28,7 +28,7 @@ from hydra_basis.execution_engine.market_data import (
     fetch_mexc_spot_orderbook,
     fetch_orderbook_snapshot,
 )
-from hydra_basis.execution_engine.maker_price_guard import MakerPriceGuard, adverse_price_gap
+from hydra_basis.execution_engine.maker_price_guard import MakerPriceGuard, create_maker_guard, adverse_price_gap
 from hydra_basis.execution_engine.mexc_spot_adapter import MexcSpotExecutionAdapter
 from hydra_basis.execution_engine.order_stream import format_stream_error
 from hydra_basis.execution_engine.order_service import Deps, progress_printer, run_batched_execution
@@ -344,6 +344,8 @@ def format_spot_perp_execution_summary(
             f"對沖呼叫至回傳 {timing['hedge_call_duration_ms']:.2f} ms"
             "（非兩所實際成交時間差）"
         )
+        if timing.get("maker_observed_to_submit_ms") is not None:
+            lines.append(f"?????? ? adapter ????: {timing['maker_observed_to_submit_ms']:.2f} ms")
     return lines
 
 
@@ -474,13 +476,13 @@ async def execute_spot_perp_plan(
             spot, perp = await fetch_plan_books(
                 symbol=plan.symbol, short_venue=plan.short_venue, clip_usd=plan.clip_usd,
             )
-            return perp, spot
+            return (spot, perp) if plan.maker_venue == MEXC_SPOT_VENUE else (perp, spot)
 
-        maker_guard = MakerPriceGuard(
-            fetch_books=guard_books,
-            tick_size=lambda: maker_adapter.get_price_tick_size(plan.symbol),
-            maker_side=plan.maker_side, taker_side=plan.taker_side,
-        ) if plan.maker_venue == "aster" else None
+        maker_guard = await create_maker_guard(
+            maker_adapter=maker_adapter, taker_adapter=taker_adapter, symbol=plan.symbol,
+            fetch_books=guard_books, maker_side=plan.maker_side, taker_side=plan.taker_side,
+            quantity=plan.quantity,
+        )
         # For close mode, treating spot as the "short venue" makes the existing
         # side mapper emit spot SELL and perp BUY.
         side_short_venue = plan.short_venue if plan.mode == "open" else MEXC_SPOT_VENUE
@@ -517,6 +519,12 @@ async def execute_spot_perp_plan(
                 else float(SPOT_PERP_MAX_PRE_TRADE_PRICE_GAP)
             ),
             min_hedge_notional_usd=float(SPOT_PERP_MIN_HEDGE_NOTIONAL_USD),
+            verify_hedge_fill=True,
+            maker_market_type="spot" if plan.maker_venue == MEXC_SPOT_VENUE else "perp",
+            taker_market_type="spot" if plan.taker_venue == MEXC_SPOT_VENUE else "perp",
+            maker_reduce_only=plan.mode == "close" and plan.maker_venue != MEXC_SPOT_VENUE,
+            taker_reduce_only=plan.mode == "close" and plan.taker_venue != MEXC_SPOT_VENUE,
+
         )
         if plan.mode != "open" or not result.get("ok", False):
             return result

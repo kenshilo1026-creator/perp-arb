@@ -325,3 +325,45 @@ class OrderEventStream:
                 if not task.done():
                     task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
+
+
+def _protobuf_items(data: bytes) -> list[tuple[int, bytes | int]]:
+    """Read the scalar fields used by MEXC's private-order protobuf schema.
+
+    Unknown scalar fields are skipped; malformed/truncated frames fail closed.
+    Schema: https://github.com/mexcdevelop/websocket-proto
+    """
+    position = 0
+    fields = []
+
+    def varint():
+        nonlocal position
+        value = 0
+        for shift in range(0, 70, 7):
+            if position >= len(data):
+                raise ValueError("truncated protobuf varint")
+            byte = data[position]
+            position += 1
+            value |= (byte & 127) << shift
+            if byte < 128:
+                return value
+        raise ValueError("invalid protobuf varint")
+
+    while position < len(data):
+        tag = varint()
+        number, wire = tag >> 3, tag & 7
+        if not number:
+            raise ValueError("invalid protobuf field")
+        if wire == 0:
+            fields.append((number, varint()))
+        elif wire in (1, 2, 5):
+            length = varint() if wire == 2 else (8 if wire == 1 else 4)
+            end = position + length
+            if end > len(data):
+                raise ValueError("truncated protobuf field")
+            if wire == 2:
+                fields.append((number, data[position:end]))
+            position = end
+        else:
+            raise ValueError("unsupported protobuf wire type")
+    return fields

@@ -64,13 +64,15 @@ async def fetch_mexc_spot_orderbook(session: aiohttp.ClientSession, symbol: str)
         session,
         "GET",
         "https://api.mexc.com/api/v3/depth",
-        params={"symbol": spot_symbol, "limit": 5},
+        params={"symbol": spot_symbol, "limit": 20},
     )
     bids = data.get("bids") or []
     asks = data.get("asks") or []
     if not bids or not asks:
         raise RuntimeError(f"missing mexc spot orderbook for {symbol}")
     return {
+        "bids": [(str(p), str(q)) for p, q, *_ in bids],
+        "asks": [(str(p), str(q)) for p, q, *_ in asks],
         "bid": float(bids[0][0]),
         "ask": float(asks[0][0]),
         "ts_ms": 0,
@@ -89,6 +91,8 @@ async def fetch_hyperliquid_orderbook(session: aiohttp.ClientSession, symbol: st
     if not bids or not asks:
         raise RuntimeError(f"missing hyperliquid orderbook for {symbol}")
     return {
+        "bids": [(str(x["px"]), str(x["sz"])) for x in bids],
+        "asks": [(str(x["px"]), str(x["sz"])) for x in asks],
         "bid": float(bids[0]["px"]),
         "ask": float(asks[0]["px"]),
         "ts_ms": int(data.get("time") or 0),
@@ -112,6 +116,8 @@ async def fetch_tradexyz_orderbook(session: aiohttp.ClientSession, symbol: str) 
     if not bids or not asks:
         raise RuntimeError(f"missing trade_xyz orderbook for {symbol}")
     return {
+        "bids": [(str(x["px"]), str(x["sz"])) for x in bids],
+        "asks": [(str(x["px"]), str(x["sz"])) for x in asks],
         "bid": float(bids[0]["px"]),
         "ask": float(asks[0]["px"]),
         "ts_ms": int(data.get("time") or 0),
@@ -154,7 +160,7 @@ async def fetch_aster_orderbook(session: aiohttp.ClientSession, symbol: str) -> 
                 session,
                 "GET",
                 "https://fapi.asterdex.com/fapi/v1/depth",
-                params={"symbol": contract_symbol, "limit": 5},
+                params={"symbol": contract_symbol, "limit": 20},
             )
         except Exception as exc:
             last_exc = exc
@@ -164,9 +170,11 @@ async def fetch_aster_orderbook(session: aiohttp.ClientSession, symbol: str) -> 
         if not bids or not asks:
             continue
         return {
+            "bids": [(str(p), str(q)) for p, q, *_ in bids],
+            "asks": [(str(p), str(q)) for p, q, *_ in asks],
             "bid": float(bids[0][0]),
             "ask": float(asks[0][0]),
-            "ts_ms": int(data.get("T") or data.get("E") or data.get("lastUpdateId") or 0),
+            "ts_ms": int(data.get("T") or data.get("E") or 0),
         }
     raise last_exc
 
@@ -195,10 +203,12 @@ async def fetch_lighter_orderbook(session: aiohttp.ClientSession, symbol: str) -
                 raise RuntimeError(f"missing lighter orderbook for {symbol}")
             bid = bids[0][0] if isinstance(bids[0], list) else bids[0].get("price")
             ask = asks[0][0] if isinstance(asks[0], list) else asks[0].get("price")
+            def level(x):
+                return (str(x[0]), str(x[1])) if isinstance(x, list) else (str(x["price"]), str(x["size"]))
             return {
-                "bid": float(bid),
-                "ask": float(ask),
-                "ts_ms": int(payload.get("timestamp") or payload.get("offset") or 0),
+                "bids": [level(x) for x in bids], "asks": [level(x) for x in asks],
+                "bid": float(bid), "ask": float(ask),
+                "ts_ms": int(payload.get("timestamp") or 0),
             }
 
 

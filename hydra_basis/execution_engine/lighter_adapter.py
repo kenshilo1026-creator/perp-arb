@@ -320,6 +320,10 @@ class LighterExecutionAdapter:
             return await result
         return result
 
+    async def get_price_tick_size(self, symbol: str) -> str:
+        config = self._normalize_market_config(await self._load_market_config(symbol))
+        return str(Decimal(1) / Decimal(str(config["price_multiplier"])))
+
     async def ensure_isolated_margin(self, symbol: str) -> int:
         market_config = self._normalize_market_config(await self._load_market_config(symbol))
         market_index = int(market_config["market_index"])

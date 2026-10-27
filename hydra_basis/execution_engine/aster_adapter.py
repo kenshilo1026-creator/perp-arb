@@ -141,7 +141,8 @@ class AsterExecutionAdapter:
         async def connect():
             async with self._request_session() as session:
                 return await session.ws_connect(
-                    f"wss://fstream.asterdex.com/ws/{raw_symbol.lower()}@depth20@100ms", heartbeat=20)
+                    "wss://fstream.asterdex.com/stream?streams="
+                    f"{raw_symbol.lower()}@depth20@100ms/{raw_symbol.lower()}@bookTicker", heartbeat=20)
         stream = AsterDepthStream(connect=connect, symbol=raw_symbol)
         await stream.start()
         self._hedge_depth = stream
@@ -519,6 +520,13 @@ class AsterExecutionAdapter:
         if order_id is None:
             raise RuntimeError("aster order query requires order_id")
         return await self._get_order_status(symbol=symbol, order_id=order_id)
+
+    async def wait_for_hedge_terminal(self, *, order_result: dict, symbol: str) -> dict:
+        order_id = order_result.get("order_id") or order_result.get("orderId") or (order_result.get("raw") or {}).get("orderId")
+        if self._fill_stream is None or order_id is None:
+            raise RuntimeError("Aster hedge stream or order identity unavailable")
+        return await self._fill_stream.wait_for_terminal(
+            symbol=await self._resolve_raw_symbol(symbol), order_id=order_id)
 
     async def ensure_isolated_margin(self, symbol: str) -> None:
         raw_symbol = await self._resolve_raw_symbol(symbol)

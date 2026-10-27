@@ -6,6 +6,39 @@ import time
 from decimal import Decimal
 from typing import Awaitable, Callable
 
+
+async def race_order_confirmation(rest_wait, stream_wait):
+    """A push may interrupt REST I/O or polling sleep; REST bounds the fallback.
+
+    Only read-only confirmation tasks are cancelled, never an order submission.
+    A stream failure cannot cancel the independent REST reconciliation.
+    """
+    stream = asyncio.create_task(stream_wait)
+    tasks = [stream]
+    try:
+        # Let an already-cached terminal push finish before starting REST/signing.
+        # This is one scheduler turn, not a grace-period timer before fallback.
+        await asyncio.sleep(0)
+        if stream.done():
+            try:
+                return stream.result()
+            except Exception:
+                pass
+        rest = asyncio.create_task(rest_wait())
+        tasks.append(rest)
+        done, _ = await asyncio.wait((stream, rest), return_when=asyncio.FIRST_COMPLETED)
+        if stream in done:
+            try:
+                return stream.result()
+            except Exception:
+                pass
+        return await rest
+    finally:
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
 class HedgeFailure(RuntimeError):
     def __init__(self, message: str, *, confirmed: Decimal, uncertain: bool, attempts: list):
         super().__init__(message)
@@ -33,6 +66,8 @@ def merge_hedge_fills(results: list[dict]) -> dict:
         timings.extend(result.get("request_timings", []))
     combined = {"ok": True, "terminal": True, "aggregate_fill": True,
                 "filled_quantity": str(total), "attempts": attempts, "request_timings": timings}
+    sources = {result.get("source", "rest") for result in results}
+    combined["source"] = next(iter(sources)) if len(sources) == 1 else "mixed"
     if priced and total > 0:
         combined["avg_price"] = str(quote / total)
     for key in ("first_dispatch_ns", "first_submit_ns"):
@@ -171,8 +206,9 @@ async def execute_confirmed_market_order(
                   "aggregate_fill": True, "attempts": attempts,
                   "first_dispatch_ns": attempts[0]["dispatch_ns"],
                   "request_timings": timings}
-        if source:
-            result["source"] = source
+        sources = [(record.get("order_status") or record.get("result") or {}).get("source", "rest")
+                   for record in attempts]
+        result["source"] = source or (sources[0] if len(set(sources)) == 1 else "mixed")
         if priced_quantity == quantity:
             result["avg_price"] = str(total_quote / quantity)
         if timings:
@@ -205,28 +241,48 @@ async def execute_confirmed_market_order(
         if terminal_quantity is None:
             query = getattr(adapter, "get_order_execution", None)
             # Keep the submitted identity: status responses need not contain it.
-            for check in range(max(1, confirmation_attempts)):
-                if callable(query) and isinstance(result, dict):
+            async def reconcile_rest():
+                for check in range(max(1, confirmation_attempts)):
+                    if callable(query) and isinstance(result, dict):
+                        try:
+                            status = await query(order_result=result, symbol=symbol)
+                            record["order_status"] = status
+                            qty = terminal_fill_quantity(status)
+                            if qty is not None:
+                                return {"status": status, "quantity": qty}
+                        except Exception as exc:
+                            record["status_error"] = str(exc)
                     try:
-                        status = await query(order_result=result, symbol=symbol)
-                        record["order_status"] = status
-                        terminal_quantity = terminal_fill_quantity(status)
-                        if terminal_quantity is not None:
+                        delta = (await position_quantity(adapter, symbol, market_type=market_type) - baseline) * direction
+                        record["live_filled_quantity"] = str(delta)
+                        if delta == quantity:
+                            return {"position_complete": True}
+                        if delta < 0 or delta > quantity:
+                            record["position_error"] = "unexpected position movement"
                             break
                     except Exception as exc:
-                        record["status_error"] = str(exc)
-                try:
-                    delta = (await position_quantity(adapter, symbol, market_type=market_type) - baseline) * direction
-                    record["live_filled_quantity"] = str(delta)
-                    if delta == quantity:
-                        return completed(source="live_position_delta")
-                    if delta < 0 or delta > quantity:
-                        record["position_error"] = "unexpected position movement"
-                        break
-                except Exception as exc:
-                    record["position_error"] = str(exc)
-                if check + 1 < confirmation_attempts:
-                    await asyncio.sleep(poll_delay)
+                        record["position_error"] = str(exc)
+                    if check + 1 < confirmation_attempts:
+                        await asyncio.sleep(poll_delay)
+                return {}
+
+            waiter = getattr(adapter, "wait_for_hedge_terminal", None)
+            async def reconcile_stream():
+                status = await waiter(order_result=result, symbol=symbol)
+                qty = terminal_fill_quantity(status)
+                if qty is None:
+                    raise RuntimeError("hedge stream returned nonterminal status")
+                return {"status": status, "quantity": qty}
+
+            if callable(waiter) and isinstance(result, dict):
+                resolution = await race_order_confirmation(reconcile_rest, reconcile_stream())
+            else:
+                resolution = await reconcile_rest()
+            if resolution.get("position_complete"):
+                return completed(source="live_position_delta")
+            if "status" in resolution:
+                record["order_status"] = resolution["status"]
+                terminal_quantity = resolution["quantity"]
         if terminal_quantity is not None:
             if terminal_quantity > remaining:
                 raise HedgeFailure("hedge overfilled requested remainder", confirmed=confirmed,

@@ -98,6 +98,16 @@ class MakerPriceGuard:
             raise ValueError("invalid maker price guard limits")
 
     def taker_price(self, book: dict) -> Decimal:
+        price = self._depth_price(book)
+        fast_quote = book.get("fast_quote")
+        if fast_quote is not None:
+            # A newer best price can prove the old VWAP too optimistic. It
+            # cannot prove the whole clip executable at an improved price.
+            fast_price = self._depth_price(fast_quote)
+            price = max(price, fast_price) if self.taker_side.upper() == "BUY" else min(price, fast_price)
+        return price
+
+    def _depth_price(self, book: dict) -> Decimal:
         if self.taker_side.upper() not in {"BUY", "SELL"}:
             raise RuntimeError(f"unsupported taker side: {self.taker_side}")
         age = Decimal(str(book.get("age_ms", 0)))

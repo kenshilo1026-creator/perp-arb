@@ -49,6 +49,13 @@ class SummaryTests(unittest.TestCase):
         self.assertTrue(any("1.25 ms" in line and "52.50 ms" in line
                             and "非兩所實際成交時間差" in line for line in lines))
 
+    def test_reports_hedge_confirmation_source_separately(self):
+        lines = format_spot_perp_execution_summary(plan=plan(), result={
+            "execution_timing": {"maker_confirmation_source": "rest_poll",
+                "hedge_confirmation_source": "user_stream",
+                "maker_observed_to_hedge_call_ms": 1, "hedge_call_duration_ms": 50}})
+        self.assertIn("對沖成交確認來源: user_stream", lines)
+
 
 class LatencyTests(unittest.IsolatedAsyncioTestCase):
     async def test_setup_finishes_before_dispatch_and_poll_interval_is_explicit(self):
@@ -59,13 +66,15 @@ class LatencyTests(unittest.IsolatedAsyncioTestCase):
             events.append("connected")
         async def stream():
             events.append("subscribed")
+        async def hedge_stream():
+            events.append("hedge_subscribed")
         async def execute(**kwargs):
-            self.assertEqual(events, ["prepared", "connected", "subscribed"])
+            self.assertEqual(events, ["prepared", "connected", "subscribed", "hedge_subscribed"])
             self.assertEqual(kwargs["maker_fill_poll_interval_seconds"], 0.2)
             return {"ok": True}
         maker = SimpleNamespace(prepare_execution=prepare, place_limit_order=AsyncMock(),
                                 prepare_maker_fill_stream=stream)
-        taker = SimpleNamespace(warm_up=warm)
+        taker = SimpleNamespace(warm_up=warm, prepare_maker_fill_stream=hedge_stream)
         with patch("scripts.run_spot_perp_arbitrage.build_spot_perp_adapter", side_effect=[maker, taker]), \
              patch("scripts.run_spot_perp_arbitrage.refresh_spot_perp_maker_price", new=AsyncMock(return_value="0.2101")), \
              patch("scripts.run_spot_perp_arbitrage.execute_single_clip", new=execute):
@@ -78,6 +87,16 @@ class LatencyTests(unittest.IsolatedAsyncioTestCase):
              patch("scripts.run_spot_perp_arbitrage.refresh_spot_perp_maker_price", new=AsyncMock(return_value="0.2101")), \
              patch("scripts.run_spot_perp_arbitrage.execute_single_clip", new=AsyncMock(return_value={"ok": True})) as execute:
             self.assertTrue((await execute_spot_perp_plan(plan=plan(), leverage=1))["ok"])
+            execute.assert_awaited_once()
+
+    async def test_hedge_stream_start_failure_keeps_dispatch_available(self):
+        maker = SimpleNamespace(place_limit_order=AsyncMock(), prepare_maker_fill_stream=AsyncMock())
+        taker = SimpleNamespace(prepare_maker_fill_stream=AsyncMock(side_effect=RuntimeError("offline")))
+        with patch("scripts.run_spot_perp_arbitrage.build_spot_perp_adapter", side_effect=[maker, taker]), \
+             patch("scripts.run_spot_perp_arbitrage.refresh_spot_perp_maker_price", new=AsyncMock(return_value="0.2101")), \
+             patch("scripts.run_spot_perp_arbitrage.execute_single_clip", new=AsyncMock(return_value={"ok": True})) as execute:
+            self.assertTrue((await execute_spot_perp_plan(plan=plan(), leverage=1))["ok"])
+            taker.prepare_maker_fill_stream.assert_awaited_once()
             execute.assert_awaited_once()
 
     async def test_setup_failure_does_not_dispatch_maker(self):

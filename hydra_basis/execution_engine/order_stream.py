@@ -11,6 +11,7 @@ from decimal import Decimal
 import aiohttp
 
 from hydra_basis.execution_engine.order_fill import poll_until_filled, status_dict_looks_filled
+from hydra_basis.execution_engine.hedge_safety import terminal_fill_quantity
 
 
 def redact_stream_message(message, secrets=()) -> str:
@@ -53,6 +54,18 @@ def format_stream_error(exc: Exception) -> str:
     # the numeric HTTP status; unknown errors continue to show their type.
     status = getattr(exc, "status", None)
     return type(exc).__name__ + (f" (HTTP {status})" if isinstance(status, int) else "")
+
+
+async def prepare_private_order_streams(legs):
+    """Subscribe both legs before submitting a maker; failures retain REST."""
+    for venue, adapter in legs:
+        prepare = getattr(adapter, "prepare_maker_fill_stream", None)
+        if callable(prepare):
+            try:
+                await prepare()
+                print(f"[fill-stream] {venue}: private order stream ready", flush=True)
+            except Exception as exc:
+                print(f"[fill-stream] {venue}: {format_stream_error(exc)}; using REST fallback", flush=True)
 
 
 def decode_aster_order(message: dict) -> dict | None:
@@ -170,6 +183,7 @@ class OrderEventStream:
             old = previous[1]
             if (int(status.get("eventTime", 0)) < int(old.get("eventTime", 0))
                     or quantity < Decimal(str(old["executedQty"]))
+                    or (terminal_fill_quantity(old) is not None and terminal_fill_quantity(status) is None)
                     or status_dict_looks_filled(old)):
                 return
             if quantity == Decimal(str(old["executedQty"])) and status["status"] == old["status"]:
@@ -280,6 +294,29 @@ class OrderEventStream:
     async def _wait_event(self, key, partial):
         while True:
             result = self._cached_fill(key, partial)
+            if result is not None:
+                return result
+            if not self.healthy:
+                raise RuntimeError("order stream unavailable")
+            await self._changed.wait()
+
+    def cached_terminal(self, *, symbol, order_id):
+        record = self._cache.get((symbol, str(order_id)))
+        if record is None:
+            return None
+        _, status, received = record
+        quantity = terminal_fill_quantity(status)
+        if quantity is None:
+            return None
+        # Include zero-fill cancellations/rejections, unlike maker fill waiters.
+        # Reading this cache must not consume maker partial-fill notifications.
+        return {"ok": True, "terminal": True, "filled_quantity": str(quantity),
+                "raw": dict(status), "source": "user_stream",
+                "observed_monotonic_ns": received}
+
+    async def wait_for_terminal(self, *, symbol, order_id):
+        while True:
+            result = self.cached_terminal(symbol=symbol, order_id=order_id)
             if result is not None:
                 return result
             if not self.healthy:

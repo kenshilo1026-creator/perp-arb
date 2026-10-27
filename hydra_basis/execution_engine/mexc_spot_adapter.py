@@ -14,7 +14,7 @@ from hydra_basis.execution_engine.mexc_depth_stream import MexcSpotDepthStream
 
 from hydra_basis.symbol_mapping import canonicalize_symbol, venue_symbol
 from hydra_basis.execution_engine.order_fill import poll_until_filled
-from hydra_basis.execution_engine.hedge_safety import wait_for_terminal_order, terminal_fill_quantity
+from hydra_basis.execution_engine.hedge_safety import wait_for_terminal_order, terminal_fill_quantity, race_order_confirmation
 from hydra_basis.execution_engine.order_stream import OrderEventStream, OrderStreamError, decode_mexc_order, MEXC_ORDER_CHANNEL
 
 
@@ -186,6 +186,12 @@ class MexcSpotExecutionAdapter:
             result["avg_price"] = str(average)
         return result
 
+    async def wait_for_hedge_terminal(self, *, order_result: dict, symbol: str) -> dict:
+        order_id = order_result.get("order_id") or order_result.get("orderId") or (order_result.get("raw") or {}).get("orderId")
+        if self._fill_stream is None or order_id is None:
+            raise RuntimeError("MEXC hedge stream or order identity unavailable")
+        return await self._fill_stream.wait_for_terminal(symbol=self._spot_symbol(symbol), order_id=order_id)
+
     async def _user_stream_request(self, method: str) -> dict:
         params = {"listenKey": self._listen_key} if method != "POST" else {}
         # Listen-key lifecycle endpoints require the same timestamp/HMAC
@@ -354,13 +360,32 @@ class MexcSpotExecutionAdapter:
         })
         submitted = time.monotonic_ns()
         needs_status = not market_fill_has_average(data)
+        queried = False
+        source, observed = "rest", None
+        async def rest_status():
+            nonlocal queried
+            queried = True
+            return await self._enrich_order_with_status(symbol=symbol, order_data=data), "rest", None
+
+        def from_stream(status):
+            return {**data, **status["raw"]}, "user_stream", status["observed_monotonic_ns"]
+
+        async def stream_status():
+            return from_stream(await self.wait_for_hedge_terminal(order_result=data, symbol=symbol))
+
         if needs_status:
-            data = await self._enrich_order_with_status(symbol=symbol, order_data=data)
-        return {"ok": True, "order_id": data.get("orderId"), "raw": data,
+            if self._fill_stream is not None and data.get("orderId") is not None:
+                cached = self._fill_stream.cached_terminal(symbol=self._spot_symbol(symbol), order_id=data["orderId"])
+                data, source, observed = from_stream(cached) if cached is not None else await race_order_confirmation(
+                    rest_status, stream_status())
+            else:
+                data, source, observed = await rest_status()
+        return {"ok": True, "order_id": data.get("orderId"), "raw": data, "source": source,
+                **({"observed_monotonic_ns": observed} if observed is not None else {}),
                 "request_timing": {"order_submit_started_ns": started,
                     "order_submit_ms": (submitted - started) / 1_000_000,
                     "post_order_status_ms": (time.monotonic_ns() - submitted) / 1_000_000 if needs_status else 0,
-                    "status_query_performed": needs_status}}
+                    "status_query_performed": queried}}
 
     async def place_limit_order(
         self, *, symbol: str, side: str, amount: str, clip_usd: float, price: str, post_only: bool = False

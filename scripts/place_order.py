@@ -20,6 +20,7 @@ import aiohttp
 
 from hydra_basis.execution_engine.executor import execute_single_clip, execute_single_clip_with_sides, passive_limit_price_from_orderbook, execution_sides_for_signal
 from hydra_basis.execution_engine.maker_price_guard import MakerPriceGuard, create_maker_guard
+from hydra_basis.execution_engine.order_stream import prepare_private_order_streams
 from hydra_basis.execution_engine.order_service import Deps, progress_printer, run_batched_execution
 from hydra_basis.execution_engine.order_fill import extract_filled_quantity
 from hydra_basis.execution_engine.market_data import fetch_orderbook_snapshot
@@ -476,6 +477,8 @@ async def execute_close_position_plan(
 
     taker_side = plan.side_by_venue[plan.taker_venue]
     taker_adapter = adapters[plan.taker_venue]
+    await prepare_private_order_streams(((plan.maker_venue, adapters[plan.maker_venue]),
+                                         (plan.taker_venue, taker_adapter)))
     async def guard_books() -> tuple[dict, dict]:
         books = await fetch_close_orderbooks(symbol=symbol, venues=venues, clip_usd=plan.clip_usd)
         return books[plan.maker_venue], books[plan.taker_venue]
@@ -603,6 +606,7 @@ async def execute_open_clip(
         warm_up = getattr(taker_adapter, "warm_up", None)
         if callable(warm_up):
             await warm_up()
+        await prepare_private_order_streams(((maker_venue, maker_adapter), (taker_venue, taker_adapter)))
         async with aiohttp.ClientSession(headers={"User-Agent": "funding-arb-execution-open/0.1"}) as _sess:
             _fresh = await asyncio.gather(
                 fetch_orderbook_snapshot(_sess, venue=maker_venue, symbol=symbol, clip_usd=batch_clip_usd),

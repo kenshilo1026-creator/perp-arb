@@ -1356,6 +1356,7 @@ async def execute_single_clip_with_sides(
             first_hedge_call_ns = hedge_result.get("first_dispatch_ns", first_hedge_call_ns)
             execution_timing = {
                 "maker_confirmation_source": maker_confirmation_source,
+                "hedge_confirmation_source": hedge_result.get("source", "rest"),
                 "maker_observed_to_hedge_call_ms": (first_hedge_call_ns - maker_observed_ns) / 1_000_000,
                 "hedge_call_duration_ms": (hedge_returned_ns - first_hedge_call_ns) / 1_000_000,
             }

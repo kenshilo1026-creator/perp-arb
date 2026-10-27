@@ -30,7 +30,7 @@ from hydra_basis.execution_engine.market_data import (
 )
 from hydra_basis.execution_engine.maker_price_guard import MakerPriceGuard, create_maker_guard, adverse_price_gap
 from hydra_basis.execution_engine.mexc_spot_adapter import MexcSpotExecutionAdapter
-from hydra_basis.execution_engine.order_stream import format_stream_error
+from hydra_basis.execution_engine.order_stream import prepare_private_order_streams
 from hydra_basis.execution_engine.order_service import Deps, progress_printer, run_batched_execution
 from hydra_basis.execution_engine.risk import compute_spread_pct
 from hydra_basis.execution_engine.state_machine import ExecutionStateMachine
@@ -345,7 +345,9 @@ def format_spot_perp_execution_summary(
             "（非兩所實際成交時間差）"
         )
         if timing.get("maker_observed_to_submit_ms") is not None:
-            lines.append(f"?????? ? adapter ????: {timing['maker_observed_to_submit_ms']:.2f} ms")
+            lines.append(f"本機收到成交 → 開始送出對沖請求: {timing['maker_observed_to_submit_ms']:.2f} ms")
+        if timing.get("hedge_confirmation_source"):
+            lines.append(f"對沖成交確認來源: {timing['hedge_confirmation_source']}")
     return lines
 
 
@@ -463,14 +465,7 @@ async def execute_spot_perp_plan(
                 await prepare(plan.symbol)
             elif callable(warm_up):
                 await warm_up()
-        prepare_stream = getattr(maker_adapter, "prepare_maker_fill_stream", None)
-        if callable(prepare_stream):
-            try:
-                await prepare_stream()
-                print(f"[fill-stream] {plan.maker_venue}: private order stream ready", flush=True)
-            except Exception as exc:
-                # Do not print exception text: websocket URLs contain listen keys.
-                print(f"[fill-stream] {plan.maker_venue}: {format_stream_error(exc)}; using REST fallback", flush=True)
+        await prepare_private_order_streams(((plan.maker_venue, maker_adapter), (plan.taker_venue, taker_adapter)))
         fresh_maker_price = await refresh_spot_perp_maker_price(plan)
         async def guard_books() -> tuple[dict, dict]:
             spot, perp = await fetch_plan_books(

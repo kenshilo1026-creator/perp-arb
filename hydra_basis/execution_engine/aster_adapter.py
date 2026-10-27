@@ -144,8 +144,13 @@ class AsterExecutionAdapter:
                     "wss://fstream.asterdex.com/stream?streams="
                     f"{raw_symbol.lower()}@depth20@100ms/{raw_symbol.lower()}@bookTicker", heartbeat=20)
         stream = AsterDepthStream(connect=connect, symbol=raw_symbol)
-        await stream.start()
+        await stream.fresh_snapshot()
         self._hedge_depth = stream
+
+    async def refresh_hedge_quote(self) -> dict:
+        if self._hedge_depth is None:
+            raise RuntimeError("Aster hedge depth not started")
+        return await self._hedge_depth.fresh_snapshot()
 
     async def hedge_quote(self) -> dict:
         if self._hedge_depth is None:

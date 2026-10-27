@@ -5,6 +5,7 @@ import asyncio
 import time
 from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR, ROUND_HALF_UP
 from typing import Awaitable, Callable
+from hydra_basis.execution_engine.mexc_depth_stream import DepthQuoteUnavailable
 
 
 MAKER_TAKER_MAX_GAP = Decimal("0.002")
@@ -34,10 +35,34 @@ async def create_maker_guard(*, maker_adapter, taker_adapter, symbol, fetch_book
         maker, taker = await fetch_books()
         return (await maker_quote() if callable(maker_quote) else maker,
                 await taker_quote() if callable(taker_quote) else taker)
+
+    async def ready_books():
+        last = None
+        try:
+            async with asyncio.timeout(MAKER_QUOTE_TIMEOUT_SECONDS):
+                while True:
+                    try:
+                        return await books()
+                    except DepthQuoteUnavailable as exc:
+                        last = exc
+                    refreshers = [getattr(adapter, "refresh_hedge_quote", None)
+                                  for adapter in (maker_adapter, taker_adapter)]
+                    refreshers = [refresh for refresh in refreshers if callable(refresh)]
+                    if not refreshers:
+                        raise last
+                    # Both recover concurrently; then re-read BOTH caches so a
+                    # slow reconnect cannot leave the other leg's quote stale.
+                    results = await asyncio.gather(*(refresh() for refresh in refreshers), return_exceptions=True)
+                    for result in results:
+                        if isinstance(result, BaseException):
+                            raise result
+        except TimeoutError as exc:
+            raise DepthQuoteUnavailable(f"maker quote preparation timed out; last_error={last}") from exc
+
     return MakerPriceGuard(fetch_books=books, tick_size=lambda: tick(symbol),
         maker_side=maker_side, taker_side=taker_side, quantity=quantity,
         fetch_taker_book=taker_quote if callable(taker_quote) else None,
-        wait_for_update=getattr(taker_adapter, "wait_for_hedge_quote", None))
+        wait_for_update=getattr(taker_adapter, "wait_for_hedge_quote", None), prepare_books=ready_books)
 
 
 def adverse_price_gap(maker: Decimal, taker: Decimal, side: str) -> Decimal:
@@ -81,7 +106,7 @@ class MakerPriceGuard:
                  taker_side: str, max_gap: Decimal = MAKER_TAKER_MAX_GAP,
                  check_seconds: float = MAKER_PRICE_CHECK_SECONDS,
                  quantity: Decimal | None = None,
-                 fetch_taker_book=None, wait_for_update=None) -> None:
+                 fetch_taker_book=None, wait_for_update=None, prepare_books=None) -> None:
         self.fetch_books = fetch_books
         self.tick_size = tick_size
         self.maker_side = maker_side
@@ -91,6 +116,7 @@ class MakerPriceGuard:
         self.quantity = quantity
         self.fetch_taker_book = fetch_taker_book
         self.wait_for_update = wait_for_update
+        self.prepare_books = prepare_books
         self.taker_book: dict | None = None
         if {maker_side.upper(), taker_side.upper()} != {"BUY", "SELL"}:
             raise ValueError("maker price guard requires opposite BUY/SELL sides")
@@ -140,7 +166,7 @@ class MakerPriceGuard:
 
     async def prepare(self, desired: str) -> str:
         tick = Decimal(await self.tick_size())
-        maker, taker = await self._books()
+        maker, taker = await self.prepare_books() if self.prepare_books is not None else await self._books()
         price = bounded_maker_price(
             desired=Decimal(desired), taker=self.taker_price(taker),
             bid=Decimal(str(maker["bid"])), ask=Decimal(str(maker["ask"])),

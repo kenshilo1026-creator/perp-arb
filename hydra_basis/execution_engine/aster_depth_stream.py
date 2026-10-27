@@ -44,9 +44,15 @@ def decode_aster_depth(payload: dict, symbol: str) -> dict | None:
 
 class AsterDepthStream(MexcSpotDepthStream):
     """Share freshness/version/lifecycle handling with the MEXC snapshot cache."""
+    venue = "aster"
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
+        self._ticker = None
+        self._ticker_received = 0.0
+
+    def _reset_quotes(self):
+        super()._reset_quotes()
         self._ticker = None
         self._ticker_received = 0.0
 
@@ -66,7 +72,10 @@ class AsterDepthStream(MexcSpotDepthStream):
         if self._ticker is not None and self._ticker["version"] > book["version"]:
             age = time.monotonic() - self._ticker_received
             if age > self.max_age_seconds:
-                raise RuntimeError("Aster book ticker stale ahead of depth")
+                raise self.unavailable(f"ticker_stale ticker_age_ms={age * 1000:.0f}")
+            source = self._ticker["source_ms"]
+            if source > 946684800000 and abs(time.time()*1000 - source) > self.max_age_seconds * 1000:
+                raise self.unavailable("ticker_source_timestamp_stale")
             book["fast_quote"] = {**self._ticker, "age_ms": age * 1000,
                                   "ts_ms": self._ticker["source_ms"]}
         return book
@@ -104,6 +113,7 @@ class AsterDepthStream(MexcSpotDepthStream):
                 elif message.type in (aiohttp.WSMsgType.ERROR, aiohttp.WSMsgType.CLOSE, aiohttp.WSMsgType.CLOSED):
                     raise RuntimeError("Aster depth disconnected")
         except Exception as exc:
+            self._last_error = f"reader: {format_stream_error(exc)}"
             print(f"[hedge-depth] aster: {format_stream_error(exc)}; maker quote invalidated", flush=True)
             self.healthy = False
             self._notify()

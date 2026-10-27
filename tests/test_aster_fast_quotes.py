@@ -107,11 +107,12 @@ class AsterFastQuoteTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_old_ticker_source_timestamp_invalidates_guard(self):
         stream = self.stream()
+        guard = self.guard(stream)
         event = ticker()
         event["E"] -= 2000
         stream.publish_ticker(decode_aster_book_ticker(event, stream.symbol))
         with self.assertRaisesRegex(MakerPriceRecheck, "stale"):
-            await self.guard(stream).check("100")
+            await guard.check("100")
 
     async def test_confirmed_fill_wins_simultaneous_ticker_warning(self):
         stream = self.stream()
@@ -156,6 +157,8 @@ class AsterFastQuoteTests(unittest.IsolatedAsyncioTestCase):
         adapter._session = session
         async def start(stream):
             await stream.connect()
+            stream.healthy = True
+            stream.publish(decode_aster_depth(depth(), stream.symbol))
         try:
             with patch.object(AsterDepthStream, "start", start):
                 await adapter.prepare_hedge_quotes("TOKEN")

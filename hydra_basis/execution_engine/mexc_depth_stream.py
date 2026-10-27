@@ -11,6 +11,10 @@ import aiohttp
 from hydra_basis.execution_engine.order_stream import _protobuf_fields, _protobuf_items, format_stream_error
 
 
+class DepthQuoteUnavailable(RuntimeError):
+    """Recoverable market-data failure, distinct from invalid order pricing."""
+
+
 def decode_depth(data: bytes, symbol: str) -> dict | None:
     wrapper = _protobuf_fields(data)
     channel = f"spot@public.limit.depth.v3.api.pb@{symbol}@20"
@@ -37,6 +41,8 @@ def decode_depth(data: bytes, symbol: str) -> dict | None:
 
 
 class MexcSpotDepthStream:
+    venue = "mexc_spot"
+
     def __init__(self, *, connect, symbol: str, max_age_seconds: float = 1.0):
         self.connect, self.symbol = connect, symbol
         self.max_age_seconds = max_age_seconds
@@ -48,6 +54,62 @@ class MexcSpotDepthStream:
         self._revision = 0
         self._waited_revision = -1
         self.healthy = False
+        self._last_depth_received = 0.0
+        self._last_error = None
+        self._recovery_lock = asyncio.Lock()
+
+    def unavailable(self, reason):
+        now = time.monotonic()
+        age = f"{(now - self._received) * 1000:.0f}" if self._book is not None else "missing"
+        message_age = f"{(now - self._last_depth_received) * 1000:.0f}" if self._last_depth_received else "missing"
+        version = self._book.get("version") if self._book is not None else None
+        source = self._book.get("source_ms") if self._book is not None else None
+        return DepthQuoteUnavailable(
+            f"hedge depth {reason}: venue={self.venue} symbol={self.symbol} "
+            f"healthy={self.healthy} age_ms={age} last_depth_message_age_ms={message_age} "
+            f"version={version} source_ms={source} last_error={self._last_error}")
+
+    def _reset_quotes(self):
+        self._book = None
+        self._received = self._last_depth_received = 0.0
+
+    async def fresh_snapshot(self, *, timeout_seconds=2.5, wait_seconds=0.25):
+        """Only called BEFORE a maker submission; resting-order checks never wait."""
+        try:
+            return self.snapshot()
+        except DepthQuoteUnavailable as exc:
+            last = exc
+        if self._book is not None or self._last_error is not None:
+            print(f"[hedge-depth] recovering before maker: {last}", flush=True)
+        try:
+            async with asyncio.timeout(timeout_seconds):
+                async with self._recovery_lock:
+                    # A live connection may simply be between two updates.
+                    deadline = time.monotonic() + wait_seconds
+                    while self.healthy and time.monotonic() < deadline:
+                        try:
+                            return self.snapshot()
+                        except DepthQuoteUnavailable as exc:
+                            last = exc
+                        await self.wait_for_update()
+                    retry_delay = 0.1
+                    while True:
+                        try:
+                            return self.snapshot()
+                        except DepthQuoteUnavailable as exc:
+                            last = exc
+                        await self.close()
+                        self._reset_quotes()
+                        try:
+                            await self.start()
+                            return self.snapshot()
+                        except Exception as exc:
+                            self._last_error = format_stream_error(exc)
+                            last = self.unavailable("reconnect_failed")
+                            await asyncio.sleep(retry_delay)
+                            retry_delay = min(0.5, retry_delay * 2)
+        except TimeoutError as exc:
+            raise DepthQuoteUnavailable(f"market-data recovery timed out after {timeout_seconds}s; {last}") from exc
 
     def _notify(self):
         self._revision += 1
@@ -55,8 +117,18 @@ class MexcSpotDepthStream:
         self._changed = asyncio.Event()
 
     def publish(self, book):
-        if self._book is not None and book["version"] <= self._book["version"]:
-            return
+        self._last_depth_received = time.monotonic()
+        if self._book is not None:
+            if book["version"] < self._book["version"]:
+                return
+            if book["version"] == self._book["version"]:
+                if book["bids"] != self._book["bids"] or book["asks"] != self._book["asks"]:
+                    raise ValueError("conflicting depth snapshots for the same version")
+                # A newly timestamped FULL snapshot can confirm an unchanged
+                # book. Replayed timestamps and heartbeats cannot refresh it.
+                source = int(book.get("source_ms") or 0)
+                if source <= int(self._book.get("source_ms") or 0) or abs(time.time()*1000 - source) > self.max_age_seconds * 1000:
+                    return
         self._book, self._received = book, time.monotonic()
         self._notify()
 
@@ -92,6 +164,7 @@ class MexcSpotDepthStream:
                 elif message.type in (aiohttp.WSMsgType.ERROR, aiohttp.WSMsgType.CLOSE, aiohttp.WSMsgType.CLOSED):
                     raise RuntimeError("MEXC depth disconnected")
         except Exception as exc:
+            self._last_error = f"reader: {format_stream_error(exc)}"
             print(f"[hedge-depth] mexc_spot: {format_stream_error(exc)}; maker quote invalidated", flush=True)
             self.healthy = False
             self._notify()
@@ -101,15 +174,22 @@ class MexcSpotDepthStream:
             while True:
                 await asyncio.sleep(20)
                 await self._ws.send_json({"method": "PING"})
-        except Exception:
+        except Exception as exc:
+            self._last_error = f"ping: {format_stream_error(exc)}"
             self.healthy = False
             self._notify()
 
     def snapshot(self) -> dict:
         age = time.monotonic() - self._received
-        if not self.healthy or self._book is None or age > self.max_age_seconds:
-            raise RuntimeError("hedge depth disconnected, missing or stale")
+        if not self.healthy:
+            raise self.unavailable("disconnected")
+        if self._book is None:
+            raise self.unavailable("missing")
+        if age > self.max_age_seconds:
+            raise self.unavailable("stale")
         source_ms = self._book.get("source_ms")
+        if source_ms and int(source_ms) > 946684800000 and abs(time.time()*1000 - int(source_ms)) > self.max_age_seconds * 1000:
+            raise self.unavailable("source_timestamp_stale")
         return {
             **self._book,
             "age_ms": age * 1000,

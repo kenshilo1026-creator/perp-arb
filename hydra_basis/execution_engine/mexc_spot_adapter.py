@@ -99,8 +99,13 @@ class MexcSpotExecutionAdapter:
                 return await session.ws_connect("wss://wbs-api.mexc.com/ws", heartbeat=20)
 
         stream = MexcSpotDepthStream(connect=connect, symbol=self._spot_symbol(symbol))
-        await stream.start()
+        await stream.fresh_snapshot()
         self._hedge_depth = stream
+
+    async def refresh_hedge_quote(self) -> dict:
+        if self._hedge_depth is None:
+            raise RuntimeError("MEXC hedge depth not started")
+        return await self._hedge_depth.fresh_snapshot()
 
     async def hedge_quote(self) -> dict:
         if self._hedge_depth is None:

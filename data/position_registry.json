@@ -1991,6 +1991,102 @@
       "strategy_id": "spot-perp-GRVT-1790592739339",
       "symbol": "GRVT",
       "venue": "mexc_spot"
+    },
+    {
+      "last_margin_topup_ts_ms": null,
+      "leg_id": "spot-perp-SYN-1793159945538:aster:perp:short",
+      "margin_topups": 0,
+      "market_type": "perp",
+      "quantity": "1000",
+      "side": "SHORT",
+      "status": "open",
+      "strategy_id": "spot-perp-SYN-1793159945538",
+      "symbol": "SYN",
+      "venue": "aster"
+    },
+    {
+      "last_margin_topup_ts_ms": null,
+      "leg_id": "spot-perp-SYN-1793159945538:mexc_spot:spot:long",
+      "margin_topups": 0,
+      "market_type": "spot",
+      "quantity": "1000",
+      "side": "LONG",
+      "status": "open",
+      "strategy_id": "spot-perp-SYN-1793159945538",
+      "symbol": "SYN",
+      "venue": "mexc_spot"
+    },
+    {
+      "last_margin_topup_ts_ms": null,
+      "leg_id": "spot-perp-SYN-1793160853336:aster:perp:short",
+      "margin_topups": 0,
+      "market_type": "perp",
+      "quantity": "1557",
+      "side": "SHORT",
+      "status": "open",
+      "strategy_id": "spot-perp-SYN-1793160853336",
+      "symbol": "SYN",
+      "venue": "aster"
+    },
+    {
+      "last_margin_topup_ts_ms": null,
+      "leg_id": "spot-perp-SYN-1793160853336:mexc_spot:spot:long",
+      "margin_topups": 0,
+      "market_type": "spot",
+      "quantity": "1557",
+      "side": "LONG",
+      "status": "open",
+      "strategy_id": "spot-perp-SYN-1793160853336",
+      "symbol": "SYN",
+      "venue": "mexc_spot"
+    },
+    {
+      "last_margin_topup_ts_ms": null,
+      "leg_id": "spot-perp-SYN-1793160903395:aster:perp:short",
+      "margin_topups": 0,
+      "market_type": "perp",
+      "quantity": "2641",
+      "side": "SHORT",
+      "status": "open",
+      "strategy_id": "spot-perp-SYN-1793160903395",
+      "symbol": "SYN",
+      "venue": "aster"
+    },
+    {
+      "last_margin_topup_ts_ms": null,
+      "leg_id": "spot-perp-SYN-1793160903395:mexc_spot:spot:long",
+      "margin_topups": 0,
+      "market_type": "spot",
+      "quantity": "2641",
+      "side": "LONG",
+      "status": "open",
+      "strategy_id": "spot-perp-SYN-1793160903395",
+      "symbol": "SYN",
+      "venue": "mexc_spot"
+    },
+    {
+      "last_margin_topup_ts_ms": null,
+      "leg_id": "spot-perp-SYN-1793161057914:aster:perp:short",
+      "margin_topups": 0,
+      "market_type": "perp",
+      "quantity": "4141",
+      "side": "SHORT",
+      "status": "open",
+      "strategy_id": "spot-perp-SYN-1793161057914",
+      "symbol": "SYN",
+      "venue": "aster"
+    },
+    {
+      "last_margin_topup_ts_ms": null,
+      "leg_id": "spot-perp-SYN-1793161057914:mexc_spot:spot:long",
+      "margin_topups": 0,
+      "market_type": "spot",
+      "quantity": "4141",
+      "side": "LONG",
+      "status": "open",
+      "strategy_id": "spot-perp-SYN-1793161057914",
+      "symbol": "SYN",
+      "venue": "mexc_spot"
     }
   ]
 }

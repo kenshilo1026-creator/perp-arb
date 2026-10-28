@@ -7,6 +7,7 @@ import time
 from typing import Awaitable, Callable
 
 from hydra_basis.execution_engine.order_fill import extract_filled_quantity
+from hydra_basis.execution_engine.mexc_depth_stream import DepthQuoteUnavailable
 from hydra_basis.execution_engine.maker_price_guard import (
     MakerPriceGuard, MakerPriceRecheck, adverse_price_gap, wait_with_price_guard,
 )
@@ -358,6 +359,8 @@ def order_result_looks_filled(order_result: dict[str, object]) -> bool:
 
 
 def maker_fill_error_is_repriceable(error: Exception) -> bool:
+    if isinstance(error, DepthQuoteUnavailable):
+        return False
     if isinstance(error, MakerPriceRecheck):
         return True
     message = str(error).strip().lower()
@@ -768,8 +771,10 @@ async def execute_single_clip_with_sides(
     while True:
         state_machine.to_placing_maker_leg()
         attempt_record: dict[str, object] = {"attempt": maker_attempt + 1}
+        maker_submission_started = False
         try:
             if reuse_existing_maker_result and maker_result is not None:
+                maker_submission_started = True
                 reuse_existing_maker_result = False
                 attempt_record["maker_result"] = maker_result
                 attempt_record["reused_existing_order"] = True
@@ -790,6 +795,7 @@ async def execute_single_clip_with_sides(
                         "adverse_price_gap_pct": format_decimal(adverse_price_gap(
                             Decimal(guarded_price), taker_pre_price, maker_side)),
                     }
+                maker_submission_started = True
                 maker_result = await maker_adapter.place_limit_order(**maker_kwargs)
                 attempt_record["maker_result"] = maker_result
                 # If the order was placed without an explicit price (e.g. variational Mid click),
@@ -826,6 +832,15 @@ async def execute_single_clip_with_sides(
             maker_attempts.append(attempt_record)
             break
         except BaseException as exc:
+            if not maker_submission_started:
+                # This attempt never reached the exchange. In particular a
+                # market-data timeout is not an order-fill timeout, and there
+                # is no new order to cancel using an empty response dictionary.
+                attempt_record["pre_submission_error"] = str(exc)
+                maker_attempts.append(attempt_record)
+                print(f"[maker-preflight] venue={maker_venue} symbol={symbol} side={maker_side}; "
+                      f"no new order submitted: {exc}", flush=True)
+                await raise_after_maker_cleanup(exc)
             exception_order_result = getattr(exc, "order_result", None)
             if not isinstance(exception_order_result, dict) and isinstance(maker_result, dict):
                 # A fill waiter can raise without carrying the accepted order.

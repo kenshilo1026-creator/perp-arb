@@ -98,7 +98,15 @@ class MexcSpotExecutionAdapter:
             async with self._request_session() as session:
                 return await session.ws_connect("wss://wbs-api.mexc.com/ws", heartbeat=20)
 
-        stream = MexcSpotDepthStream(connect=connect, symbol=self._spot_symbol(symbol))
+        async def fetch_snapshot():
+            async with self._request_session() as session:
+                async with session.get(f"{self.BASE_URL}/api/v3/depth",
+                    params={"symbol": self._spot_symbol(symbol), "limit": 20},
+                    timeout=aiohttp.ClientTimeout(total=0.95)) as response:
+                    response.raise_for_status()
+                    return await response.json()
+
+        stream = MexcSpotDepthStream(connect=connect, symbol=self._spot_symbol(symbol), fetch_snapshot=fetch_snapshot)
         await stream.fresh_snapshot()
         self._hedge_depth = stream
 

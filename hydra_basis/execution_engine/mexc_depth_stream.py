@@ -15,6 +15,26 @@ class DepthQuoteUnavailable(RuntimeError):
     """Recoverable market-data failure, distinct from invalid order pricing."""
 
 
+def decode_rest_depth(data):
+    """Full REST snapshots share the exchange's depth version sequence."""
+    sides = []
+    for key in ("bids", "asks"):
+        levels = [(Decimal(p), Decimal(q)) for p, q in data[key]]
+        if not levels or any(not p.is_finite() or not q.is_finite() or p <= 0 or q <= 0 for p, q in levels):
+            raise ValueError("invalid REST depth levels")
+        if len({p for p, _ in levels}) != len(levels):
+            raise ValueError("duplicate REST depth levels")
+        sides.append(sorted(levels, reverse=key == "bids"))
+    bids, asks = sides
+    version = int(data["lastUpdateId"])
+    if version < 0 or bids[0][0] >= asks[0][0]:
+        raise ValueError("invalid REST depth version or crossed book")
+    # REST provides no exchange timestamp. Freshness is measured from request
+    # START, not by inventing an exchange time or resetting age on a slow reply.
+    return {"bid": bids[0][0], "ask": asks[0][0], "bids": bids, "asks": asks,
+            "version": version, "source_ms": 0, "quote_source": "rest"}
+
+
 def decode_depth(data: bytes, symbol: str) -> dict | None:
     wrapper = _protobuf_fields(data)
     channel = f"spot@public.limit.depth.v3.api.pb@{symbol}@20"
@@ -43,7 +63,7 @@ def decode_depth(data: bytes, symbol: str) -> dict | None:
 class MexcSpotDepthStream:
     venue = "mexc_spot"
 
-    def __init__(self, *, connect, symbol: str, max_age_seconds: float = 1.0):
+    def __init__(self, *, connect, symbol: str, max_age_seconds: float = 1.0, fetch_snapshot=None):
         self.connect, self.symbol = connect, symbol
         self.max_age_seconds = max_age_seconds
         self._ws = None
@@ -57,6 +77,9 @@ class MexcSpotDepthStream:
         self._last_depth_received = 0.0
         self._last_error = None
         self._recovery_lock = asyncio.Lock()
+        self.fetch_snapshot = fetch_snapshot
+        self._rest_lock = asyncio.Lock()
+        self._rest_error = None
 
     def unavailable(self, reason):
         now = time.monotonic()
@@ -67,7 +90,51 @@ class MexcSpotDepthStream:
         return DepthQuoteUnavailable(
             f"hedge depth {reason}: venue={self.venue} symbol={self.symbol} "
             f"healthy={self.healthy} age_ms={age} last_depth_message_age_ms={message_age} "
-            f"version={version} source_ms={source} last_error={self._last_error}")
+            f"version={version} source_ms={source} last_error={self._last_error} rest_error={self._rest_error}")
+
+    async def _refresh_rest(self):
+        async with self._rest_lock:
+            if self._book is not None and time.monotonic() - self._received < self.max_age_seconds / 2:
+                try:
+                    self.snapshot()
+                    return
+                except DepthQuoteUnavailable:
+                    pass
+            started = time.monotonic()
+            async with asyncio.timeout(min(0.95, self.max_age_seconds)):
+                data = await self.fetch_snapshot()
+            book = decode_rest_depth(data)
+            if not self.healthy or time.monotonic() - started > self.max_age_seconds:
+                raise self.unavailable("REST_response_unusable")
+            if self._book is not None:
+                if book["version"] < self._book["version"]:
+                    raise self.unavailable("REST_version_behind_WS")
+                if book["version"] == self._book["version"]:
+                    if book["bids"] != self._book["bids"] or book["asks"] != self._book["asks"]:
+                        raise ValueError("conflicting REST/WS snapshots for the same version")
+                    if self._received > started:
+                        return  # A fresher WS snapshot arrived during this GET.
+            self._book, self._received = book, started
+            self._rest_error = None
+            self._notify()
+
+    async def _rest_fallback(self):
+        # Public read-only requests run independently of maker-fill/hedge tasks.
+        # With a quiet WS book, refresh at most twice a second (default age=1s).
+        while self.healthy:
+            failed = False
+            if self._book is None or time.monotonic() - self._received >= self.max_age_seconds / 2:
+                try:
+                    await self._refresh_rest()
+                except Exception as exc:
+                    self._rest_error = format_stream_error(exc)
+                    failed = True
+            # Schedule from request START so network RTT does not accumulate
+            # on top of the refresh interval. Back off on errors/rate limits.
+            delay = self.max_age_seconds / 2
+            if not failed and self._book is not None:
+                delay = max(0.05, delay - (time.monotonic() - self._received))
+            await asyncio.sleep(delay)
 
     def _reset_quotes(self):
         self._book = None
@@ -98,8 +165,21 @@ class MexcSpotDepthStream:
                             return self.snapshot()
                         except DepthQuoteUnavailable as exc:
                             last = exc
+                        if self.healthy and self.fetch_snapshot is not None:
+                            try:
+                                await self._refresh_rest()
+                                return self.snapshot()
+                            except Exception as exc:
+                                self._rest_error = format_stream_error(exc)
+                                last = self.unavailable("REST_recovery_failed")
+                                # WS can recover while the GET is in flight.
+                                try:
+                                    return self.snapshot()
+                                except DepthQuoteUnavailable:
+                                    pass
                         await self.close()
                         self._reset_quotes()
+                        last = self.unavailable("reconnecting_waiting_for_snapshot")
                         try:
                             await self.start()
                             return self.snapshot()
@@ -109,7 +189,8 @@ class MexcSpotDepthStream:
                             await asyncio.sleep(retry_delay)
                             retry_delay = min(0.5, retry_delay * 2)
         except TimeoutError as exc:
-            raise DepthQuoteUnavailable(f"market-data recovery timed out after {timeout_seconds}s; {last}") from exc
+            raise DepthQuoteUnavailable(f"market-data recovery timed out after {timeout_seconds}s; "
+                                        f"phase={last}; current={self.unavailable('recovery_timeout')}") from exc
 
     def _notify(self):
         self._revision += 1
@@ -140,6 +221,8 @@ class MexcSpotDepthStream:
                     f"spot@public.limit.depth.v3.api.pb@{self.symbol}@20"], "id": 1})
                 self.healthy = True
                 self._tasks = [asyncio.create_task(self._read()), asyncio.create_task(self._ping())]
+                if self.fetch_snapshot is not None:
+                    self._tasks.append(asyncio.create_task(self._rest_fallback()))
                 while self._book is None:
                     if not self.healthy:
                         raise RuntimeError("MEXC depth subscription unavailable")

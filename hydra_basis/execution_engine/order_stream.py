@@ -314,6 +314,24 @@ class OrderEventStream:
                 "raw": dict(status), "source": "user_stream",
                 "observed_monotonic_ns": received}
 
+    def cached_update(self, *, symbol, order_id, after=0):
+        """Non-consuming cumulative snapshot; each consumer owns its cursor."""
+        record = self._cache.get((symbol, str(order_id)))
+        if record is None or record[0] <= after:
+            return None
+        sequence, status, received = record
+        return {**status, "stream_sequence": sequence, "source": "user_stream",
+                "observed_monotonic_ns": received}
+
+    async def wait_for_update(self, *, symbol, order_id, after=0):
+        while True:
+            result = self.cached_update(symbol=symbol, order_id=order_id, after=after)
+            if result is not None:
+                return result
+            if not self.healthy:
+                raise RuntimeError("order stream unavailable")
+            await self._changed.wait()
+
     async def wait_for_terminal(self, *, symbol, order_id):
         while True:
             result = self.cached_terminal(symbol=symbol, order_id=order_id)

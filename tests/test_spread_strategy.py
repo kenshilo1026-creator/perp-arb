@@ -31,7 +31,8 @@ def config(**kwargs):
                     execution_method="taker_taker", total_quantity=D("0.02"), clip_quantity=D("0.01"),
                     entry_bps=D("40"), take_profit_bps=D("10"), fees=ZERO_FEES,
                     min_profit_bps=D("0"), slippage_buffer_bps=D("0"), funding_budget_bps=D("0"),
-                    clip_interval_seconds=0)
+                    clip_interval_seconds=0, market_freshness_seconds=15,
+                    max_transport_lag_seconds=3, future_tolerance_seconds=2)
     return Config(**(defaults | kwargs))
 
 
@@ -395,15 +396,15 @@ class MakerTakerTests(unittest.IsolatedAsyncioTestCase):
             await h.engine.step()
             first = h.engine.quotes()["entry"]
             h.clock.advance(1_000)
-            h.books(("2000", "2000.5"), ("2000.5", "2001"))
+            h.books(("2000", "2000.5"), ("1998.5", "1999"))
             await h.engine.step()
             self.assertIs(h.engine.quotes()["entry"], first, "inside the requote interval")
             h.clock.advance(1_001)
-            h.books(("2000", "2000.5"), ("2000.5", "2001"))
+            h.books(("2000", "2000.5"), ("1998.5", "1999"))
             await h.engine.step()
             second = h.engine.quotes()["entry"]
             self.assertEqual(first.state, "CANCELED")
-            self.assertEqual(D(second.price), D("2009.01"))  # 2001 * 1.004 rounded up to tick
+            self.assertEqual(D(second.price), D("2007.00"))  # safe improvement may remain throttled
 
     async def test_exit_quote_after_entry_and_reentry(self):
         with tempfile.TemporaryDirectory() as tmp:

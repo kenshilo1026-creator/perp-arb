@@ -19,7 +19,7 @@ from pathlib import Path
 
 from hydra_basis.adapters.base import fetch_json
 from hydra_basis.adapters.variational import VARIATIONAL_BASE_URL
-from hydra_basis.execution_engine.market_data import select_variational_quote_fields
+from hydra_basis.execution_engine.market_data import select_variational_quote_fields, variational_quote_source_ms
 from hydra_basis.risk_management.persistence import atomic_write_json
 from hydra_basis.spread_strategy.broker import (
     PaperVenue, assert_registry_owner, build_venue_adapter, registry_units, strategy_adapter, sync_registry,
@@ -729,9 +729,13 @@ class VariationalRunner:
             ticker = str(listing.get("ticker") or "").upper()
             try:
                 bid, ask = select_variational_quote_fields(listing, float(self.settings.clip_notional_usd))
+                source_ms = variational_quote_source_ms(listing)
             except RuntimeError:
+                # Remove an older valid quote too: it must not survive a bad replacement.
+                self.store._live.get("variational", {}).pop(ticker, None)
+                self.store.notify_update("variational", ticker)
                 continue
-            quotes[ticker] = {"bid": bid, "ask": ask, "ts_ms": 0}
+            quotes[ticker] = {"bid": bid, "ask": ask, "ts_ms": source_ms}
         self.store.update_quotes("variational", quotes)
         await asyncio.sleep(float(self.settings.strategy.get("variational_poll_seconds", 2)))
 
@@ -846,7 +850,7 @@ class Group:
                 if errors >= MAX_ENGINE_ERRORS:
                     await engine.pause(f"{MAX_ENGINE_ERRORS} consecutive engine errors: {str(exc)[:160]}")
             if engine.state.status in ACTIVE:
-                await engine.feed.wait_for_update(revision, self.config.tick_seconds)
+                await engine.wait_for_update(revision, self.config.tick_seconds)
         self.dispatcher.group_finished(self)
 
     def last_activity_ms(self) -> int:

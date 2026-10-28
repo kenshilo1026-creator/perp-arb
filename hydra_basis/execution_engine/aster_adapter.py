@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import threading
+import asyncio
 from contextlib import asynccontextmanager
 import os
 import time
@@ -110,6 +111,7 @@ class AsterExecutionAdapter:
         self._session: aiohttp.ClientSession | None = None
         self._hedge_depth = None
         self._fill_stream: OrderEventStream | None = None
+        self._fill_stream_lock = asyncio.Lock()
 
     @asynccontextmanager
     async def _request_session(self):
@@ -172,8 +174,16 @@ class AsterExecutionAdapter:
                 return await response.json()
 
     async def prepare_maker_fill_stream(self) -> None:
-        if self._fill_stream is not None:
+        # Dispatcher groups share this account adapter and can start concurrently.
+        async with self._fill_stream_lock:
+            await self._prepare_maker_fill_stream()
+
+    async def _prepare_maker_fill_stream(self) -> None:
+        if self._fill_stream is not None and self._fill_stream.healthy:
             return
+        if self._fill_stream is not None:
+            await self._fill_stream.close()
+            self._fill_stream = None
 
         async def connect():
             data = await self._user_stream_request("POST")
@@ -525,6 +535,20 @@ class AsterExecutionAdapter:
         if order_id is None:
             raise RuntimeError("aster order query requires order_id")
         return await self._get_order_status(symbol=symbol, order_id=order_id)
+
+    async def get_cached_order_update(self, *, order_result, symbol, after=0):
+        order_id = order_result.get("order_id") or order_result.get("orderId")
+        if self._fill_stream is None or order_id is None:
+            return None
+        return self._fill_stream.cached_update(
+            symbol=await self._resolve_raw_symbol(symbol), order_id=order_id, after=after)
+
+    async def wait_for_order_update(self, *, order_result, symbol, after=0):
+        order_id = order_result.get("order_id") or order_result.get("orderId")
+        if self._fill_stream is None or order_id is None:
+            raise RuntimeError("Aster order stream or identity unavailable")
+        return await self._fill_stream.wait_for_update(
+            symbol=await self._resolve_raw_symbol(symbol), order_id=order_id, after=after)
 
     async def wait_for_hedge_terminal(self, *, order_result: dict, symbol: str) -> dict:
         order_id = order_result.get("order_id") or order_result.get("orderId") or (order_result.get("raw") or {}).get("orderId")

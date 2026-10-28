@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path
 
-from hydra_basis.execution_engine.hedge_safety import position_quantity
+from hydra_basis.execution_engine.hedge_safety import position_quantity, race_order_confirmation
 from hydra_basis.risk_management.models import PositionLeg
 from hydra_basis.risk_management.registry import PositionRegistry
 from hydra_basis.spread_strategy.core import ONE, ZERO, Config, State, number
@@ -172,13 +172,22 @@ async def submit_market(adapter, *, symbol: str, side: str, quantity: Decimal, r
         if time.monotonic() >= deadline:
             return Execution(status.filled or ZERO, status.average, "UNKNOWN", result,
                              error or "order outcome unresolved before timeout")
-        await asyncio.sleep(poll_seconds)
-        if callable(query) and isinstance(result, dict) and any(
-                result.get(key) is not None for key in ("order_id", "orderId", "client_order_index")):
-            try:
-                status = parse_status(await query(order_result=result, symbol=symbol))
-            except Exception as exc:
-                error = str(exc)
+        async def poll():
+            await asyncio.sleep(min(poll_seconds, max(0, deadline-time.monotonic())))
+            if callable(query) and isinstance(result, dict) and any(
+                    result.get(key) is not None for key in ("order_id", "orderId", "client_order_index")):
+                return await query(order_result=result, symbol=symbol)
+            return result
+        waiter = getattr(adapter, "wait_for_hedge_terminal", None)
+        try:
+            async with asyncio.timeout(max(0, deadline-time.monotonic())):
+                payload = await race_order_confirmation(poll, waiter(order_result=result, symbol=symbol)) \
+                    if callable(waiter) and isinstance(result, dict) else await poll()
+                candidate = parse_status(payload)
+                if status.filled is None or (candidate.filled is not None and candidate.filled >= status.filled):
+                    status = candidate
+        except Exception as exc:
+            error = str(exc)
 
 
 async def _fill_average(adapter, symbol: str, result, quantity: Decimal) -> Decimal | None:
@@ -342,6 +351,11 @@ class MexcUnits:
         return payload
 
     supports_limit_ioc = True
+
+    async def close(self):
+        close = getattr(self.adapter, "close", None)
+        if callable(close):
+            await close()
 
     async def place_market_order(self, *, symbol, side, amount, clip_usd, reduce_only=False, limit_price=None):
         return await self.adapter.place_market_order(symbol=symbol, side=side, amount=self._contracts(amount),

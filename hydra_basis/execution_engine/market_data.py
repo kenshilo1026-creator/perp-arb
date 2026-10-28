@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import datetime as dt
 from typing import Any
 
 import aiohttp
@@ -13,6 +14,20 @@ from hydra_basis.adapters.mexc import mexc_contract_symbol
 from hydra_basis.adapters.tradexyz import fetch_tradexyz_universe
 from hydra_basis.adapters.variational import VARIATIONAL_BASE_URL
 from hydra_basis.symbol_mapping import canonicalize_symbol, venue_symbol
+
+
+def variational_quote_source_ms(listing: dict) -> int:
+    """Stats receipt time is not the time the quoted prices were generated."""
+    try:
+        raw = listing["quotes"]["updated_at"]
+        if not isinstance(raw, str):
+            raise ValueError("timestamp is not a string")
+        timestamp = dt.datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        if timestamp.tzinfo is None:
+            raise ValueError("timestamp has no timezone")
+        return int(timestamp.timestamp() * 1000)
+    except (KeyError, TypeError, ValueError, OverflowError) as exc:
+        raise RuntimeError("Variational quote source timestamp unavailable") from exc
 
 
 async def fetch_orderbook_snapshot(

@@ -16,9 +16,9 @@ python scripts/run_spread_strategy.py --config configs/spread_strategy.example.j
 ```
 
 The default is **paper mode**: live public quotes, simulated venues, no
-credentials, no orders, no position-registry writes. Paper market orders fill in
-full at the top of book; a paper post-only quote fills at its limit once the
-opposite best price reaches it. Neither models depth, queue position or latency,
+credentials, no orders, no position-registry writes. Paper market orders walk
+published depth; a paper post-only quote fills at its limit once the opposite
+best price reaches it. Queue position and execution latency are not modelled,
 so paper results are not evidence of realizable profit.
 
 ```powershell
@@ -35,9 +35,10 @@ position open; the next run resumes it.
 
 ## Lifecycle (as in the original `auto` strategy)
 
-Every `tick_seconds` (0.5 s):
+On public or supported private order updates, with `tick_seconds` (0.5 s) as a housekeeping timeout:
 
-1. Settle order updates: poll resting quotes and record new fills.
+1. Consume private cumulative fills, repair known exposure, and withdraw unsafe
+   quotes. Poll resting orders as an independent fallback.
 2. Repair any hedge imbalance (see below).
 3. Trade:
    * `taker_taker`: if the entry spread passes, send both legs as market orders
@@ -128,8 +129,12 @@ When the maker venue's best price already beats the boundary, it joins that
 best price instead. A sell is never priced below the best ask and a buy never
 above the best bid, so the post-only order cannot cross.
 
-The quote is re-placed when the desired price moves by at least one tick and
-`requote_interval_seconds` have passed since it was placed. Quotes are
+Safe price improvements are re-placed when the desired price moves by at least
+one tick and `requote_interval_seconds` have passed since placement. A resting
+price that fails the current net-profit gate, or whose remaining size exceeds
+hedgeable depth, is withdrawn immediately without this throttle. Unconfirmed
+withdrawals block new quotes; fills reported during cancellation are hedged.
+Quotes are
 post-only (Aster `GTX`, Hyperliquid `Alo`, Lighter `POST_ONLY`, MEXC order type 2). A post-only order that would
 have crossed is treated as harmless and re-quoted on a later tick.
 
@@ -170,14 +175,32 @@ A pause cancels resting quotes and stops trading; open positions stay open.
   Quantities are converted to whole contracts; registry quantities for MEXC
   legs are written in contracts, the unit the risk supervisor reads.
 * Variational: REST `metadata/stats` every `variational_poll_seconds`, priced
-  at the clip's USD size tier. It has no source timestamp, so freshness uses
-  local receipt time.
+  at the clip's USD size tier. Freshness uses `quotes.updated_at`; invalid or
+  missing source timestamps invalidate the quote.
 
 A venue's quote is unusable when its connection is down, the quote is older
-than `market_freshness_seconds` (15 s), it is more than
-`future_tolerance_seconds` (2 s) in the future, or source-to-receipt lag
-exceeds `max_transport_lag_seconds` (3 s). Nothing triggers without fresh
-quotes from both venues. Disconnected streams reconnect with backoff.
+than `market_freshness_seconds` (1 s), it is more than
+`future_tolerance_seconds` (0.25 s) in the future, or source-to-receipt lag
+exceeds `max_transport_lag_seconds` (0.5 s). Existing explicit configuration
+values still override these defaults. New risk requires fresh quotes from both
+venues. Known-fill market repairs remain enabled during a public-feed outage;
+a cached price is only a sizing/accounting reference, never a price guarantee
+or an IOC cap. Venue size checks still apply. Disconnected public streams
+reconnect with backoff.
+
+A newer changed BBO invalidates inconsistent older shared depth. Only the new
+BBO's published sizes may then be used, until a fresh depth snapshot arrives.
+
+Private cumulative updates currently connect to this strategy through the Aster
+adapter. Both the standalone runner and dispatcher wake on these events; other
+adapters continue their existing REST confirmation paths until they implement
+the private-update interface. Aster private-stream failure retains REST fallback;
+startup can replace a failed stream. Continuous background private reconnect is
+not implemented here.
+
+`hedge_dispatch.maker_observed_to_dispatch_ms` uses local monotonic timestamps
+when available (otherwise null). `hedge_confirmation.dispatch_to_confirmation_ms`
+includes confirmation transport and is **not** the actual cross-exchange fill gap.
 
 ## Startup checks
 
@@ -208,11 +231,11 @@ quotes from both venues. Disconnected streams reconnect with backoff.
 | `clip_interval_seconds` | Optional batch throttle; 0 reacts to fresh snapshots without a fixed delay |
 | `tick_seconds` | Maximum wait for housekeeping (0.5); market updates wake evaluation earlier |
 | `order_timeout_seconds` | Wait for a market order outcome (20) |
-| `requote_interval_seconds` | Minimum quote age before repricing (2) |
-| `market_freshness_seconds`, `future_tolerance_seconds`, `max_transport_lag_seconds` | Quote freshness (15 / 2 / 3) |
+| `requote_interval_seconds` | Minimum quote age before safe repricing (2); unsafe withdrawal bypasses it |
+| `market_freshness_seconds`, `future_tolerance_seconds`, `max_transport_lag_seconds` | Quote freshness (1 / 0.25 / 0.5) |
 | `repair_cooldown_seconds` | Wait between failed repair attempts (3) |
 | `variational_poll_seconds` | Variational quote polling (2) |
-| `order_poll_seconds` | Per-venue minimum seconds between order-status polls (`{"lighter": 3}`; others 0.5) |
+| `order_poll_seconds` | REST fallback intervals (`{"lighter": 3}`; others 0.5); supported private events bypass them |
 | `stop_loss_usd` | Optional, default `null` (off), see below |
 
 Thresholds and sizes may change between runs. The symbol and venue pair are

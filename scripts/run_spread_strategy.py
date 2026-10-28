@@ -85,6 +85,9 @@ async def run(args):
                     broker_url = server.ws_url
                 adapters = build_adapters(config, instruments, feed=feed, broker_url=broker_url)
                 for adapter in adapters.values():
+                    close = getattr(adapter, "close", None)
+                    if callable(close):
+                        stack.push_async_callback(close)
                     warm_up = getattr(adapter, "warm_up", None)
                     if callable(warm_up):
                         await warm_up()
@@ -116,7 +119,7 @@ async def run(args):
                         last_status = now
                     if args.max_seconds and now - started >= args.max_seconds:
                         break
-                    await feed.wait_for_update(revision, config.tick_seconds)
+                    await engine.wait_for_update(revision, config.tick_seconds)
             finally:
                 if state.status in {"RUNNING", "STOPPING"}:
                     await engine.shutdown()

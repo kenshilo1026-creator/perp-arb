@@ -20,7 +20,7 @@ from hydra_basis.adapters.base import fetch_json
 from hydra_basis.adapters.lighter import fetch_lighter_market_map
 from hydra_basis.adapters.mexc import mexc_contract_symbol
 from hydra_basis.adapters.variational import VARIATIONAL_BASE_URL
-from hydra_basis.execution_engine.market_data import parse_variational_quote
+from hydra_basis.execution_engine.market_data import parse_variational_quote, variational_quote_source_ms
 from hydra_basis.spread_strategy.core import Config, now_ms
 from hydra_basis.spread_strategy.instruments import aster_contract
 from hydra_basis.symbol_mapping import canonicalize_symbol
@@ -70,7 +70,7 @@ class Ticker:
     bid: Decimal
     ask: Decimal
     received_ms: int
-    # Exchange timestamp. Variational's public stats carry none.
+    # Exchange quote timestamp, distinct from local receipt time.
     source_ms: int | None = None
     bids: Levels = ()
     asks: Levels = ()
@@ -294,7 +294,9 @@ class MarketFeed:
             clip_usd = float(self.config.clip_quantity * mid) if mid else 0.0
             data = await fetch_json(session, "GET", f"{VARIATIONAL_BASE_URL}/metadata/stats")
             quote = parse_variational_quote(data, symbol, clip_usd=clip_usd)
-            self.update("variational", quote["bid"], quote["ask"], source_ms=None)
+            listing = next(item for item in data["listings"] if str(item.get("ticker", "")).upper() == symbol)
+            self.update("variational", quote["bid"], quote["ask"],
+                        source_ms=variational_quote_source_ms(listing))
             await asyncio.sleep(self.config.variational_poll_seconds)
 
 
@@ -446,10 +448,25 @@ class StoreFeed(MarketFeed):
     def ticker(self, venue: str) -> Ticker | None:
         # A recent depth snapshot (subscribed for active symbols) beats the top-of-book quote.
         depth = self.store.get_depth(venue, self.config.symbol)
+        quote = self.store.get_quote(venue, self.config.symbol)
+        if depth is not None and quote is not None:
+            depth_time = (depth.get("source_ms") or depth["received_ms"], depth["received_ms"])
+            quote_time = (quote.get("source_ms") or quote["received_ms"], quote["received_ms"])
+            if quote_time > depth_time:
+                # A newer BBO can invalidate depth, never prove old deeper levels
+                # still exist. Use only the newer BBO's published quantities.
+                changed = (Decimal(str(quote["bid"])) != depth["bids"][0][0] or
+                           Decimal(str(quote["ask"])) != depth["asks"][0][0])
+                for side in ("bids", "asks"):
+                    top = quote.get(side)
+                    changed = changed or bool(top and tuple(top[0]) != tuple(depth[side][0]))
+                if changed:
+                    depth = None
+                    if not quote.get("bids") or not quote.get("asks"):
+                        return None  # CLOB price alone cannot prove executable capacity.
         if depth is not None and self.clock() - depth["received_ms"] <= DEPTH_MAX_AGE_MS:
             return Ticker(depth["bids"][0][0], depth["asks"][0][0], int(depth["received_ms"]),
                           depth.get("source_ms"), depth["bids"], depth["asks"])
-        quote = self.store.get_quote(venue, self.config.symbol)
         if quote is None:
             return None
         return Ticker(Decimal(str(quote["bid"])), Decimal(str(quote["ask"])), int(quote["received_ms"]),

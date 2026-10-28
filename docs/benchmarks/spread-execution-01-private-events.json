@@ -1,0 +1,43 @@
+{
+  "kind": "synthetic_event_replay",
+  "historical_profit_backtest": false,
+  "clock_resolution_ms": 10,
+  "results": [
+    {
+      "scenario": "fill_then_jump",
+      "maker_fill_to_hedge_ms": 0,
+      "first_hedge_price": "2000",
+      "unsafe_quote_cancel_delay_ms": null,
+      "remaining_exposure": "0.00",
+      "hedge_orders": 1,
+      "entry_quote_remaining": "0"
+    },
+    {
+      "scenario": "unsafe_quote",
+      "maker_fill_to_hedge_ms": null,
+      "first_hedge_price": null,
+      "unsafe_quote_cancel_delay_ms": 1900,
+      "remaining_exposure": "0",
+      "hedge_orders": 0,
+      "entry_quote_remaining": "0.01"
+    },
+    {
+      "scenario": "depth_shrink",
+      "maker_fill_to_hedge_ms": null,
+      "first_hedge_price": null,
+      "unsafe_quote_cancel_delay_ms": null,
+      "remaining_exposure": "0",
+      "hedge_orders": 0,
+      "entry_quote_remaining": "0.01"
+    },
+    {
+      "scenario": "fill_with_feed_loss",
+      "maker_fill_to_hedge_ms": null,
+      "first_hedge_price": null,
+      "unsafe_quote_cancel_delay_ms": null,
+      "remaining_exposure": "0.00",
+      "hedge_orders": 0,
+      "entry_quote_remaining": "0"
+    }
+  ]
+}

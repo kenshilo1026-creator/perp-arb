@@ -9,8 +9,12 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 import uuid
 from decimal import ROUND_CEILING, ROUND_FLOOR, Decimal
+
+from hydra_basis.execution_engine.hedge_safety import race_order_confirmation
+from hydra_basis.execution_engine.order_stream import prepare_private_order_streams
 
 from hydra_basis.spread_strategy.broker import (
     MARGIN_ERROR, POST_ONLY_CROSS, RATE_LIMIT_ERROR, Execution, definitive_rejection,
@@ -160,6 +164,8 @@ class Engine:
         self.last_clip_at = 0
         self.last_clip_revision = None
         self._polled_at: dict[str, int] = {}
+        self._stream_cursors: dict[str, int] = {}
+        self._unhedged_observed_ns: int | None = None
 
     # ------------------------------------------------------------------ helpers
 
@@ -210,6 +216,8 @@ class Engine:
     def apply(self, order: Order, filled: Decimal | None, average: Decimal | None, state: str | None):
         """Record a cumulative fill update; exposure changes only by the new increment."""
         old = number(order.executed_quantity)
+        if filled is not None and filled < old:
+            return  # A delayed REST response cannot regress a newer private update.
         changed = state is not None and state != order.state
         if filled is not None and filled > old:
             changed = True
@@ -252,6 +260,8 @@ class Engine:
             raise RuntimeError(f"strategy is PAUSED ({s.reason}); review positions/orders, then rerun with --resume")
         if s.status == "STOPPED":
             return
+        if self.live:
+            await prepare_private_order_streams(self.adapters.items())
         await self.resolve_open_orders()
         await self.preflight()
         if s.status == "PAUSED":
@@ -332,6 +342,10 @@ class Engine:
         s = self.state
         if s.status not in ACTIVE:
             return
+        # Fill pushes bypass the REST poll throttle, including on a quiet market.
+        await self.refresh_stream_orders()
+        await self.ensure_hedged()
+        quotes_safe = await self.protect_quotes()
         await self.refresh_orders()
         await self.ensure_hedged()
         if s.status == "RUNNING":
@@ -339,7 +353,7 @@ class Engine:
         if s.status == "STOPPING":
             await self.evaluate_stopping()
             return
-        if s.status != "RUNNING" or self.clock() < self.cooldown_until:
+        if s.status != "RUNNING" or self.clock() < self.cooldown_until or not quotes_safe:
             return
         if self.config.maker_taker:
             await self.evaluate_maker_quotes()
@@ -369,6 +383,61 @@ class Engine:
 
     # ------------------------------------------------------------------ order updates
 
+    def apply_stream_update(self, order, payload):
+        sequence = payload.get("stream_sequence", 0)
+        if sequence <= self._stream_cursors.get(order.id, 0):
+            return
+        status = parse_status(payload)
+        if status.filled is None or not ZERO <= status.filled <= number(order.quantity):
+            raise RuntimeError("private order update has invalid cumulative quantity")
+        self._stream_cursors[order.id] = sequence
+        if status.filled < number(order.executed_quantity):
+            return  # REST may already have observed a newer cumulative fill.
+        if status.filled > number(order.executed_quantity):
+            observed = payload.get("observed_monotonic_ns")
+            if isinstance(observed, int) and 0 < observed <= time.monotonic_ns():
+                self._unhedged_observed_ns = min(self._unhedged_observed_ns or observed, observed)
+        self.apply(order, status.filled, status.average, status.state if status.terminal else None)
+
+    async def refresh_stream_orders(self):
+        active_ids = {order.id for order in self.state.open_orders()}
+        self._stream_cursors = {key: value for key, value in self._stream_cursors.items() if key in active_ids}
+        self._polled_at = {key: value for key, value in self._polled_at.items() if key in active_ids}
+        for order in self.state.open_orders():
+            cached = getattr(self.adapters[order.venue], "get_cached_order_update", None)
+            if order.state == "OPEN" and order.remote and callable(cached):
+                payload = await cached(order_result=order.remote, symbol=self.config.symbol,
+                                       after=self._stream_cursors.get(order.id, 0))
+                if payload is not None:
+                    self.apply_stream_update(order, payload)
+
+    async def wait_for_update(self, revision, timeout):
+        """Wake on public data OR any owned order; never cancel a submission."""
+        market = asyncio.create_task(self.feed.wait_for_update(revision, timeout))
+        tasks = [market]
+        for order in self.state.open_orders():
+            waiter = getattr(self.adapters[order.venue], "wait_for_order_update", None)
+            if order.state == "OPEN" and order.remote and callable(waiter):
+                tasks.append(asyncio.create_task(waiter(order_result=order.remote,
+                    symbol=self.config.symbol, after=self._stream_cursors.get(order.id, 0))))
+        pending = set(tasks)
+        try:
+            while pending:
+                done, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
+                for task in done:
+                    try:
+                        task.result()
+                        return
+                    except Exception:
+                        if task is market:
+                            raise
+                        # Disconnected/unsupported private streams must not cause a spin loop.
+        finally:
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+
     async def refresh_orders(self):
         now = self.clock()
         for order in self.state.open_orders():
@@ -381,11 +450,22 @@ class Engine:
             if not callable(query):
                 continue
             try:
-                status = parse_status(await query(order_result=order.remote, symbol=self.config.symbol))
+                waiter = getattr(self.adapters[order.venue], "wait_for_order_update", None)
+                async def read_rest():
+                    return await query(order_result=order.remote, symbol=self.config.symbol)
+                payload = await race_order_confirmation(read_rest, waiter(
+                    order_result=order.remote, symbol=self.config.symbol,
+                    after=self._stream_cursors.get(order.id, 0))) if callable(waiter) else await read_rest()
+                if payload.get("stream_sequence"):
+                    self.apply_stream_update(order, payload)
+                    await self.ensure_hedged()
+                    continue
+                status = parse_status(payload)
             except Exception as exc:
                 self.log("warning", message=f"order status query failed for {order.id}: {str(exc)[:160]}")
                 continue
             self.apply(order, status.filled, status.average, status.state if status.terminal else None)
+            await self.ensure_hedged()
 
     async def cancel_quote(self, order: Order) -> bool:
         try:
@@ -515,13 +595,16 @@ class Engine:
                   for leg, venue, side, price, limit in legs]
         self.log("clip_triggered", intent=intent, condition=condition, quantity=str(quantity),
                  limits=[None if limit is None else str(limit) for *_, limit in legs])
-        results = await asyncio.gather(*(
-            submit_market(self.adapters[venue], symbol=c.symbol, side=side, quantity=quantity,
-                          reduce_only=reduce_only, reference_price=price, limit_price=limit,
-                          timeout_seconds=c.order_timeout_seconds, poll_seconds=c.poll_seconds(venue))
-            for leg, venue, side, price, limit in legs))
-        for order, result in zip(orders, results):
+        async def submit_leg(order, venue, side, price, limit):
+            result = await submit_market(self.adapters[venue], symbol=c.symbol, side=side, quantity=quantity,
+                                        reduce_only=reduce_only, reference_price=price, limit_price=limit,
+                                        timeout_seconds=c.order_timeout_seconds, poll_seconds=c.poll_seconds(venue))
+            # Persist each known result without waiting for the other venue. Never
+            # repair against an outstanding submission whose final quantity is unknown.
             self.apply_execution(order, result)
+            return result
+        results = await asyncio.gather(*(submit_leg(order, venue, side, price, limit)
+            for order, (leg, venue, side, price, limit) in zip(orders, legs)))
         rejected = [result for result in results if result.state == "REJECTED"]
         if any(result.state == "UNKNOWN" for result in results):
             await self.pause("market order outcome unresolved; reconcile the venue order manually")
@@ -554,6 +637,36 @@ class Engine:
             await self.pause("Five consecutive order submissions failed; check credentials, balances and venue status")
 
     # ------------------------------------------------------------------ maker_taker
+
+    def quote_is_safe(self, order: Order) -> bool:
+        """Evaluate the RESTING price and remaining size, not its replacement."""
+        remaining = number(order.quantity) - number(order.executed_quantity)
+        if remaining <= EPSILON:
+            return True
+        c = self.config
+        books = self.feed.fresh_pair()
+        if books is None:
+            return False
+        intent = order.purpose.removeprefix("quote_")
+        taker_leg = "long" if order.leg == "short" else "short"
+        hedge = books[c.venue_of(taker_leg)].executable(leg_side(taker_leg, intent), remaining)
+        if hedge is None:
+            return False
+        short, long = (number(order.price), hedge) if order.leg == "short" else (hedge, number(order.price))
+        return entry_allowed(c, short, long) if intent == "entry" else exit_allowed(
+            c, self.state.short, self.state.long, short, long)
+
+    async def protect_quotes(self):
+        # Safety withdrawals are never throttled by the normal repricing interval.
+        confirmed = True
+        for order in self.quotes().values():
+            if not self.quote_is_safe(order):
+                self.log("unsafe_quote_withdrawal", order=order.id)
+                if not await self.cancel_quote(order):
+                    confirmed = False
+                # A cancellation may disclose a fill; process it before doing more work.
+                await self.ensure_hedged()
+        return confirmed
 
     def desired_maker_price(self, intent: str, quantity: Decimal | None = None) -> tuple[Decimal, str] | None:
         c, s = self.config, self.state
@@ -646,10 +759,26 @@ class Engine:
         now = self.clock()
         if existing is not None:
             drifted = abs(price - number(existing.price)) >= instrument.price_tolerance(number(existing.price))
-            if not drifted or now - existing.created_ms < c.requote_interval_seconds * 1000:
+            shrink = number(existing.quantity) - number(existing.executed_quantity) > quantity
+            unsafe = not self.quote_is_safe(existing)
+            if not (unsafe or shrink) and (not drifted or now - existing.created_ms < c.requote_interval_seconds * 1000):
                 return
+            filled_before = number(existing.executed_quantity)
             if not await self.cancel_quote(existing):
                 return
+            await self.ensure_hedged()
+            if (number(existing.executed_quantity) != filled_before or
+                    abs(self.imbalance()) > EPSILON or self.state.status != "RUNNING"):
+                return
+            # Cancel I/O can take long enough for the hedge price/depth to change again.
+            cap = self.remaining_entry_capacity() if intent == "entry" else self.matched()
+            quantity = self.hedgeable_size(intent, min(quantity, cap))
+            if quantity <= EPSILON:
+                return
+            desired = self.desired_maker_price(intent, quantity)
+            if desired is None:
+                return
+            price, side = desired
         if now - self.last_quote_at < c.requote_interval_seconds * 500:
             return
         quantity = instrument.round_quantity(quantity)
@@ -731,21 +860,43 @@ class Engine:
         if error:
             if self._dust_logged != residual:
                 self._dust_logged = residual
-                self.log("warning", message=f"residual {residual} is below venue minimums: {error}")
+                self.log("warning", message=f"residual {residual} cannot satisfy order size rules: {error}")
             return
         exposure = number(s.leg(leg).quantity)
         signed = quantity if side == "BUY" else -quantity
         reduce_only = trim or abs(exposure + signed) < abs(exposure)
+        price = self.executable_price(c.venue_of(leg), side)
+        if price is None:
+            # Public feed health controls new risk, not a known-fill market hedge.
+            # This reference is for adapter sizing/accounting ONLY, never an IOC cap.
+            book = self.feed.ticker(c.venue_of(leg))
+            price = (book.ask if side == "BUY" else book.bid) if book else None
+            if price is None or not price.is_finite() or price <= 0:
+                price = next((number(o.average_price or o.price or o.reference_price)
+                              for o in reversed(s.orders)
+                              if number(o.executed_quantity) > 0 and
+                              (o.average_price or o.price or o.reference_price)), None)
+            if price is None or not price.is_finite() or price <= 0:
+                self.log("repair_reference_unavailable", residual=str(residual), venue=c.venue_of(leg))
+                return
+            self.log("repair_without_fresh_quote", venue=c.venue_of(leg), reference=str(price),
+                     residual=str(residual), reference_is_estimate=True)
         self.last_repair_at = now
         self.repair_attempts += 1
-        price = self.executable_price(c.venue_of(leg), side)
         order = self.new_order(leg=leg, side=side, purpose="repair", quantity=quantity,
                                reduce_only=reduce_only, reference=price)
         self.log("hedge_repair", leg=leg, side=side, quantity=str(quantity), residual=str(residual), trim=trim)
+        dispatch_ns = time.monotonic_ns()
+        observed_ns, self._unhedged_observed_ns = self._unhedged_observed_ns, None
+        self.log("hedge_dispatch", order=order.id, venue=order.venue,
+                 maker_observed_to_dispatch_ms=(dispatch_ns-observed_ns)/1_000_000 if observed_ns else None)
         result = await submit_market(self.adapters[order.venue], symbol=c.symbol, side=side,
                                      quantity=quantity, reduce_only=reduce_only, reference_price=price,
                                      timeout_seconds=c.order_timeout_seconds,
                                      poll_seconds=c.poll_seconds(order.venue))
+        self.log("hedge_confirmation", order=order.id, venue=order.venue,
+                 dispatch_to_confirmation_ms=(time.monotonic_ns()-dispatch_ns)/1_000_000,
+                 state=result.state, exchange_fill_latency=False)
         self.apply_execution(order, result)
         if result.state == "UNKNOWN":
             await self.pause("hedge repair outcome unresolved; reconcile the venue order manually")
@@ -766,8 +917,8 @@ class Engine:
     def repair_size_error(self, leg: str, side: str, quantity: Decimal) -> str | None:
         venue = self.config.venue_of(leg)
         price = self.executable_price(venue, side)
-        if price is None:
-            return "market data unavailable"
+        # With no current quote, validate lot/minimum quantity locally and let the
+        # venue enforce its current notional rule. Do not silently leave exposure.
         return self.instruments[venue].size_error(quantity, price)
 
     # ------------------------------------------------------------------ optional stop loss

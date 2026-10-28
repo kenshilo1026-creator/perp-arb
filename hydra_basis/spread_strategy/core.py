@@ -69,9 +69,9 @@ class Config:
     tick_seconds: float = 0.5
     order_timeout_seconds: float = 20.0
     requote_interval_seconds: float = 2.0
-    market_freshness_seconds: float = 15.0
-    max_transport_lag_seconds: float = 3.0
-    future_tolerance_seconds: float = 2.0
+    market_freshness_seconds: float = 1.0
+    max_transport_lag_seconds: float = 0.5
+    future_tolerance_seconds: float = 0.25
     repair_cooldown_seconds: float = 3.0
     variational_poll_seconds: float = 2.0
     # Minimum seconds between order-status polls per venue (Lighter's REST limits are tight).

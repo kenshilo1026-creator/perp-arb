@@ -65,7 +65,7 @@ def compute_spot_perp_apy(venue_points: list[FundingPoint], *, days: int) -> dic
     trimmed = trim_points_to_analysis_days(
         merge_points_by_interval_bucket(venue_points), analysis_days=days
     )
-    stats = analyze_positive_funding(trimmed, min_observations=1)
+    stats = analyze_positive_funding(trimmed, min_observations=1, analysis_days=days)
     rate_series = sorted(
         ({"ts_ms": point.ts_ms, "hourly": point.hourly_rate} for point in trimmed),
         key=lambda row: row["ts_ms"],

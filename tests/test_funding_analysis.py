@@ -103,6 +103,13 @@ class InferIntervalHoursTests(unittest.TestCase):
 
 
 class AnalyzeSpreadTests(unittest.TestCase):
+    def setUp(self) -> None:
+        # Fixed clock keeps the epoch-based fixtures inside the analysis window.
+        self.analysis_now = 24 * 3_600_000
+        clock = patch("hydra_basis.funding_engine.analysis.now_ms", return_value=self.analysis_now)
+        clock.start()
+        self.addCleanup(clock.stop)
+
     def test_resolve_pair_min_observations_keeps_24_for_1h_pairs(self) -> None:
         short_points = [FundingPoint("short", "BTC", ts_ms=0, raw_rate=0.0001, interval_hours=1)]
         long_points = [FundingPoint("long", "BTC", ts_ms=0, raw_rate=0.0, interval_hours=1)]
@@ -179,7 +186,7 @@ class AnalyzeSpreadTests(unittest.TestCase):
         self.assertAlmostEqual(stats["avg_hourly"], 0.0020)
 
     def test_positive_funding_analysis_detects_spot_perp_opportunity(self) -> None:
-        end_ms = int(dt.datetime.now(dt.timezone.utc).timestamp() * 1000)
+        end_ms = self.analysis_now
         start_ms = end_ms - (24 * 7 - 1) * 3_600_000
         points = [
             FundingPoint("mexc", "BTC", ts_ms=start_ms + hour * 3_600_000, raw_rate=0.00004, interval_hours=1)
@@ -1564,7 +1571,7 @@ class FormattingTests(unittest.TestCase):
             "avg_hourly": 0.0001,
             "annualized_avg": 0.876,
             "positive_ratio": 0.8,
-            "last_24h_positive_ratio": 0.75,
+            "analysis_days": 14,
             "samples": 100,
             "score": 0.9,
         }
@@ -1575,13 +1582,15 @@ class FormattingTests(unittest.TestCase):
         self.assertIn("年化估算(未扣成本)", message)
         self.assertIn("做空", message)
         self.assertIn("做多", message)
+        self.assertIn("近14天正收益占比", message)
+        self.assertNotIn("24小時", message)
 
     def test_build_spot_perp_signal_message_uses_chinese_labels(self) -> None:
         stats = {
             "avg_hourly": 0.0001,
             "annualized_avg": 0.876,
             "positive_ratio": 0.8,
-            "last_24h_positive_ratio": 0.75,
+            "analysis_days": 3,
             "samples": 100,
             "score": 0.9,
         }
@@ -1592,6 +1601,8 @@ class FormattingTests(unittest.TestCase):
         self.assertIn("做空永續", message)
         self.assertIn("買入現貨", message)
         self.assertIn("年化估算(未扣成本)", message)
+        self.assertIn("近3天正資費占比", message)
+        self.assertNotIn("24小時", message)
 
 
 class MonitorErrorTests(unittest.TestCase):
@@ -1663,7 +1674,7 @@ class AlertsTests(unittest.TestCase):
         self.assertEqual(selected[0]["short_venue"], "c")
         self.assertEqual(selected[0]["long_venue"], "d")
 
-    def test_skips_cross_exchange_alert_when_both_venues_have_wide_spread(self) -> None:
+    def test_wide_individual_spreads_do_not_exclude_good_maker_taker_entry(self) -> None:
         opportunities = [
             {
                 "symbol": "BTC",
@@ -1690,12 +1701,12 @@ class AlertsTests(unittest.TestCase):
             opportunities,
             min_annualized_avg=0.25,
             spreads_by_venue_symbol=spreads,
+            now_ms=1,
         )
 
-        self.assertEqual(len(selected), 1)
-        self.assertEqual(selected[0]["symbol"], "ETH")
+        self.assertEqual({row["symbol"] for row in selected}, {"BTC", "ETH"})
 
-    def test_ignores_spread_cache_entries_without_spread_pct(self) -> None:
+    def test_missing_quotes_are_marked_unconfirmed(self) -> None:
         opportunities = [
             {
                 "symbol": "BTC",
@@ -1718,6 +1729,7 @@ class AlertsTests(unittest.TestCase):
 
         self.assertEqual(len(selected), 1)
         self.assertEqual(selected[0]["symbol"], "BTC")
+        self.assertEqual(selected[0]["entry_estimate"]["status"], "unconfirmed")
 
     def test_selects_only_highest_spot_perp_signal_per_symbol_above_threshold(self) -> None:
         opportunities = [

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import math
 import statistics
 from typing import Any
 
@@ -9,8 +10,7 @@ from hydra_basis.funding_engine.models import FundingPoint
 
 
 DEFAULT_MIN_AVG_SPREAD_HOURLY = 0.000002
-DEFAULT_MIN_POSITIVE_RATIO = 0.75
-DEFAULT_MIN_LAST_24H_POSITIVE_RATIO = 0.70
+DEFAULT_MIN_POSITIVE_RATIO = 0.70
 DEFAULT_MAX_STD_MULTIPLE_OF_AVG = 2.5
 DEFAULT_MIN_OBSERVATIONS = 24
 DEFAULT_MIXED_8H_MIN_OBSERVATIONS = 18
@@ -22,10 +22,27 @@ def now_ms() -> int:
     return int(dt.datetime.now(dt.timezone.utc).timestamp() * 1000)
 
 
-def positive_ratio(values: list[float]) -> float:
-    if not values:
-        return 0.0
-    return sum(1 for value in values if value > 0) / len(values)
+def positive_ratio(values: list[float | None]) -> float | None:
+    valid = [value for value in values if value is not None and math.isfinite(value)]
+    if not valid:
+        return None
+    return sum(1 for value in valid if value > 0) / len(valid)
+
+
+def analysis_window_points(
+    points: list[FundingPoint], *, analysis_days: int, end_ms: int,
+) -> list[FundingPoint]:
+    """Keep observed, finite rates in the requested window; never fill gaps with zero."""
+    if analysis_days <= 0:
+        raise ValueError("analysis_days must be positive")
+    cutoff = end_ms - analysis_days * 24 * 60 * 60 * 1000
+    return [
+        point for point in points
+        if cutoff <= point.ts_ms <= end_ms
+        and point.raw_rate is not None and math.isfinite(point.raw_rate)
+        and point.interval_hours is not None and math.isfinite(point.interval_hours)
+        and point.interval_hours > 0 and math.isfinite(point.hourly_rate)
+    ]
 
 
 def annualized_from_hourly(hourly: float) -> float:
@@ -123,12 +140,14 @@ def analyze_spread(
     *,
     min_avg_spread_hourly: float = DEFAULT_MIN_AVG_SPREAD_HOURLY,
     min_positive_ratio: float = DEFAULT_MIN_POSITIVE_RATIO,
-    min_last_24h_positive_ratio: float = DEFAULT_MIN_LAST_24H_POSITIVE_RATIO,
     max_std_multiple_of_avg: float = DEFAULT_MAX_STD_MULTIPLE_OF_AVG,
     min_observations: int = DEFAULT_MIN_OBSERVATIONS,
     max_single_interval_hourly_rate: float = DEFAULT_MAX_SINGLE_INTERVAL_HOURLY_RATE,
     analysis_days: int = 7,
 ) -> dict[str, Any] | None:
+    end_ms = now_ms()
+    short_venue_points = analysis_window_points(short_venue_points, analysis_days=analysis_days, end_ms=end_ms)
+    long_venue_points = analysis_window_points(long_venue_points, analysis_days=analysis_days, end_ms=end_ms)
     all_points = short_venue_points + long_venue_points
     if any(p.hourly_rate < -max_single_interval_hourly_rate for p in all_points):
         return None
@@ -140,7 +159,7 @@ def analyze_spread(
     )
     pairs = align_on_coarser_interval(short_venue_points, long_venue_points)
     spreads = [short_point.hourly_rate - long_point.hourly_rate for short_point, long_point in pairs]
-    if len(spreads) < effective_min_observations:
+    if not spreads or len(spreads) < effective_min_observations:
         return None
 
     average = statistics.mean(spreads)
@@ -148,26 +167,17 @@ def analyze_spread(
     std_dev = statistics.pstdev(spreads) if len(spreads) > 1 else 0.0
     pos_ratio = positive_ratio(spreads)
 
-    cutoff_24h = now_ms() - 24 * 60 * 60 * 1000
-    recent_spreads = [
-        short_point.hourly_rate - long_point.hourly_rate
-        for short_point, long_point in pairs
-        if max(short_point.ts_ms, long_point.ts_ms) >= cutoff_24h
-    ]
-    recent_pos_ratio = positive_ratio(recent_spreads)
     stable_volatility = True if average <= 0 else std_dev <= abs(average) * max_std_multiple_of_avg
     score = (
-        0.35 * pos_ratio
+        0.45 * pos_ratio
         + 0.25 * min(max(average / max(min_avg_spread_hourly, 1e-12), 0), 1)
         + 0.20 * (1 if stable_volatility else 0)
-        + 0.10 * recent_pos_ratio
         + 0.10 * min(len(spreads) / 168, 1)
     )
     signal = (
         average > min_avg_spread_hourly
         and median > 0
         and pos_ratio >= min_positive_ratio
-        and recent_pos_ratio >= min_last_24h_positive_ratio
         and stable_volatility
     )
 
@@ -177,7 +187,7 @@ def analyze_spread(
         "median_hourly": median,
         "std_hourly": std_dev,
         "positive_ratio": pos_ratio,
-        "last_24h_positive_ratio": recent_pos_ratio,
+        "analysis_days": analysis_days,
         "annualized_avg": annualized_from_hourly(average),
         "score": score,
         "signal": signal,
@@ -191,6 +201,9 @@ def explain_spread_skip(
     min_observations: int = DEFAULT_MIN_OBSERVATIONS,
     analysis_days: int = 7,
 ) -> str:
+    end_ms = now_ms()
+    short_venue_points = analysis_window_points(short_venue_points, analysis_days=analysis_days, end_ms=end_ms)
+    long_venue_points = analysis_window_points(long_venue_points, analysis_days=analysis_days, end_ms=end_ms)
     if not short_venue_points or not long_venue_points:
         return "missing_points"
     effective_min_observations = resolve_pair_min_observations(
@@ -212,16 +225,17 @@ def analyze_positive_funding(
     *,
     min_avg_spread_hourly: float = DEFAULT_MIN_AVG_SPREAD_HOURLY,
     min_positive_ratio: float = DEFAULT_MIN_POSITIVE_RATIO,
-    min_last_24h_positive_ratio: float = DEFAULT_MIN_LAST_24H_POSITIVE_RATIO,
     max_std_multiple_of_avg: float = DEFAULT_MAX_STD_MULTIPLE_OF_AVG,
     min_observations: int = DEFAULT_MIN_OBSERVATIONS,
     max_single_interval_hourly_rate: float = DEFAULT_MAX_SINGLE_INTERVAL_HOURLY_RATE,
+    analysis_days: int = 7,
 ) -> dict[str, Any] | None:
+    venue_points = analysis_window_points(venue_points, analysis_days=analysis_days, end_ms=now_ms())
     if FILTER_NEGATIVE_FUNDING_SPIKE and any(p.hourly_rate < -max_single_interval_hourly_rate for p in venue_points):
         return None
     if any(abs(p.hourly_rate) > max_single_interval_hourly_rate for p in venue_points):
         return None
-    if len(venue_points) < min_observations:
+    if not venue_points or len(venue_points) < min_observations:
         return None
 
     hourly_rates = [point.hourly_rate for point in venue_points]
@@ -230,22 +244,17 @@ def analyze_positive_funding(
     std_dev = statistics.pstdev(hourly_rates) if len(hourly_rates) > 1 else 0.0
     pos_ratio = positive_ratio(hourly_rates)
 
-    cutoff_24h = now_ms() - 24 * 60 * 60 * 1000
-    recent_rates = [point.hourly_rate for point in venue_points if point.ts_ms >= cutoff_24h]
-    recent_pos_ratio = positive_ratio(recent_rates)
     stable_volatility = True if average <= 0 else std_dev <= abs(average) * max_std_multiple_of_avg
     score = (
-        0.35 * pos_ratio
+        0.45 * pos_ratio
         + 0.25 * min(max(average / max(min_avg_spread_hourly, 1e-12), 0), 1)
         + 0.20 * (1 if stable_volatility else 0)
-        + 0.10 * recent_pos_ratio
         + 0.10 * min(len(hourly_rates) / 168, 1)
     )
     signal = (
         average > min_avg_spread_hourly
         and median > 0
         and pos_ratio >= min_positive_ratio
-        and recent_pos_ratio >= min_last_24h_positive_ratio
         and stable_volatility
     )
 
@@ -255,7 +264,7 @@ def analyze_positive_funding(
         "median_hourly": median,
         "std_hourly": std_dev,
         "positive_ratio": pos_ratio,
-        "last_24h_positive_ratio": recent_pos_ratio,
+        "analysis_days": analysis_days,
         "annualized_avg": annualized_from_hourly(average),
         "score": score,
         "signal": signal,

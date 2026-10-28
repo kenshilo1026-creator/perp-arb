@@ -4,6 +4,14 @@ import json
 from pathlib import Path
 
 
+def default_maker_for_pair(first_venue: str, second_venue: str) -> str | None:
+    """Keep browser-driven Variational submissions off the automatic hedge leg."""
+    for venue in (first_venue, second_venue):
+        if venue.strip().lower() == "variational":
+            return venue
+    return None
+
+
 def resolve_execution_legs(
     *,
     short_venue: str,
@@ -12,6 +20,9 @@ def resolve_execution_legs(
     spreads: dict[str, float],
     spread_priority_threshold: float = 0.001,
 ) -> tuple[str, str]:
+    preferred_maker = default_maker_for_pair(short_venue, long_venue)
+    if preferred_maker is not None:
+        return preferred_maker, long_venue if preferred_maker == short_venue else short_venue
     short_spread = spreads[short_venue]
     long_spread = spreads[long_venue]
     short_above = short_spread > spread_priority_threshold

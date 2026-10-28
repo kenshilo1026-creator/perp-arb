@@ -1000,8 +1000,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--ticker", type=str, default=None, help="token symbol, e.g. BTC")
     parser.add_argument("--short_venue", type=str, default=None, help="venue to go short on")
     parser.add_argument("--long_venue", type=str, default=None, help="venue to go long on")
-    parser.add_argument("--maker_venue", type=str, default=None, help="force this venue as maker (limit order)")
-    parser.add_argument("--taker_venue", type=str, default=None, help="force this venue as taker (market order)")
+    parser.add_argument("--maker_venue", type=str, default=None, help="explicitly override automatic maker selection (Variational defaults to maker)")
+    parser.add_argument("--taker_venue", type=str, default=None, help="explicitly override automatic taker selection (Variational defaults to maker)")
     return parser.parse_args()
 
 

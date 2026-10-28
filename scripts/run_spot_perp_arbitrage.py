@@ -32,6 +32,7 @@ from hydra_basis.execution_engine.maker_price_guard import MakerPriceGuard, crea
 from hydra_basis.execution_engine.mexc_spot_adapter import MexcSpotExecutionAdapter
 from hydra_basis.execution_engine.order_stream import prepare_private_order_streams
 from hydra_basis.execution_engine.order_service import Deps, progress_printer, run_batched_execution
+from hydra_basis.execution_engine.priority import default_maker_for_pair
 from hydra_basis.execution_engine.risk import compute_spread_pct
 from hydra_basis.execution_engine.state_machine import ExecutionStateMachine
 from hydra_basis.execution_engine.variational_broker import VariationalCommandBrokerServer
@@ -214,8 +215,12 @@ def build_spot_perp_plan(
     normalized_short_venue = normalize_short_venue(short_venue)
     spot_spread_pct = compute_spread_pct(spot_book)
     perp_spread_pct = compute_spread_pct(perp_book)
-    taker_venue = MEXC_SPOT_VENUE if spot_spread_pct <= perp_spread_pct else normalized_short_venue
-    maker_venue = normalized_short_venue if taker_venue == MEXC_SPOT_VENUE else MEXC_SPOT_VENUE
+    preferred_maker = default_maker_for_pair(normalized_short_venue, MEXC_SPOT_VENUE)
+    if preferred_maker is not None:
+        maker_venue, taker_venue = preferred_maker, MEXC_SPOT_VENUE
+    else:
+        taker_venue = MEXC_SPOT_VENUE if spot_spread_pct <= perp_spread_pct else normalized_short_venue
+        maker_venue = normalized_short_venue if taker_venue == MEXC_SPOT_VENUE else MEXC_SPOT_VENUE
     sides = spot_perp_sides(mode=normalized_mode)
     side_by_venue = {
         MEXC_SPOT_VENUE: sides[MEXC_SPOT_VENUE],

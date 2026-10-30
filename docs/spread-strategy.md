@@ -198,6 +198,22 @@ the private-update interface. Aster private-stream failure retains REST fallback
 startup can replace a failed stream. Continuous background private reconnect is
 not implemented here.
 
+During a hedge submission or confirmation wait, the repair coordinator keeps
+ingesting maker fills and withdraws unsafe resting quotes. REST fallback reads
+and cancellation requests run independently of the hedge request; one coordinator
+applies their results and saves state. Public/private events wake it immediately,
+with a 50 ms housekeeping timeout for quote expiry when feeds are quiet.
+
+The pending hedge remains reserved until its outcome is terminal. Newly observed
+maker fills are saved immediately and the remaining imbalance is hedged after
+that confirmation, even if a cancellation is still pending. An unknown hedge
+pauses trading and withdraws quotes without resubmission. This avoids duplicate
+hedges but does not remove exposure while an exchange outcome is unknown.
+Shutdown waits for already dispatched hedge/cancel calls and records their
+outcomes before returning; a stalled exchange call can therefore delay shutdown.
+This coordinator covers hedge repair, not every quote-placement, normal
+repricing, or paired taker submission wait in the engine.
+
 `hedge_dispatch.maker_observed_to_dispatch_ms` uses local monotonic timestamps
 when available (otherwise null). `hedge_confirmation.dispatch_to_confirmation_ms`
 includes confirmation transport and is **not** the actual cross-exchange fill gap.

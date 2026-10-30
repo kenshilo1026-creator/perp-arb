@@ -131,11 +131,84 @@ async def scenario(name):
                     if 'entry' in engine.quotes() else '0'}
 
 
+async def pending_hedge_scenario():
+    """500 ms ACK hold; further maker fill and unsafe price arrive at 100 ms."""
+    now = [1_700_000_000_000]
+    fees = {v: {'maker': D(0), 'taker': D(0)} for v in ('aster', 'hyperliquid')}
+    config = Config(symbol='ETH', short_venue='aster', long_venue='hyperliquid',
+                    maker_venue='aster', total_quantity=D('.02'), clip_quantity=D('.02'),
+                    entry_bps=D(40), take_profit_bps=D(10), fees=fees,
+                    min_profit_bps=D(0), slippage_buffer_bps=D(0), funding_budget_bps=D(0),
+                    market_freshness_seconds=15, max_transport_lag_seconds=3, future_tolerance_seconds=2)
+    feed = MarketFeed(config, clock=lambda: now[0])
+    adapters = {v: ReplayVenue(v, feed) for v in config.venues}
+    instruments = {v: Instrument(v, tick_size=D('.01'), lot_size=D('.001'),
+                                min_size=D('.001'), min_notional=D(5)) for v in config.venues}
+
+    def books(ask):
+        feed.update('aster', D(2000), D('2000.5'), source_ms=now[0])
+        feed.update('hyperliquid', D(ask)-D('.5'), D(ask), source_ms=now[0])
+
+    books('2000')
+    with tempfile.TemporaryDirectory() as directory:
+        store = StateStore(Path(directory) / 'state.json')
+        state = store.load(config, live=False)
+        engine = Engine(config, state, store, feed, adapters, instruments, live=False,
+                        clock=lambda: now[0], log=lambda event: None)
+        await engine.start()
+        await engine.step()
+        await engine.step()
+        maker, hedge = adapters['aster'], adapters['hyperliquid']
+        order = engine.quotes()['entry']
+        origin = now[0]
+        release = asyncio.Event()
+        started = asyncio.Event()
+        original = hedge.place_market_order
+
+        async def slow_ack(**kwargs):
+            result = await original(**kwargs)
+            if len(hedge.market_fills) == 1:
+                started.set()
+                await release.wait()
+            return result
+
+        hedge.place_market_order = slow_ack
+        maker.fill_quote(order.remote['order_id'], D('.005'), now[0])
+        step = asyncio.create_task(engine.step())
+        await asyncio.wait_for(started.wait(), 1)
+        cancel_at = observed_at = None
+        try:
+            for elapsed in range(0, 601, 10):
+                now[0] = origin + elapsed
+                if elapsed == 100:
+                    maker.fill_quote(order.remote['order_id'], D('.01'), now[0])
+                    books('2010')
+                if elapsed == 500:
+                    release.set()
+                # Settle scheduled coroutines at this virtual timestamp.
+                for _ in range(60):
+                    await asyncio.sleep(0)
+                if D(order.executed_quantity) >= D('.01') and observed_at is None:
+                    observed_at = elapsed
+                if order.state == 'CANCELED' and cancel_at is None:
+                    cancel_at = elapsed
+            await asyncio.wait_for(step, 1)
+        finally:
+            release.set()
+            await step
+        return {'scenario': 'pending_hedge_ack', 'first_hedge_ack_delay_ms': 500,
+                'extra_fill_observation_delay_ms': observed_at-100 if observed_at is not None else None,
+                'unsafe_quote_cancel_delay_ms': cancel_at-100 if cancel_at is not None else None,
+                'hedge_quantities': [f['quantity'] for f in hedge.market_fills],
+                'remaining_exposure': str(engine.imbalance())}
+
+
 async def replay():
     return {'kind': 'synthetic_event_replay', 'historical_profit_backtest': False,
             'clock_resolution_ms': 10,
             'results': [await scenario(name) for name in
-                        ('fill_then_jump', 'unsafe_quote', 'depth_shrink', 'fill_with_feed_loss')]}
+                        ('fill_then_jump', 'unsafe_quote', 'depth_shrink', 'fill_with_feed_loss')]
+                       + [await pending_hedge_scenario()]}
 
 
 def main():

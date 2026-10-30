@@ -30,6 +30,7 @@ from hydra_basis.spread_strategy.instruments import Instrument, common_lot
 MAX_FAILURES = 5
 MAX_REPAIR_ATTEMPTS = 3
 MARGIN_RESERVE = Decimal("1.10")
+REPAIR_WATCHDOG_SECONDS = 0.05  # Expire stale quotes even when both feeds are quiet.
 ACTIVE = {"RUNNING", "STOPPING"}
 ENTRY_SIDES = {"short": "SELL", "long": "BUY"}
 
@@ -166,6 +167,8 @@ class Engine:
         self._polled_at: dict[str, int] = {}
         self._stream_cursors: dict[str, int] = {}
         self._unhedged_observed_ns: int | None = None
+        self._repair_task: asyncio.Task | None = None
+        self._repair_stopping = False
 
     # ------------------------------------------------------------------ helpers
 
@@ -816,6 +819,119 @@ class Engine:
     # ------------------------------------------------------------------ hedge repair
 
     async def ensure_hedged(self):
+        """One state owner; exchange I/O cannot block maker event/safety handling.
+
+        A durable PENDING_SUBMIT repair reserves the entire outstanding order.
+        Additional fills are recorded immediately, but are repaired only after
+        that order is terminal. UNKNOWN never releases the reservation.
+        """
+        if self._repair_task is None:
+            self._repair_stopping = False
+            self._repair_task = asyncio.create_task(self._coordinate_repairs())
+        task = self._repair_task
+        interrupted = False
+        try:
+            while True:
+                try:
+                    await asyncio.shield(task)
+                    break
+                except asyncio.CancelledError:
+                    if task.cancelled():
+                        raise
+                    # Ctrl+C must not orphan a submitted hedge/cancel. Withdraw
+                    # quotes and persist outstanding outcomes before shutdown.
+                    interrupted = True
+                    self._repair_stopping = True
+            if interrupted:
+                raise asyncio.CancelledError
+        finally:
+            if task.done() and self._repair_task is task:
+                self._repair_task = None
+
+    async def _coordinate_repairs(self):
+        was_active = self.state.status in ACTIVE
+        operation = self._begin_repair()
+        if operation is None and (not was_active or self.state.status in ACTIVE):
+            return
+        cancels, queries = {}, {}
+        attempted_cancels = set()
+        try:
+            while True:
+                revision = self.feed.revision
+                # Only this coroutine mutates state; workers return raw results.
+                for task, order in list(queries.items()):
+                    if task.done():
+                        del queries[task]
+                        self._apply_quote_io(task, order, 'status query')
+                for task, order in list(cancels.items()):
+                    if task.done():
+                        del cancels[task]
+                        self._apply_quote_io(task, order, 'cancel')
+                await self.refresh_stream_orders()
+                if operation is not None and operation[0].done():
+                    self._finish_repair(operation)
+                    operation = None
+                if operation is None and not self._repair_stopping:
+                    operation = self._begin_repair()
+
+                for order in self.quotes().values():
+                    withdrawing = self._repair_stopping or self.state.status not in ACTIVE
+                    if (withdrawing or not self.quote_is_safe(order)) and order.id not in attempted_cancels:
+                        attempted_cancels.add(order.id)
+                        self.log('unsafe_quote_withdrawal', order=order.id, during_hedge=True)
+                        task = asyncio.create_task(self.adapters[order.venue].cancel_order(
+                            order_result=order.remote, symbol=self.config.symbol,
+                            side=order.side, amount=order.quantity))
+                        cancels[task] = order
+                if operation is None and not cancels:
+                    break
+
+                # REST fallback stays throttled and cannot hold up safety cancels
+                # or private pushes. Only read-only tasks may be cancelled.
+                querying = {order.id for order in queries.values()}
+                for order in self.quotes().values():
+                    query = getattr(self.adapters[order.venue], 'get_order_execution', None)
+                    if (order.id not in querying and order.remote and callable(query) and
+                            self.clock() - self._polled_at.get(order.id, 0) >=
+                            self.config.poll_seconds(order.venue) * 1000):
+                        self._polled_at[order.id] = self.clock()
+                        queries[asyncio.create_task(query(order_result=order.remote,
+                            symbol=self.config.symbol))] = order
+
+                wake = asyncio.create_task(self.wait_for_update(revision, REPAIR_WATCHDOG_SECONDS))
+                try:
+                    pending = {*cancels, *queries, wake}
+                    if operation is not None:
+                        pending.add(operation[0])
+                    await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
+                    if wake.done():
+                        wake.result()
+                finally:
+                    wake.cancel()
+                    await asyncio.gather(wake, return_exceptions=True)
+        finally:
+            # Even an unexpected feed/state error cannot silently abandon writes.
+            for task in queries:
+                task.cancel()
+            await asyncio.gather(*queries, return_exceptions=True)
+            if operation is not None:
+                await asyncio.gather(operation[0], return_exceptions=True)
+                self._finish_repair(operation)
+            if cancels:
+                await asyncio.gather(*cancels, return_exceptions=True)
+                for task, order in cancels.items():
+                    self._apply_quote_io(task, order, 'cancel')
+
+    def _apply_quote_io(self, task, order, action):
+        try:
+            payload = task.result()
+        except Exception as exc:
+            self.log('warning', message=f'quote {action} unconfirmed for {order.id}: {str(exc)[:160]}')
+            return
+        status = parse_status(payload)
+        self.apply(order, status.filled, status.average, status.state if status.terminal else None)
+
+    def _begin_repair(self):
         """Original ensureHedged: market-repair the lagging leg; pause after 3 failed attempts."""
         c, s = self.config, self.state
         if s.status not in ACTIVE:
@@ -831,8 +947,8 @@ class Engine:
         if self.repair_attempts and now - self.last_repair_at < c.repair_cooldown_seconds * 1000:
             return
         if self.repair_attempts >= MAX_REPAIR_ATTEMPTS:
-            await self.pause(f"Unable to hedge residual exposure of {residual} {c.symbol} after "
-                             f"{MAX_REPAIR_ATTEMPTS} attempts; manual review required")
+            self._pause_repairs(f"Unable to hedge residual exposure of {residual} {c.symbol} after "
+                                f"{MAX_REPAIR_ATTEMPTS} attempts; manual review required")
             return
         short_q, long_q = number(s.short.quantity), number(s.long.quantity)
         lagging = "short" if abs(short_q) < abs(long_q) else "long"
@@ -890,16 +1006,26 @@ class Engine:
         observed_ns, self._unhedged_observed_ns = self._unhedged_observed_ns, None
         self.log("hedge_dispatch", order=order.id, venue=order.venue,
                  maker_observed_to_dispatch_ms=(dispatch_ns-observed_ns)/1_000_000 if observed_ns else None)
-        result = await submit_market(self.adapters[order.venue], symbol=c.symbol, side=side,
+        task = asyncio.create_task(submit_market(self.adapters[order.venue], symbol=c.symbol, side=side,
                                      quantity=quantity, reduce_only=reduce_only, reference_price=price,
                                      timeout_seconds=c.order_timeout_seconds,
-                                     poll_seconds=c.poll_seconds(order.venue))
+                                     poll_seconds=c.poll_seconds(order.venue)))
+        return task, order, quantity, dispatch_ns
+
+    def _finish_repair(self, operation):
+        task, order, quantity, dispatch_ns = operation
+        try:
+            result = task.result()
+        except Exception as exc:
+            result = Execution(ZERO, None, 'UNKNOWN', None, str(exc))
         self.log("hedge_confirmation", order=order.id, venue=order.venue,
                  dispatch_to_confirmation_ms=(time.monotonic_ns()-dispatch_ns)/1_000_000,
                  state=result.state, exchange_fill_latency=False)
         self.apply_execution(order, result)
         if result.state == "UNKNOWN":
-            await self.pause("hedge repair outcome unresolved; reconcile the venue order manually")
+            # The coordinator withdraws all quotes while continuing to ingest
+            # fills; it must not await a slow cancellation inside this handler.
+            self._pause_repairs("hedge repair outcome unresolved; reconcile the venue order manually")
             return
         if result.state == "FILLED" and result.filled == quantity:
             self.repair_attempts = 0
@@ -907,6 +1033,14 @@ class Engine:
             self.log("warning", message=f"hedge repair rejected: {(result.error or '')[:160]}")
         if abs(self.imbalance()) <= EPSILON:
             self.repair_attempts = 0
+
+    def _pause_repairs(self, reason):
+        # Quote cancellation belongs to the coordinator so a slow cancel cannot
+        # block ingestion, and an already pending cancellation is not duplicated.
+        self.state.status, self.state.reason = 'PAUSED', reason
+        self.log('paused', reason=reason, residual=str(self.imbalance()),
+                 unresolved_orders=[o.id for o in self.state.open_orders()])
+        self.save()
 
     def last_fill_trims(self) -> bool:
         for order in reversed(self.state.orders):

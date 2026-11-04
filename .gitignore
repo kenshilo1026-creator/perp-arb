@@ -7,3 +7,5 @@ data/variational_loris_invalid_symbols.json
 .env
 .env.*
 !.env.example
+data/market_monitor/
+*.heartbeat.json

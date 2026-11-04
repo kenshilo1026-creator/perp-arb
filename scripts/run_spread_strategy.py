@@ -107,6 +107,8 @@ async def run(args):
                               "short": config.short_venue, "long": config.long_venue,
                               "method": config.execution_method, "strategy_id": state.strategy_id}), flush=True)
             started = last_status = time.monotonic()
+            from hydra_basis.spread_strategy.telemetry import heartbeat
+            await stack.enter_async_context(heartbeat(engine))
             try:
                 while state.status in {"RUNNING", "STOPPING"}:
                     revision = feed.revision

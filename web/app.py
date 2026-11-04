@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import asdict
 from decimal import Decimal
 from pathlib import Path
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request, WebSocket
 from fastapi.responses import JSONResponse
@@ -31,7 +32,19 @@ def _open_params_from_body(body: dict) -> order_service.OpenParams:
 
 
 def create_app() -> FastAPI:
-    app = FastAPI(title="Order UI")
+    from web.monitor import MonitorHub, router
+    monitor = MonitorHub()
+
+    @asynccontextmanager
+    async def lifespan(app):
+        try:
+            yield
+        finally:
+            await monitor.close()
+
+    app = FastAPI(title="perp-arb", lifespan=lifespan)
+    app.state.monitor = monitor
+    app.include_router(router(monitor))
 
     @app.middleware("http")
     async def _localhost_only(request: Request, call_next):

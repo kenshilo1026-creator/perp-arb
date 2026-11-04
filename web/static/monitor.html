@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>perp-arb · 跨所套利監控</title>
+  <link rel="stylesheet" href="/vendor/uPlot.min.css"><link rel="stylesheet" href="/monitor.css?v=2">
+  <script defer src="/vendor/uPlot.iife.min.js"></script><script defer src="/monitor.js?v=3"></script>
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="/monitor.html" aria-label="perp-arb 監控首頁"><span class="brand-mark">⇄</span>perp<span>arb</span><small>跨所套利監控</small></a>
+    <nav aria-label="主要導覽"><button class="nav active" data-tab="charts">行情圖表</button><button class="nav" data-tab="strategies">策略狀態 <span id="strategy-count">0</span></button></nav>
+    <div class="top-status"><span class="readonly">唯讀監控</span><span id="connection" class="status waiting">連線準備中</span><time id="clock">—</time></div>
+  </header>
+  <main>
+    <section class="market-toolbar" aria-label="配對選擇">
+      <div class="symbol-wrap"><span class="coin-icon">◈</span><label>永續交易對<select id="symbol" aria-label="永續交易對"><option>ETH</option></select></label><span class="contract">PERP</span></div>
+      <div class="pair-picker"><label><span class="side long">做多</span><select id="long" aria-label="做多交易所"></select></label><button id="swap" class="icon-button" title="交換做多與做空方向" aria-label="交換方向">⇄</button><label><span class="side short">做空</span><select id="short" aria-label="做空交易所"></select></label></div>
+      <div class="market-tools"><button id="demo" class="quiet">示範預覽</button><button id="settings-open" class="quiet">⚙ 圖表設定</button><button id="reconnect" class="accent-outline">重新連線 ↗</button></div>
+    </section>
+    <div id="notice" class="notice" role="status" aria-live="polite">正在讀取交易所共同市場…</div>
+    <section class="metrics" aria-label="配對摘要">
+      <article><span><i class="dot blue"></i>開倉價差 <small id="entry-basis">掛單估算</small></span><strong id="entry-value" class="blue-text">—<small>%</small></strong><div id="entry-detail">等待有效報價</div></article>
+      <article><span><i class="dot red"></i>平倉價差</span><strong id="exit-value" class="red-text">—<small>%</small></strong><div>價差越低，平倉成本通常越有利</div></article>
+      <article><span><i class="dot lime"></i>每小時資金費率差</span><strong id="funding-value">—</strong><div>空方收取 − 多方支付 · 預估</div></article>
+      <article><span><i class="dot amber"></i>策略未對沖數量</span><strong id="exposure-value">—</strong><div id="exposure-detail">尚未載入策略紀錄</div></article>
+    </section>
+    <section class="workspace" id="charts-section">
+      <div class="chart-column">
+        <section class="panel main-panel">
+          <div class="panel-heading"><div><h1>跨所價差</h1><span id="pair-caption">ASTER / HYPERLIQUID</span></div><div class="heading-actions"><span id="quote-tag" class="tag">未扣費用</span><button id="follow" class="quiet selected">◎ 即時追蹤</button><button id="fullscreen" class="icon-button" title="放大圖表" aria-label="放大圖表">⛶</button></div></div>
+          <div class="chart-controls"><div class="segmented" id="ranges" aria-label="歷史範圍"><button data-hours="1">1 小時</button><button data-hours="6">6 小時</button><button data-hours="24" class="selected">24 小時</button><button data-hours="168">7 天</button></div><div class="divider"></div><label>間隔 <select id="interval"><option value="5">5 秒</option><option value="30">30 秒</option><option value="60" selected>1 分</option><option value="300">5 分</option><option value="900">15 分</option><option value="3600">1 小時</option></select></label><button id="reference" class="quiet">歷史參考</button></div>
+          <div class="chart-legend"><span id="reference-legend"><i class="dot lime"></i>歷史參考 · 分鐘價格</span><span id="entry-legend" hidden><i class="dot blue"></i>開倉價差</span><span id="exit-legend" hidden><i class="dot red"></i>平倉價差</span><label><input type="checkbox" id="prices" disabled> 疊加兩所價格</label><span class="legend-unit">單位 %</span></div>
+          <div class="chart-container"><div id="spread-chart"></div><div id="chart-empty" class="chart-empty"><span>⌁</span><b>等待價差資料</b><p id="chart-empty-detail">自動載入兩所共同時段的分鐘價格；沒有歷史來源的配對會保持空白。</p></div><div class="watermark">perp<span>arb</span></div></div>
+          <div class="chart-foot"><span id="history-note">正在載入歷史參考 · 分鐘收盤／中間價</span><span id="quote-time">最後更新 —</span></div>
+        </section>
+        <section class="panel funding-panel"><div class="panel-heading"><div><h2>資金費率</h2><span>統一換算為每小時</span></div><span class="tag">% / 小時</span></div><div class="funding-legend"><span><i class="dot green"></i><b id="funding-long-name">Aster</b> <em id="funding-long-rate">—</em></span><span><i class="dot cyan"></i><b id="funding-short-name">Hyperliquid</b> <em id="funding-short-rate">—</em></span><span class="muted">● 歷史觀測點</span></div><div id="funding-chart"></div><div class="chart-foot"><span id="funding-note">讀取本地資金費率紀錄…</span><span>正費率：多方付空方</span></div></section>
+      </div>
+      <aside class="books-column" aria-label="雙交易所報價"><div id="long-book" class="panel orderbook"></div><div id="short-book" class="panel orderbook"></div><div class="book-note">資料年齡為報價來源時間差，<br>不等於實際成交延遲。</div></aside>
+    </section>
+    <section class="panel strategy-panel" id="strategies-section"><div class="panel-heading"><div><h2>策略狀態</h2><span>目前配對的本地紀錄</span></div><span id="strategy-update" class="muted">每 3 秒更新</span></div><div id="strategies" class="strategy-content"><div class="empty-state">尚無策略紀錄。監控頁不會啟動或送出交易。</div></div></section>
+    <footer><span><i class="dot lime"></i> PERP-ARB MONITOR <span class="footer-divider">/</span> 即時觀察，清楚決策。</span><span>香港時間 UTC+8 · 報價不保證成交</span></footer>
+  </main>
+  <dialog id="settings"><form method="dialog"><div class="dialog-heading"><h2>圖表設定</h2><button aria-label="關閉設定" class="icon-button">×</button></div><label>價差計算方式<select id="mode"><option value="maker_long">多方掛單／空方吃單 · 估算</option><option value="maker_short">空方掛單／多方吃單 · 估算</option><option value="taker">雙方吃單 · 可見深度估算</option></select></label><label>觀察數量（標的幣）<input id="quantity" type="number" value="0.01" min="0.000000001" max="1000000000" step="any" required></label><p>掛單估算使用最佳限價；有有效策略心跳與對應掛單時，摘要另列實際掛單價差。圖表為未扣手續費、滑點與資金費率的價差。</p><p id="formula">開倉：(空方賣出價 − 多方買入價) ÷ 多方買入價。<br>平倉：(空方買回價 − 多方賣出價) ÷ 多方賣出價。</p><button id="settings-save" class="primary" value="apply">套用設定</button></form></dialog>
+</body>
+</html>

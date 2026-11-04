@@ -54,7 +54,7 @@ class HyperliquidQuoteRunner:
         for symbol in self.ordered_symbols:
             # ordered_symbols come upper-cased from the universe fetch, which loaded the spellings.
             await self.ws.send_json(
-                {"method": "subscribe", "subscription": {"type": "l2Book", "coin": hyperliquid_coin_name(symbol)}}
+                {"method": "subscribe", "subscription": {"type": "l2Book", "coin": hyperliquid_coin_name(symbol), "fast": True}}
             )
 
     async def pump_once(self) -> dict[str, Any]:

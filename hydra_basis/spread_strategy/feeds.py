@@ -219,8 +219,10 @@ class MarketFeed:
             from hydra_basis.adapters.hyperliquid import resolve_hyperliquid_coin
             coin = await resolve_hyperliquid_coin(session, self.config.symbol)  # kPEPE, not KPEPE
         async with session.ws_connect(HYPERLIQUID_WS, heartbeat=20) as ws:
+            # Fast snapshots contain five levels per side. Keep their actual
+            # sizes: vwap/executable must reject quantities beyond this depth.
             await ws.send_json({"method": "subscribe",
-                                "subscription": {"type": "l2Book", "coin": coin}})
+                                "subscription": {"type": "l2Book", "coin": coin, "fast": True}})
             async for payload in self._messages(ws):
                 book = parse_hyperliquid_book(payload)
                 if book is not None:

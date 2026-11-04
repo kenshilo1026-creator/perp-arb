@@ -463,7 +463,7 @@ class _SubscribingRunner:
 
 
 class HyperliquidBooksRunner(_SubscribingRunner):
-    """l2Book for every coin: the book already carries 20 levels a side."""
+    """Fast l2Book for every coin: five visible levels per side, with real sizes."""
     url = "wss://api.hyperliquid.xyz/ws"
     venue = "hyperliquid"
 
@@ -472,7 +472,7 @@ class HyperliquidBooksRunner(_SubscribingRunner):
         self.coins = coins  # exchange spelling (e.g. kPEPE, io:OAI), delisted excluded
 
     async def subscribe(self):
-        await self.send_spaced({"method": "subscribe", "subscription": {"type": "l2Book", "coin": coin}}
+        await self.send_spaced({"method": "subscribe", "subscription": {"type": "l2Book", "coin": coin, "fast": True}}
                                for coin in self.coins)
 
     def handle(self, payload):
@@ -834,6 +834,11 @@ class Group:
             self.task = asyncio.create_task(self.run())
 
     async def run(self):
+        from hydra_basis.spread_strategy.telemetry import heartbeat
+        async with heartbeat(self.engine):
+            await self._run_with_heartbeat()
+
+    async def _run_with_heartbeat(self):
         engine, errors = self.engine, 0
         while engine.state.status in ACTIVE:
             revision = engine.feed.revision

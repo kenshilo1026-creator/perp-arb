@@ -1,0 +1,12 @@
+<!doctype html>
+<html lang="zh-Hant"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Hyperliquid 公開行情比較</title>
+<style>body{background:#0b1513;color:#d5dfda;font:15px system-ui;margin:40px auto;padding:0 24px;max-width:1100px}h1{color:#c4f85b}button,a{padding:10px 16px;border:1px solid #577435;border-radius:4px;background:#1c2c20;color:#c4f85b;margin:5px;cursor:pointer}p{line-height:1.8;color:#a8b8af}table{border-collapse:collapse;width:100%;margin:30px 0}td,th{text-align:left;padding:14px;border-bottom:1px solid #284033}pre{white-space:pre-wrap;overflow-wrap:anywhere;font-size:12px}#status{padding:15px;background:#15271d}a[hidden]{display:none}</style>
+<script defer src="/hyperliquid-benchmark.js"></script></head><body>
+<h1>Hyperliquid ETH · 一般／fast 實測</h1>
+<p>只訂閱公開行情；不送單。兩條連線相隔 3 秒建立，收到行情後預熱 5 秒，再同步量測 90 秒。瀏覽器客戶端的時間差包含時鐘偏差，不代表下單或成交延遲。</p>
+<button id="start">開始 90 秒比較</button><button id="stop" disabled>停止</button><a id="download" hidden download="hyperliquid-benchmark.json">下載完整結果 JSON</a>
+<div id="status" role="status">等待開始</div>
+<table><thead><tr><th>指標</th><th>一般模式</th><th>fast 模式</th></tr></thead><tbody id="metrics"></tbody></table>
+<p>有效條件：報價年齡 ≤1,000 ms、來源至接收時間差 ≤500 ms、未來時間容忍 250 ms。有效時間比例按實際抽樣間距加權，並顯示抽樣延遲。</p>
+<pre id="result"></pre><details><summary>完整原始量測資料</summary><pre id="raw"></pre></details>
+</body></html>

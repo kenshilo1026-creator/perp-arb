@@ -28,7 +28,7 @@ class OpenParams:
     kind: str
     symbol: str
     short_venue: str
-    long_venue: str  # for spot_perp this is the spot leg (always "mexc")
+    long_venue: str  # for spot_perp this is the spot leg (always "binance_spot")
     exec_mode: str
     leverage: int
     total_size: Decimal
@@ -323,7 +323,7 @@ async def execute_open(params: OpenParams, *, live: bool, on_progress, deps: Dep
 async def build_spot_perp_preview(params: OpenParams) -> Preview:
     validate_open_params(params)
     from scripts.run_spot_perp_arbitrage import (
-        MEXC_SPOT_VENUE,
+        BINANCE_SPOT_VENUE,
         PREVIEW_ORDERBOOK_CLIP_USD,
         SPOT_PERP_MAX_PRE_TRADE_PRICE_GAP,
         build_spot_perp_plan,
@@ -344,7 +344,7 @@ async def build_spot_perp_preview(params: OpenParams) -> Preview:
         maker_venue=plan.maker_venue,
         taker_venue=plan.taker_venue,
         short_venue=plan.short_venue,
-        long_venue=MEXC_SPOT_VENUE,
+        long_venue=BINANCE_SPOT_VENUE,
         total_usd=total_usd,
         clip_usd=plan.clip_usd,
         batch_count=batch_count,

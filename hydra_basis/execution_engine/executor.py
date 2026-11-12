@@ -884,7 +884,7 @@ async def execute_single_clip_with_sides(
             maker_attempts.append(attempt_record)
             print(f"[maker-failure] venue={maker_venue} symbol={symbol} side={maker_side} error={exc}", flush=True)
             if isinstance(exc, (asyncio.CancelledError, KeyboardInterrupt, SystemExit)):
-                if (verify_hedge_fill or maker_price_guard is not None) and maker_venue in {"aster", "lighter", "hyperliquid", "mexc", "mexc_spot"}:
+                if (verify_hedge_fill or maker_price_guard is not None) and maker_venue in {"aster", "lighter", "hyperliquid", "mexc", "mexc_spot", "binance_spot"}:
                     cleanup_errors = await cleanup_active_makers()
                     final_fill = terminal_fill_quantity(maker_cancel_result)
                     if not cleanup_errors and final_fill is not None and final_fill > 0:
@@ -919,7 +919,7 @@ async def execute_single_clip_with_sides(
                     break
             exhausted = max_maker_reprice_attempts >= 0 and maker_attempt >= max_maker_reprice_attempts
             if exhausted or not maker_fill_error_is_repriceable(exc):
-                if (verify_hedge_fill or maker_price_guard is not None) and maker_venue in {"aster", "lighter", "hyperliquid", "mexc", "mexc_spot"} and isinstance(maker_result, dict):
+                if (verify_hedge_fill or maker_price_guard is not None) and maker_venue in {"aster", "lighter", "hyperliquid", "mexc", "mexc_spot", "binance_spot"} and isinstance(maker_result, dict):
                     cleanup_errors = await cleanup_active_makers()
                     final_fill = terminal_fill_quantity(maker_cancel_result)
                     if not cleanup_errors and final_fill is not None and final_fill > 0:
@@ -1074,7 +1074,7 @@ async def execute_single_clip_with_sides(
                 cancel_raw.get("status", "") if isinstance(cancel_raw, dict) else ""
             ).lower()
             baseline_available = extract_baseline_position(placed_result) is not None
-            if maker_venue in {"aster", "lighter", "hyperliquid", "mexc", "mexc_spot"}:
+            if maker_venue in {"aster", "lighter", "hyperliquid", "mexc", "mexc_spot", "binance_spot"}:
                 final_fill = terminal_fill_quantity(cancel_result)
                 if final_fill is None:
                     await raise_after_maker_cleanup(RuntimeError(
@@ -1280,7 +1280,7 @@ async def execute_single_clip_with_sides(
                 mark_maker_closed(maker_result)
             except BaseException as exc:
                 await raise_after_maker_cleanup(exc)
-        if maker_venue in {"aster", "lighter", "hyperliquid", "mexc", "mexc_spot"}:
+        if maker_venue in {"aster", "lighter", "hyperliquid", "mexc", "mexc_spot", "binance_spot"}:
             final_fill = None
             for response in (maker_cancel_result, maker_fill_result, maker_result):
                 final_fill = terminal_fill_quantity(response)

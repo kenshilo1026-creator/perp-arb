@@ -33,13 +33,13 @@ class SpotPerpArbitrageScriptTests(unittest.TestCase):
     def test_open_mode_buys_spot_and_sells_perp(self) -> None:
         self.assertEqual(
             spot_perp_sides(mode="open"),
-            {"mexc_spot": "BUY", "perp": "SELL"},
+            {"binance_spot": "BUY", "perp": "SELL"},
         )
 
     def test_close_mode_sells_spot_and_buys_perp(self) -> None:
         self.assertEqual(
             spot_perp_sides(mode="close"),
-            {"mexc_spot": "SELL", "perp": "BUY"},
+            {"binance_spot": "SELL", "perp": "BUY"},
         )
 
     def test_close_mode_perp_adapter_skips_margin_setup(self) -> None:
@@ -104,7 +104,7 @@ class SpotPerpArbitrageScriptTests(unittest.TestCase):
             perp_book={"bid": 2990.0, "ask": 3010.0, "ts_ms": 1},
         )
 
-        self.assertEqual(plan.taker_venue, "mexc_spot")
+        self.assertEqual(plan.taker_venue, "binance_spot")
         self.assertEqual(plan.maker_venue, "aster")
         self.assertEqual(plan.maker_side, "SELL")
         self.assertEqual(plan.taker_side, "BUY")
@@ -122,7 +122,7 @@ class SpotPerpArbitrageScriptTests(unittest.TestCase):
         )
 
         self.assertEqual(plan.taker_venue, "hyperliquid")
-        self.assertEqual(plan.maker_venue, "mexc_spot")
+        self.assertEqual(plan.maker_venue, "binance_spot")
         self.assertEqual(plan.maker_side, "SELL")
         self.assertEqual(plan.taker_side, "BUY")
         self.assertEqual(plan.maker_price, "3010")
@@ -173,7 +173,7 @@ class SpotPerpArbitrageScriptTests(unittest.TestCase):
         self.assertEqual(
             lines,
             [
-                "下單成功 mexc現貨成交價: 3001",
+                "下單成功 binance現貨成交價: 3001",
                 "aster做空成交價: 3010",
                 "實際不利成交價差（以 Maker 均價為分母）: -0.2990%",
             ],
@@ -203,7 +203,7 @@ class SpotPerpArbitrageScriptTests(unittest.TestCase):
         self.assertEqual(
             lines,
             [
-                "下單成功 mexc現貨成交價: 2990",
+                "下單成功 binance現貨成交價: 2990",
                 "aster做空成交價: 2999",
                 "實際不利成交價差（以 Maker 均價為分母）: -0.3010%",
             ],
@@ -481,7 +481,7 @@ class SpotPerpArbitrageRecordingTests(unittest.IsolatedAsyncioTestCase):
         execute.assert_awaited_once()
         output = "\n".join(printed)
         self.assertIn("Type exactly 'PLACE LIVE SPOT PERP ORDER' to continue:", output)
-        self.assertIn("下單成功 mexc現貨成交價", output)
+        self.assertIn("下單成功 binance現貨成交價", output)
 
     async def test_live_run_splits_total_size_into_multiple_clips(self) -> None:
         execute_plans: list[tuple[Decimal, float]] = []
@@ -583,7 +583,7 @@ class SpotPerpArbitrageRecordingTests(unittest.IsolatedAsyncioTestCase):
                 if (plan.mode == "open" and self.position_reads == 1) or (plan.mode == "close" and self.position_reads > 1):
                     return None
                 return {"symbol": symbol, "market_type": market_type,
-                        "side": "LONG" if self.venue == "mexc_spot" else "SHORT", "quantity": "10"}
+                        "side": "LONG" if self.venue == "binance_spot" else "SHORT", "quantity": "10"}
 
         plan = build_spot_perp_plan(
             symbol="BEAT",
@@ -616,7 +616,7 @@ class SpotPerpArbitrageRecordingTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result["ok"])
         self.assertEqual(
             events[:3],
-            ["aster:place_limit", "aster:wait_fill", "mexc_spot:place_market"],
+            ["aster:place_limit", "aster:wait_fill", "binance_spot:place_market"],
         )
 
 
@@ -643,7 +643,7 @@ class SpotPerpArbitrageRecordingTests(unittest.IsolatedAsyncioTestCase):
                 if (plan.mode == "open" and self.position_reads == 1) or (plan.mode == "close" and self.position_reads > 1):
                     return None
                 return {"symbol": symbol, "market_type": market_type,
-                        "side": "LONG" if self.venue == "mexc_spot" else "SHORT", "quantity": "10"}
+                        "side": "LONG" if self.venue == "binance_spot" else "SHORT", "quantity": "10"}
 
         plan = build_spot_perp_plan(
             symbol="BEAT",
@@ -705,7 +705,7 @@ class SpotPerpArbitrageRecordingTests(unittest.IsolatedAsyncioTestCase):
                 if (plan.mode == "open" and self.position_reads == 1) or (plan.mode == "close" and self.position_reads > 1):
                     return None
                 return {"symbol": symbol, "market_type": market_type,
-                        "side": "LONG" if self.venue == "mexc_spot" else "SHORT", "quantity": "10"}
+                        "side": "LONG" if self.venue == "binance_spot" else "SHORT", "quantity": "10"}
 
         plan = build_spot_perp_plan(
             symbol="BEAT",
@@ -739,7 +739,7 @@ class SpotPerpArbitrageRecordingTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result["ok"])
         self.assertEqual(
             events[:3],
-            ["aster:place_limit", "aster:wait_fill", "mexc_spot:place_market"],
+            ["aster:place_limit", "aster:wait_fill", "binance_spot:place_market"],
         )
 
 
@@ -782,7 +782,7 @@ class SpotPerpArbitrageRecordingTests(unittest.IsolatedAsyncioTestCase):
                 if (plan.mode == "open" and self.position_reads == 1) or (plan.mode == "close" and self.position_reads > 1):
                     return None
                 return {"symbol": symbol, "market_type": market_type,
-                        "side": "LONG" if self.venue == "mexc_spot" else "SHORT", "quantity": "10"}
+                        "side": "LONG" if self.venue == "binance_spot" else "SHORT", "quantity": "10"}
 
         async def fake_fetch_plan_books(*, symbol: str, short_venue: str, clip_usd: float):
             nonlocal fetch_calls
@@ -827,7 +827,7 @@ class SpotPerpArbitrageRecordingTests(unittest.IsolatedAsyncioTestCase):
                 "aster:cancel",
                 "aster:place_limit",
                 "aster:wait_fill",
-                "mexc_spot:place_market",
+                "binance_spot:place_market",
             ],
         )
         self.assertEqual(prices, ["10.1", "11.1"])
@@ -1243,10 +1243,10 @@ class SpotPerpArbitrageRecordingTests(unittest.IsolatedAsyncioTestCase):
             symbol="BEAT",
             clip_usd=100.0,
             quantity=Decimal("10"),
-            maker_venue="mexc_spot",
+            maker_venue="binance_spot",
             taker_venue="aster",
             short_venue="aster",
-            long_venue="mexc_spot",
+            long_venue="binance_spot",
             maker_adapter=MakerAdapter(),
             taker_adapter=TakerAdapter(),
             max_hedge_retries=0,
@@ -1307,10 +1307,10 @@ class SpotPerpArbitrageRecordingTests(unittest.IsolatedAsyncioTestCase):
             symbol="BEAT",
             clip_usd=10.0,
             quantity=Decimal("1"),
-            maker_venue="mexc_spot",
+            maker_venue="binance_spot",
             taker_venue="aster",
             short_venue="aster",
-            long_venue="mexc_spot",
+            long_venue="binance_spot",
             maker_adapter=MakerAdapter(),
             taker_adapter=TakerAdapter(),
             max_hedge_retries=0,
@@ -1367,10 +1367,10 @@ class SpotPerpArbitrageRecordingTests(unittest.IsolatedAsyncioTestCase):
                 symbol="BEAT",
                 clip_usd=19.0,
                 quantity=Decimal("1"),
-                maker_venue="mexc_spot",
+                maker_venue="binance_spot",
                 taker_venue="aster",
                 short_venue="aster",
-                long_venue="mexc_spot",
+                long_venue="binance_spot",
                 maker_adapter=MakerAdapter(),
                 taker_adapter=TakerAdapter(),
                 max_hedge_retries=0,
@@ -1578,9 +1578,9 @@ class SpotPerpArbitrageRecordingTests(unittest.IsolatedAsyncioTestCase):
                 symbol="BTC",
                 clip_usd=1000.0,
                 quantity=Decimal("10"),
-                maker_venue="mexc_spot",
+                maker_venue="binance_spot",
                 taker_venue="aster",
-                short_venue="mexc_spot",
+                short_venue="binance_spot",
                 long_venue="aster",
                 maker_adapter=MakerAdapter(),
                 taker_adapter=TakerAdapter(),
@@ -1670,7 +1670,7 @@ class SpotPerpArbitrageRecordingTests(unittest.IsolatedAsyncioTestCase):
                 if (plan.mode == "open" and self.position_reads == 1) or (plan.mode == "close" and self.position_reads > 1):
                     return None
                 return {"symbol": symbol, "market_type": market_type,
-                        "side": "LONG" if self.venue == "mexc_spot" else "SHORT", "quantity": "10"}
+                        "side": "LONG" if self.venue == "binance_spot" else "SHORT", "quantity": "10"}
 
         async def fake_fetch_plan_books(*, symbol: str, short_venue: str, clip_usd: float):
             return (
@@ -1731,7 +1731,7 @@ class SpotPerpArbitrageRecordingTests(unittest.IsolatedAsyncioTestCase):
                 if (plan.mode == "open" and self.position_reads == 1) or (plan.mode == "close" and self.position_reads > 1):
                     return None
                 return {"symbol": symbol, "market_type": market_type,
-                        "side": "LONG" if self.venue == "mexc_spot" else "SHORT", "quantity": "10"}
+                        "side": "LONG" if self.venue == "binance_spot" else "SHORT", "quantity": "10"}
 
         plan = build_spot_perp_plan(
             symbol="BEAT",
@@ -1765,7 +1765,7 @@ class SpotPerpArbitrageRecordingTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(result["recorded_strategy_id"], result["strategy_id"])
             registry = PositionRegistry.load(registry_path)
             short_leg = registry.get_leg(f"{result['strategy_id']}:aster:perp:short")
-            spot_leg = registry.get_leg(f"{result['strategy_id']}:mexc_spot:spot:long")
+            spot_leg = registry.get_leg(f"{result['strategy_id']}:binance_spot:spot:long")
             self.assertEqual(short_leg.quantity, "10")
             self.assertEqual(spot_leg.quantity, "10")
 
@@ -1789,7 +1789,7 @@ class SpotPerpArbitrageRecordingTests(unittest.IsolatedAsyncioTestCase):
                 if (plan.mode == "open" and self.position_reads == 1) or (plan.mode == "close" and self.position_reads > 1):
                     return None
                 return {"symbol": symbol, "market_type": market_type,
-                        "side": "LONG" if self.venue == "mexc_spot" else "SHORT", "quantity": "10"}
+                        "side": "LONG" if self.venue == "binance_spot" else "SHORT", "quantity": "10"}
 
             def __init__(self, venue):
                 self.venue = venue

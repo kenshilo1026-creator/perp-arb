@@ -133,12 +133,23 @@ async def confirm_pair_execution(
     last = None
     for attempt in range(max(1, attempts)):
         try:
+            # Spot fills are gross; a venue may debit an explicitly verified
+            # base-asset commission. Keep the real balance and account for the
+            # debit only after both legs have executed, never before hedging.
+            adjustments = []
+            for adapter in (maker_adapter, taker_adapter):
+                adjustment = getattr(adapter, "execution_position_adjustment", None)
+                value = Decimal(str(await adjustment(symbol))) if callable(adjustment) else Decimal(0)
+                if not value.is_finite() or value > 0:
+                    raise RuntimeError("invalid execution position adjustment")
+                adjustments.append(value)
             maker, taker = await asyncio.gather(
                 position_quantity(maker_adapter, symbol, market_type=maker_market_type),
                 position_quantity(taker_adapter, symbol, market_type=taker_market_type),
             )
-            last = f"maker={maker} taker={taker} expected={expected_maker}/{expected_taker}"
-            if maker == expected_maker and taker == expected_taker:
+            adjusted_maker, adjusted_taker = expected_maker + adjustments[0], expected_taker + adjustments[1]
+            last = f"maker={maker} taker={taker} expected={adjusted_maker}/{adjusted_taker}"
+            if maker == adjusted_maker and taker == adjusted_taker:
                 return
         except Exception as exc:
             last = str(exc)

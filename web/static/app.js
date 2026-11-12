@@ -78,7 +78,7 @@ function drawChart(series) {
 function bodyFromForm(mode) {
   return { kind: state.kind, mode, exec_mode: $("exec-mode").value,
     symbol: $("symbol").value.trim().toUpperCase(), short_venue: $("short-venue").value,
-    long_venue: state.kind === "spot_perp" ? "mexc" : $("long-venue").value,
+    long_venue: state.kind === "spot_perp" ? "binance_spot" : $("long-venue").value,
     leverage: +$("leverage").value, total_size: $("total-size").value, clip_size: $("clip-size").value,
     interval_ms: +$("interval-ms").value, debounce_ms: +$("debounce-ms").value };
 }

@@ -9,6 +9,7 @@ from hydra_basis.execution_engine.order_service import (
     OpenParams,
     Preview,
     build_open_preview,
+    build_spot_perp_preview,
     execute_open,
     progress_printer,
     validate_open_params,
@@ -98,6 +99,16 @@ class DebounceTests(unittest.IsolatedAsyncioTestCase):
 
 
 class BuildOpenPreviewTests(unittest.IsolatedAsyncioTestCase):
+    async def test_spot_preview_uses_binance_with_shared_cli_helpers(self):
+        params = _params(kind="spot_perp", long_venue="binance_spot")
+        books = ({"bid": 100.0, "ask": 100.02}, {"bid": 100.01, "ask": 100.03})
+        with mock.patch("scripts.run_spot_perp_arbitrage.fetch_plan_books",
+                        new=mock.AsyncMock(return_value=books)):
+            preview = await build_spot_perp_preview(params)
+        self.assertEqual(preview.long_venue, "binance_spot")
+        self.assertEqual({preview.maker_venue, preview.taker_venue}, {"aster", "binance_spot"})
+        self.assertEqual(preview.batch_count, 5)
+
     async def test_maps_execution_preview_and_keeps_params_venues(self):
         sig = ExecutionSignal("BTC", "aster", "hyperliquid", 0.42, 1.8, "2026-07-06T00:00:00+00:00")
         exec_preview = ExecutionPreview(

@@ -46,6 +46,19 @@ class DefaultsApyTests(unittest.TestCase):
 
 
 class PreviewTests(unittest.TestCase):
+    def test_spot_preview_routes_to_binance_even_with_old_client_venue(self):
+        from web.app import create_app
+        body = {"kind": "spot_perp", "mode": "open", "exec_mode": "maker_taker", "symbol": "BTC",
+                "short_venue": "aster", "long_venue": "mexc", "leverage": 3,
+                "total_size": "0.5", "clip_size": "0.1", "interval_ms": 500, "debounce_ms": 300}
+        books = ({"bid": 100.0, "ask": 100.02}, {"bid": 100.01, "ask": 100.03})
+        with mock.patch("scripts.run_spot_perp_arbitrage.fetch_plan_books",
+                        new=mock.AsyncMock(return_value=books)):
+            response = TestClient(create_app()).post("/api/preview", json=body)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["long_venue"], "binance_spot")
+        self.assertIn("binance_spot", [response.json()["maker_venue"], response.json()["taker_venue"]])
+
     def test_open_perp_perp_preview(self):
         preview = Preview(symbol="BTC", kind="perp_perp", maker_venue="aster", taker_venue="hyperliquid",
                           short_venue="aster", long_venue="hyperliquid", total_usd=5000.0, clip_usd=1000.0,

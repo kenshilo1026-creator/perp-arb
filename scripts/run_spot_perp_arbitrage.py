@@ -25,11 +25,11 @@ from hydra_basis.execution_engine.executor import (
     taker_price_from_orderbook,
 )
 from hydra_basis.execution_engine.market_data import (
-    fetch_mexc_spot_orderbook,
+    fetch_binance_spot_orderbook,
     fetch_orderbook_snapshot,
 )
 from hydra_basis.execution_engine.maker_price_guard import MakerPriceGuard, create_maker_guard, adverse_price_gap
-from hydra_basis.execution_engine.mexc_spot_adapter import MexcSpotExecutionAdapter
+from hydra_basis.execution_engine.binance_spot_adapter import BinanceSpotExecutionAdapter
 from hydra_basis.execution_engine.order_stream import prepare_private_order_streams
 from hydra_basis.execution_engine.order_service import Deps, progress_printer, run_batched_execution
 from hydra_basis.execution_engine.priority import default_maker_for_pair
@@ -51,7 +51,7 @@ from scripts.place_order import (
 
 load_environment()
 
-MEXC_SPOT_VENUE = "mexc_spot"
+BINANCE_SPOT_VENUE = "binance_spot"
 SUPPORTED_MODES = {"open", "close"}
 SUPPORTED_SHORT_VENUES = {"aster", "hyperliquid", "lighter", "variational"}
 LIVE_CONFIRMATION_PHRASE = "PLACE LIVE SPOT PERP ORDER"
@@ -101,8 +101,8 @@ def normalize_short_venue(venue: str) -> str:
 def spot_perp_sides(*, mode: str) -> dict[str, str]:
     normalized = normalize_mode(mode)
     if normalized == "open":
-        return {MEXC_SPOT_VENUE: "BUY", "perp": "SELL"}
-    return {MEXC_SPOT_VENUE: "SELL", "perp": "BUY"}
+        return {BINANCE_SPOT_VENUE: "BUY", "perp": "SELL"}
+    return {BINANCE_SPOT_VENUE: "SELL", "perp": "BUY"}
 
 
 def decimal_to_plain(value: Decimal | float | str) -> str:
@@ -215,19 +215,19 @@ def build_spot_perp_plan(
     normalized_short_venue = normalize_short_venue(short_venue)
     spot_spread_pct = compute_spread_pct(spot_book)
     perp_spread_pct = compute_spread_pct(perp_book)
-    preferred_maker = default_maker_for_pair(normalized_short_venue, MEXC_SPOT_VENUE)
+    preferred_maker = default_maker_for_pair(normalized_short_venue, BINANCE_SPOT_VENUE)
     if preferred_maker is not None:
-        maker_venue, taker_venue = preferred_maker, MEXC_SPOT_VENUE
+        maker_venue, taker_venue = preferred_maker, BINANCE_SPOT_VENUE
     else:
-        taker_venue = MEXC_SPOT_VENUE if spot_spread_pct <= perp_spread_pct else normalized_short_venue
-        maker_venue = normalized_short_venue if taker_venue == MEXC_SPOT_VENUE else MEXC_SPOT_VENUE
+        taker_venue = BINANCE_SPOT_VENUE if spot_spread_pct <= perp_spread_pct else normalized_short_venue
+        maker_venue = normalized_short_venue if taker_venue == BINANCE_SPOT_VENUE else BINANCE_SPOT_VENUE
     sides = spot_perp_sides(mode=normalized_mode)
     side_by_venue = {
-        MEXC_SPOT_VENUE: sides[MEXC_SPOT_VENUE],
+        BINANCE_SPOT_VENUE: sides[BINANCE_SPOT_VENUE],
         normalized_short_venue: sides["perp"],
     }
-    taker_book = spot_book if taker_venue == MEXC_SPOT_VENUE else perp_book
-    maker_book = spot_book if maker_venue == MEXC_SPOT_VENUE else perp_book
+    taker_book = spot_book if taker_venue == BINANCE_SPOT_VENUE else perp_book
+    maker_book = spot_book if maker_venue == BINANCE_SPOT_VENUE else perp_book
     base_quantity = compute_base_quantity(
         quantity=quantity,
         clip_usd=clip_usd,
@@ -263,8 +263,8 @@ def build_spot_perp_plan(
 
 
 def build_spot_perp_adapter(venue: str, *, leverage: int, mode: str, broker_url: str | None = None):
-    if venue == MEXC_SPOT_VENUE:
-        return MexcSpotExecutionAdapter()
+    if venue == BINANCE_SPOT_VENUE:
+        return BinanceSpotExecutionAdapter()
     skip_margin_setup = normalize_mode(mode) == "close"
     return build_adapter_for_venue(
         venue,
@@ -280,7 +280,7 @@ async def refresh_spot_perp_maker_price(plan: SpotPerpPlan) -> str:
         short_venue=plan.short_venue,
         clip_usd=plan.clip_usd,
     )
-    maker_book = spot_book if plan.maker_venue == MEXC_SPOT_VENUE else perp_book
+    maker_book = spot_book if plan.maker_venue == BINANCE_SPOT_VENUE else perp_book
     price = maker_limit_price(maker_book, plan.maker_side)
     print(
         "refreshed maker book: "
@@ -292,8 +292,8 @@ async def refresh_spot_perp_maker_price(plan: SpotPerpPlan) -> str:
 
 
 def display_venue_name(venue: str) -> str:
-    if venue == MEXC_SPOT_VENUE:
-        return "mexc"
+    if venue == BINANCE_SPOT_VENUE:
+        return "binance"
     return venue
 
 
@@ -320,7 +320,7 @@ def format_spot_perp_execution_summary(
     spot_price = price_for_venue_from_execution_summary(
         plan=plan,
         result=result,
-        venue=MEXC_SPOT_VENUE,
+        venue=BINANCE_SPOT_VENUE,
     )
     short_price = price_for_venue_from_execution_summary(
         plan=plan,
@@ -328,9 +328,11 @@ def format_spot_perp_execution_summary(
         venue=plan.short_venue,
     )
     lines = [
-        f"下單成功 {display_venue_name(MEXC_SPOT_VENUE)}現貨成交價: {spot_price}",
+        f"下單成功 {display_venue_name(BINANCE_SPOT_VENUE)}現貨成交價: {spot_price}",
         f"{display_venue_name(plan.short_venue)}{'做空' if plan.mode == 'open' else '買入平空'}成交價: {short_price}",
     ]
+    if result.get("spot_base_asset_fee"):
+        lines.append(f"Binance 現貨扣幣手續費: {result['spot_base_asset_fee']} {plan.symbol}；淨持倉已扣除此數量")
     summary = result.get("execution_price_summary") or {}
     maker, taker = summary.get("maker_avg_price"), summary.get("taker_avg_price")
     if (summary.get("maker_avg_price_confirmed") is False
@@ -428,7 +430,7 @@ async def fetch_plan_books(
 ) -> tuple[dict[str, float | int], dict[str, float | int]]:
     async with aiohttp.ClientSession(headers={"User-Agent": "funding-arb-spot-perp/0.1"}) as session:
         spot_book, perp_book = await asyncio.gather(
-            fetch_mexc_spot_orderbook(session, symbol),
+            fetch_binance_spot_orderbook(session, symbol),
             fetch_orderbook_snapshot(
                 session,
                 venue=short_venue,
@@ -470,13 +472,26 @@ async def execute_spot_perp_plan(
                 await prepare(plan.symbol)
             elif callable(warm_up):
                 await warm_up()
+        spot_adapter = maker_adapter if plan.maker_venue == BINANCE_SPOT_VENUE else taker_adapter
+        validate_spot = getattr(spot_adapter, "validate_order_inputs", None)
+        min_hedge_notional = SPOT_PERP_MIN_HEDGE_NOTIONAL_USD
+        if callable(validate_spot):
+            spot_is_maker = plan.maker_venue == BINANCE_SPOT_VENUE
+            # Validate Binance's own filters before the other leg can fill.
+            # Never silently round only one leg to a different quantity.
+            spot_price = plan.maker_price if spot_is_maker else str(plan.taker_execution_price)
+            validate_spot(symbol=plan.symbol, amount=str(plan.quantity),
+                          price=spot_price, market=not spot_is_maker)
+            if not spot_is_maker:
+                min_hedge_notional = max(min_hedge_notional,
+                    spot_adapter.minimum_order_notional(plan.symbol, market=True))
         await prepare_private_order_streams(((plan.maker_venue, maker_adapter), (plan.taker_venue, taker_adapter)))
         fresh_maker_price = await refresh_spot_perp_maker_price(plan)
         async def guard_books() -> tuple[dict, dict]:
             spot, perp = await fetch_plan_books(
                 symbol=plan.symbol, short_venue=plan.short_venue, clip_usd=plan.clip_usd,
             )
-            return (spot, perp) if plan.maker_venue == MEXC_SPOT_VENUE else (perp, spot)
+            return (spot, perp) if plan.maker_venue == BINANCE_SPOT_VENUE else (perp, spot)
 
         maker_guard = await create_maker_guard(
             maker_adapter=maker_adapter, taker_adapter=taker_adapter, symbol=plan.symbol,
@@ -485,8 +500,8 @@ async def execute_spot_perp_plan(
         )
         # For close mode, treating spot as the "short venue" makes the existing
         # side mapper emit spot SELL and perp BUY.
-        side_short_venue = plan.short_venue if plan.mode == "open" else MEXC_SPOT_VENUE
-        side_long_venue = MEXC_SPOT_VENUE if plan.mode == "open" else plan.short_venue
+        side_short_venue = plan.short_venue if plan.mode == "open" else BINANCE_SPOT_VENUE
+        side_long_venue = BINANCE_SPOT_VENUE if plan.mode == "open" else plan.short_venue
         result = await execute_single_clip(
             symbol=plan.symbol,
             clip_usd=plan.clip_usd,
@@ -518,14 +533,17 @@ async def execute_spot_perp_plan(
                 if allow_large_price_gap
                 else float(SPOT_PERP_MAX_PRE_TRADE_PRICE_GAP)
             ),
-            min_hedge_notional_usd=float(SPOT_PERP_MIN_HEDGE_NOTIONAL_USD),
+            min_hedge_notional_usd=float(min_hedge_notional),
             verify_hedge_fill=True,
-            maker_market_type="spot" if plan.maker_venue == MEXC_SPOT_VENUE else "perp",
-            taker_market_type="spot" if plan.taker_venue == MEXC_SPOT_VENUE else "perp",
-            maker_reduce_only=plan.mode == "close" and plan.maker_venue != MEXC_SPOT_VENUE,
-            taker_reduce_only=plan.mode == "close" and plan.taker_venue != MEXC_SPOT_VENUE,
+            maker_market_type="spot" if plan.maker_venue == BINANCE_SPOT_VENUE else "perp",
+            taker_market_type="spot" if plan.taker_venue == BINANCE_SPOT_VENUE else "perp",
+            maker_reduce_only=plan.mode == "close" and plan.maker_venue != BINANCE_SPOT_VENUE,
+            taker_reduce_only=plan.mode == "close" and plan.taker_venue != BINANCE_SPOT_VENUE,
 
         )
+        fee = getattr(spot_adapter, "last_base_asset_fee", Decimal(0))
+        if isinstance(fee, Decimal) and fee > 0:
+            result["spot_base_asset_fee"] = str(fee)
         if plan.mode != "open" or not result.get("ok", False):
             return result
 
@@ -539,8 +557,8 @@ async def execute_spot_perp_plan(
             else None
         )
         spot_leg = await fetch_required_live_position(
-            adapters_by_venue[MEXC_SPOT_VENUE],
-            venue=MEXC_SPOT_VENUE,
+            adapters_by_venue[BINANCE_SPOT_VENUE],
+            venue=BINANCE_SPOT_VENUE,
             symbol=plan.symbol,
             market_type="spot",
             expected_side="LONG",
@@ -557,7 +575,7 @@ async def execute_spot_perp_plan(
             short_leg=perp_leg,
             long_leg=spot_leg,
             short_venue=plan.short_venue,
-            long_venue=MEXC_SPOT_VENUE,
+            long_venue=BINANCE_SPOT_VENUE,
             reference_quantity=(fallback_quantity or plan.quantity),
         )
         strategy_id = f"spot-perp-{plan.symbol}-{int(time.time() * 1000)}"
@@ -582,7 +600,7 @@ async def execute_spot_perp_plan(
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Run one MEXC spot vs perp arbitrage clip.")
+    parser = argparse.ArgumentParser(description="Run one Binance spot vs perp arbitrage clip.")
     parser.add_argument("--mode", default=None, choices=sorted(SUPPORTED_MODES))
     parser.add_argument("--symbol", default=None)
     parser.add_argument("--short-venue", default=None, choices=sorted(SUPPORTED_SHORT_VENUES))
@@ -635,7 +653,7 @@ async def run_spot_perp_arbitrage() -> None:
     print("spot-perp arbitrage preview")
     print(f"mode: {plan.mode}")
     print(f"symbol: {plan.symbol}")
-    print(f"spot_venue: {MEXC_SPOT_VENUE}")
+    print(f"spot_venue: {BINANCE_SPOT_VENUE}")
     print(f"short_venue: {plan.short_venue}")
     print(f"spot_spread: {fmt_pct(plan.spot_spread_pct)}")
     print(f"perp_spread: {fmt_pct(plan.perp_spread_pct)}")

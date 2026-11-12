@@ -33,6 +33,7 @@ from hydra_basis.execution_engine.lighter_live import (
 )
 from hydra_basis.execution_engine.mexc_adapter import MexcExecutionAdapter
 from hydra_basis.execution_engine.mexc_spot_adapter import MexcSpotExecutionAdapter
+from hydra_basis.execution_engine.binance_spot_adapter import BinanceSpotExecutionAdapter
 from hydra_basis.notifications.telegram import send_telegram
 from hydra_basis.execution_engine.variational_monitor_adapter import VariationalMonitorPositionAdapter
 from hydra_basis.risk_management.closers import MarketTypeRouterCloser
@@ -306,6 +307,7 @@ def build_closers() -> dict[str, object]:
         closers["ondo"] = OndoExecutionAdapter()
     except Exception as exc:
         print(f"risk manager ondo closer disabled: {exc!r}")
+    closers["binance_spot"] = BinanceSpotExecutionAdapter()
     closers["variational"] = VariationalMonitorPositionAdapter()
     return closers
 
@@ -313,6 +315,8 @@ def build_closers() -> dict[str, object]:
 def _funding_close_adapter_for_leg(leg: PositionLeg, *, leverage: int = 1):
     venue = leg.venue.strip().lower()
     market_type = leg.market_type.strip().lower()
+    if venue == "binance_spot" and market_type == "spot":
+        return BinanceSpotExecutionAdapter()
     if venue == "mexc_spot" or (venue == "mexc" and market_type == "spot"):
         return MexcSpotExecutionAdapter()
     if venue == "mexc":

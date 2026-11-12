@@ -16,7 +16,7 @@ ALLOWED_HOSTS = {"127.0.0.1", "localhost", "testserver"}
 
 
 def _open_params_from_body(body: dict) -> order_service.OpenParams:
-    long_venue = "mexc" if body["kind"] == "spot_perp" else body["long_venue"]
+    long_venue = "binance_spot" if body["kind"] == "spot_perp" else body["long_venue"]
     return order_service.OpenParams(
         kind=body["kind"],
         symbol=str(body["symbol"]).upper(),

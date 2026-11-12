@@ -1,0 +1,17 @@
+[package]
+name = "perp-arb-execution"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+perp-arb-core = { path = "../core" }
+perp-arb-private-events = { path = "../private-events" }
+
+tokio = { version = "1", features = ["macros", "rt", "sync"] }
+
+serde_json.workspace = true
+
+serde.workspace = true
+sha2 = "0.10.9"
+getrandom = "0.3.4"

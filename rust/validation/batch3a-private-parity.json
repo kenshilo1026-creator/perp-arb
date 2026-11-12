@@ -1,0 +1,25 @@
+{
+  "batch": "3a",
+  "common_events": 901,
+  "mismatches": 0,
+  "intentional_differences": [
+    {
+      "case": "older_timestamp_more_fills_after_partially_filled",
+      "python_quantity": "2",
+      "rust_quantity": "4",
+      "reason": "Preserve newly observed fills; never hide exposure due to timestamp order."
+    },
+    {
+      "case": "older_timestamp_more_fills_after_canceled",
+      "python_quantity": "2",
+      "rust_quantity": "4",
+      "reason": "Preserve newly observed fills; never hide exposure due to timestamp order."
+    }
+  ],
+  "scope": "Offline Aster cumulative event normalization and coordination only; no live private WS or order submission.",
+  "binary_sha256": "e0756562790322b50feb0a0a1ca175fe096a69ec67265913426e3ac04aa17765",
+  "python_sources": {
+    "hydra_basis/execution_engine/order_stream.py": "476ec6b7d0cad7272d7da586bdc99f7c7a2cf14dfc6dbce850bfa2c4bf974279",
+    "hydra_basis/execution_engine/order_fill.py": "de15921a792f408e7eefbba502e4c29fbe29707c693a3986c1e78ac89f8427c8"
+  }
+}

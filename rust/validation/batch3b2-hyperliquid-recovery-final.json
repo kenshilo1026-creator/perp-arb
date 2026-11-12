@@ -1,0 +1,33 @@
+{
+  "date": "2026-11-11",
+  "duration_seconds": 90,
+  "exit_code": 1,
+  "summary": {
+    "acknowledgements": 8,
+    "attempts": 4,
+    "connected_before_stop": true,
+    "connections": 4,
+    "duplicate_fills": 90,
+    "fault": null,
+    "last_error": "Coordination(UnknownOrder)",
+    "mode": "read_only",
+    "new_fills": 30,
+    "order_reconciliation_complete": false,
+    "order_updates": 0,
+    "pongs": 3,
+    "queries": 88,
+    "query_failures": 31,
+    "reconciliation_needed_before_stop": 0,
+    "recovery_verification": true,
+    "shutdown_completed": true,
+    "snapshots": 4,
+    "tracked_orders": 13,
+    "transport_failures": 0,
+    "transport_recovery_passed": true,
+    "unknown_order_queries": 31,
+    "unresolved_fill_orders_before_stop": 1
+  },
+  "diagnostic": "recovery verification incomplete or unhealthy; inspect counters",
+  "binary_sha256": "264ba8c798331d161220fe2c18928e5b9bf214dcede81062316ec4722395763a",
+  "scope": "Explicit read-only live test. Controlled local socket rotation; no orders/cancels or shared listenKey deletion. Raw account payloads not recorded."
+}

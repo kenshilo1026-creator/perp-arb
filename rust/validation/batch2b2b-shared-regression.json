@@ -1,0 +1,33 @@
+{
+  "status": "passed",
+  "events": 560,
+  "mismatches": [],
+  "fresh_by_venue": {
+    "aster": 160,
+    "hyperliquid": 160
+  },
+  "dataset_sha256": "db1d0bff31e5c22514583a868df1e8a3bc4fb5ffd336f92d6aef0bd84c182452",
+  "binary_sha256": "093448456803422403e12b6c3c7e6c1c0dd6c0aa7b97d7350c7f8b899c7332a4",
+  "source_sha256": {
+    "rust/crates/market-data/src/bin/instrument-replay.rs": "a85b4c82740bfa7f1ec79e6ed25273ecee6489b8409a5af6d945bc11ebf7ed9a",
+    "rust/crates/market-data/src/bin/market-probe.rs": "8d95c3cd1007ed7168960c43c2ca3fb27455d8f81135b1c56a1d9f4f46a42776",
+    "rust/crates/market-data/src/bin/market-replay.rs": "62e706cac64178f24fcecb90065f4e6d54b4ddedca72df6e3e1a43363f3f0f2b",
+    "rust/crates/market-data/src/bin/metadata-probe.rs": "21d4896d1aa597a41908805c4c74169a278bbd9ab5240d13949239ae29272a96",
+    "rust/crates/market-data/src/bin/shared-probe.rs": "d16de6e0bc36a15f8f6550cf53d5df8c733485abe30cb947ba0c0dc87e066f3a",
+    "rust/crates/market-data/src/bin/shared-replay.rs": "bcf2e5c34f2048be807a870477bf6d0e28fe34c0bc2261f8ea5fe50cafe37820",
+    "rust/crates/market-data/src/catalog.rs": "787bf6347db83446a8463af583886c78222bfff353c73da3d64dce184b68b8e4",
+    "rust/crates/market-data/src/hub.rs": "2101bfe69bd40943bbc668205ed4912638fa347cde389f2afe7ebf837effd884",
+    "rust/crates/market-data/src/lib.rs": "63ab6a6edc546671b0a9ffe8456cb99c65738a2ac932763367935c73862c899c",
+    "rust/crates/market-data/src/metadata.rs": "eb48b8d89d08416c57930d09174e209e949bc3bd4526c3e483f3c195abfa4d23",
+    "rust/crates/market-data/src/metadata_tests.rs": "983fd56e1ce39189e403ba7677a46b80d9b8e9edc5697f2507a76ee2e31c147d",
+    "rust/crates/market-data/src/recorder.rs": "3fc2b959850ac345292a55eeba9be96bd66f16f4a71d5ae5a50673906bd2224e",
+    "rust/crates/market-data/src/shared.rs": "5e20cb272653a0384f788d2a6d504644eb3c3736057c4ecdbf7086089bfca701",
+    "rust/crates/market-data/tests/catalog.rs": "4ae85650a6062d6a78a11515e8858ac06a2d791073accc2eb099fbc1d02494ad",
+    "rust/crates/market-data/tests/shared.rs": "0d2e1c1866e174a3447b76ae1062ec17632a89a73ec85d3847f52ad614664c05",
+    "rust/crates/market-data/tests/snapshots.rs": "501859e95284b1b7d13e9b1d24a8185f3bdd925375a9722307145b036512be57",
+    "rust/tools/verify_shared.py": "b20afdfd3e0829b88164a8729c0fcbc8a7fb84a514372fb15380083ea0607f1f",
+    "hydra_basis/spread_strategy/dispatcher.py": "253150bec9673c2d4a7eb5a2e805d93e6b13e5401d394c510e178fcb3173b600",
+    "hydra_basis/spread_strategy/feeds.py": "1739a25a068e4c8a1c7068cf9086708d949e09ac921fdc0a5cf3e0afdb594361"
+  },
+  "scope": "Exact common-policy book, source-time, freshness, VWAP, marginal and insufficient-capacity parity. Not a trading or P&L backtest; stricter Rust safety cases tested separately."
+}

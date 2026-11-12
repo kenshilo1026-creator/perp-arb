@@ -1,0 +1,28 @@
+{
+  "exit_code": 0,
+  "binary_sha256": "00a3d72cd654788994a0235dc49c5ee92b6e197ef0284e2476f5d846c49616d1",
+  "stdout": {
+    "account_audit": {
+      "expected_supplied": false,
+      "matched": false,
+      "open_orders": 0,
+      "positions": 2,
+      "wallets": 35
+    },
+    "connected_before_stop": true,
+    "connection_attempts": 4,
+    "connections": 4,
+    "fault": null,
+    "last_error": null,
+    "mode": "read_only",
+    "query_failures": 0,
+    "query_successes": 0,
+    "reconciliation_needed_before_stop": 0,
+    "recovery_verification": true,
+    "renewals": 6,
+    "shutdown_completed": true,
+    "tracked_orders": 0,
+    "ws_events": 0
+  },
+  "stderr": ""
+}

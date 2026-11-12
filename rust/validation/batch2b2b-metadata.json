@@ -1,0 +1,104 @@
+{
+    "status":  "passed",
+    "date_hong_kong":  "2026-11-10",
+    "batch":  "2b-2b",
+    "rust_tests":  79,
+    "new_metadata_tests":  27,
+    "python_verifier_tests":  12,
+    "validation_commands":  [
+                                "powershell -NoProfile -File rust/tools/check.ps1 -Format",
+                                "cargo clippy --workspace --all-targets --locked -- -D warnings (after buffered probe output change)",
+                                "cargo build --release --locked --bin metadata-probe (after buffered probe output change)",
+                                "metadata-probe --output rust/artifacts/metadata-20261110-02.json",
+                                "verify_instruments.py synthetic, previous capture, and new Rust capture",
+                                "verify_market.py synthetic, ETH recording, Unicode recording",
+                                "verify_shared.py",
+                                "inventory.py --check"
+                            ],
+    "rust_toolchain":  "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+    "public_capture":  "rust/artifacts/metadata-20261110-02.json",
+    "recording_sha256":  "66fb4e63b324c07092bc0380735ab2d534181f4f60ca3a0b36e7b99df1f415aa",
+    "probe_binary_sha256":  "bf768ed5d3b2057f622fa41658416c17567d65aa71bb280b85ec0094e6f5d7a4",
+    "network":  {
+                    "aster_v1":  {
+                                     "rows":  644,
+                                     "http_attempts":  1,
+                                     "cache_operations":  1020,
+                                     "additional_http_attempts":  0,
+                                     "initial_load_ms":  907.1941999999999,
+                                     "memory_snapshot_read_ns":  {
+                                                                     "p50":  100,
+                                                                     "p95":  100,
+                                                                     "p99":  100
+                                                                 }
+                                 },
+                    "aster_v3":  {
+                                     "rows":  644,
+                                     "http_attempts":  1,
+                                     "cache_operations":  1020,
+                                     "additional_http_attempts":  0,
+                                     "initial_load_ms":  424.6927,
+                                     "memory_snapshot_read_ns":  {
+                                                                     "p50":  100,
+                                                                     "p95":  100,
+                                                                     "p99":  100
+                                                                 }
+                                 },
+                    "hyperliquid":  {
+                                        "rows":  235,
+                                        "http_attempts":  1,
+                                        "cache_operations":  1020,
+                                        "additional_http_attempts":  0,
+                                        "initial_load_ms":  258.8457,
+                                        "memory_snapshot_read_ns":  {
+                                                                        "p50":  100,
+                                                                        "p95":  200,
+                                                                        "p99":  200
+                                                                    }
+                                    }
+                },
+    "source_sha256":  {
+                          "rust/Cargo.lock":  "83e0e6e0fa2f05569d28466e15a364168d6b4e786468ced906462deba6d2659a",
+                          "rust/Cargo.toml":  "0c3ffd0f7c46b5fe383c67b1bf38cd504d960bc1eea16c0952a540d074d073ee",
+                          "rust/crates/core/Cargo.toml":  "82a1d38288ad36dd57ecf417488c6ac309d433f95d57ddd6d8d6742f1e5394a9",
+                          "rust/crates/core/src/instruments.rs":  "aef297aaa70368b17b42871e6fc8dbea3bd0152c1077f13a9e702c1577ee6f82",
+                          "rust/crates/core/src/lib.rs":  "0020607e34003c14b81a33b9148e0d54b65c3a5dcb102058657e2a3260623b44",
+                          "rust/crates/core/src/market.rs":  "7937d8c489aae70ac8513d0a30a714340fd58c395f1e6a878ffb31130bc70452",
+                          "rust/crates/core/src/pricing.rs":  "32afa8c81210e476ff1dec7014a9942513e97b67d905c186dcb8d3c051123b82",
+                          "rust/crates/core/tests/instruments.rs":  "953fbfb0d5ff5ca60126fa1cfd89995c1d45ae2df30ee587dfd254b9b814f079",
+                          "rust/crates/core/tests/market_math.rs":  "3c6ad292b05e3022c2e52cc27a545d6d2d32e2365bf5747c8ada0fd8fc836603",
+                          "rust/crates/market-data/Cargo.toml":  "30894e0e4a48e2f28d8cd64be0bc20ae44a27903cac87045fdc210c955d00447",
+                          "rust/crates/market-data/src/bin/instrument-replay.rs":  "a85b4c82740bfa7f1ec79e6ed25273ecee6489b8409a5af6d945bc11ebf7ed9a",
+                          "rust/crates/market-data/src/bin/market-probe.rs":  "8d95c3cd1007ed7168960c43c2ca3fb27455d8f81135b1c56a1d9f4f46a42776",
+                          "rust/crates/market-data/src/bin/market-replay.rs":  "62e706cac64178f24fcecb90065f4e6d54b4ddedca72df6e3e1a43363f3f0f2b",
+                          "rust/crates/market-data/src/bin/metadata-probe.rs":  "21d4896d1aa597a41908805c4c74169a278bbd9ab5240d13949239ae29272a96",
+                          "rust/crates/market-data/src/bin/shared-probe.rs":  "d16de6e0bc36a15f8f6550cf53d5df8c733485abe30cb947ba0c0dc87e066f3a",
+                          "rust/crates/market-data/src/bin/shared-replay.rs":  "bcf2e5c34f2048be807a870477bf6d0e28fe34c0bc2261f8ea5fe50cafe37820",
+                          "rust/crates/market-data/src/catalog.rs":  "787bf6347db83446a8463af583886c78222bfff353c73da3d64dce184b68b8e4",
+                          "rust/crates/market-data/src/hub.rs":  "2101bfe69bd40943bbc668205ed4912638fa347cde389f2afe7ebf837effd884",
+                          "rust/crates/market-data/src/lib.rs":  "63ab6a6edc546671b0a9ffe8456cb99c65738a2ac932763367935c73862c899c",
+                          "rust/crates/market-data/src/metadata.rs":  "eb48b8d89d08416c57930d09174e209e949bc3bd4526c3e483f3c195abfa4d23",
+                          "rust/crates/market-data/src/metadata_tests.rs":  "983fd56e1ce39189e403ba7677a46b80d9b8e9edc5697f2507a76ee2e31c147d",
+                          "rust/crates/market-data/src/recorder.rs":  "3fc2b959850ac345292a55eeba9be96bd66f16f4a71d5ae5a50673906bd2224e",
+                          "rust/crates/market-data/src/shared.rs":  "5e20cb272653a0384f788d2a6d504644eb3c3736057c4ecdbf7086089bfca701",
+                          "rust/crates/market-data/tests/catalog.rs":  "4ae85650a6062d6a78a11515e8858ac06a2d791073accc2eb099fbc1d02494ad",
+                          "rust/crates/market-data/tests/shared.rs":  "0d2e1c1866e174a3447b76ae1062ec17632a89a73ec85d3847f52ad614664c05",
+                          "rust/crates/market-data/tests/snapshots.rs":  "501859e95284b1b7d13e9b1d24a8185f3bdd925375a9722307145b036512be57",
+                          "rust/crates/replay/Cargo.toml":  "948987d746f87f40b3f084261ada4b07668837dfffec4432c7d62f110747065b",
+                          "rust/crates/replay/src/main.rs":  "e967b77c4a7306bcbba0ed81e3cb114aef1011d0b7c736ca53aab36fd7cf9530",
+                          "rust/crates/replay/tests/protocol.rs":  "f7b16dd804d9497952f026af0cdda31130f66ceefaac799859bcb448be20d7f4",
+                          "rust/tools/check.ps1":  "09b7824317d46c60d202615b6c08af1459ad06387d684756b6ae67a16cda2bc8",
+                          "rust/tools/inventory.py":  "158cdddb4215d8a471b4a089836a2f57a80f1bf5f2101f08719f98481caa037e"
+                      },
+    "archived_report_sha256":  {
+                                   "batch2b2b-core-regression.json":  "e75080841333e3c65b3454836e7f45c8b53049b98db3d126eee3e5d557cec82b",
+                                   "batch2b2b-depth-regression.json":  "260699e33a01cc2834ff4d4f4eb80620722bddb15eb2ddc945add9ed083389d6",
+                                   "batch2b2b-instruments-live.json":  "e81a3d4ba4134e4308a67cfd98c230564640dfe8ad4160f12db534ae9a0485ce",
+                                   "batch2b2b-instruments-regression.json":  "429ba41188ba96c0d0c89e69e43c3371472dff010e69768b07f34915869dd5fb",
+                                   "batch2b2b-instruments-synthetic.json":  "5c244a5b93f1e428da0f2d1c3b96f15ed64d87212e1b6a7b0ba49caa61e3b629",
+                                   "batch2b2b-recording-regression.json":  "a48b126ebd1fb1cedbc25e45936519cecc29d9c5e19eead40adc88ad13a3e06c",
+                                   "batch2b2b-shared-regression.json":  "e7595f0a5943841b5ba23b00fd9b6e1b00ae33159e364ff6af06e4ba17bd66ac",
+                                   "batch2b2b-unicode-regression.json":  "ee71cb2c1fc1f3451627d880fac325d6f5b3c95288589746588c1f9efe5ef7e4"
+                               },
+    "scope":  "Read-only metadata HTTP/cache lifecycle and process-local clone-shared weighted cooldown. Faults tested on loopback/virtual clock. No orders, cross-process budget, WS multiplexing, P\u0026L or hedge-latency claim. Snapshot-read samples exclude symbol parsing and are near clock resolution."
+}

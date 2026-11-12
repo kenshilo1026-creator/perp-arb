@@ -1,0 +1,7 @@
+{
+  "cases": 1200,
+  "mismatches": 0,
+  "scope": "Cumulative hedge quantity and terminal-only residual retry parity; no live trades or PnL backtest.",
+  "python_source_sha256": "95751e3a09cd45bb41220563157361d48e383b4785f3ef5de53f6d4fd9c9b7d2",
+  "binary_sha256": "2ae324163d9d38442aeed9cf945455c031ecdd1fe1c51ef12f3c1507eb75a22f"
+}

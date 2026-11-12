@@ -1,0 +1,85 @@
+{
+  "aster": {
+    "active_markets": 1,
+    "connections_started": 1,
+    "control_acks": 3,
+    "controls_sent": 3,
+    "faults": 0,
+    "handovers": 0,
+    "heartbeat_frames_sent": 1,
+    "ignored_frames": 2,
+    "last_error": null,
+    "routed_frames": 514
+  },
+  "complete": true,
+  "four_market_fresh_samples": [
+    133,
+    134,
+    125,
+    127
+  ],
+  "four_market_views": [
+    {
+      "bbo": 128,
+      "depth": 75,
+      "fresh": true,
+      "generation": 2,
+      "reason": null,
+      "symbol": "ETHUSDT"
+    },
+    {
+      "bbo": 103,
+      "depth": 23,
+      "fresh": true,
+      "generation": 2,
+      "reason": null,
+      "symbol": "ETH"
+    },
+    {
+      "bbo": 166,
+      "depth": 39,
+      "fresh": true,
+      "generation": 1,
+      "reason": null,
+      "symbol": "BTCUSDT"
+    },
+    {
+      "bbo": 66,
+      "depth": 14,
+      "fresh": true,
+      "generation": 1,
+      "reason": null,
+      "symbol": "BTC"
+    }
+  ],
+  "handoff_fresh_samples": [
+    83,
+    84,
+    83,
+    84
+  ],
+  "hyperliquid": {
+    "active_markets": 1,
+    "connections_started": 1,
+    "control_acks": 6,
+    "controls_sent": 6,
+    "faults": 0,
+    "handovers": 0,
+    "heartbeat_frames_sent": 0,
+    "ignored_frames": 2,
+    "last_error": null,
+    "routed_frames": 265
+  },
+  "initial_fresh_samples": [
+    72,
+    75
+  ],
+  "phase_seconds": [
+    5,
+    8,
+    5
+  ],
+  "public_only": true,
+  "scope": "Live public connection/routing/ACK/handoff smoke test. Counts are cumulative accepted messages; not latency percentiles, raw recording or P&L.",
+  "shutdown_cleared": true
+}

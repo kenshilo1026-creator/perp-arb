@@ -1,0 +1,7 @@
+{
+  "status": "passed",
+  "vectors": 4,
+  "scope": "Python fixture validation; Rust tests compare exact digest/signature/wire encoding to this fixture. Public deterministic test key only.",
+  "fixture_sha256": "bba9a312a132363c883bda9e939ee151c34d41afe58eb6c6d267d574a2b45558",
+  "python_source_sha256": "fd7edbf30ee717a818a13bcb044219a5e79212e79d7816c38d4ea0c93ef8041e"
+}

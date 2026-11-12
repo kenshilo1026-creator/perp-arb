@@ -1,0 +1,118 @@
+use crate::Result;
+use perp_arb_aster_private::{
+    auth,
+    client::{HttpPolicy, PrivateHttp},
+};
+use perp_arb_hyperliquid_private::{
+    client::{Client, TradingClient},
+    signing,
+};
+use perp_arb_private_events::{
+    actor::Coordinator,
+    lookup::{Outcome, Request},
+    orders::{Accepted, Network, Order},
+};
+use zeroize::Zeroizing;
+pub trait Venue {
+    fn submit(&self, order: &Order) -> impl std::future::Future<Output = Result<Accepted>> + Send;
+    fn cancel(&self, order: &Order) -> impl std::future::Future<Output = Result<()>> + Send;
+    fn lookup(
+        &self,
+        request: &Request,
+    ) -> impl std::future::Future<Output = Result<Outcome>> + Send;
+}
+pub fn hl_client(account: &str, network: Network) -> Result<Client> {
+    match network {
+        Network::Mainnet => Client::new(account),
+        Network::Testnet => Client::testnet(account),
+    }
+    .map_err(|e| e.to_string())
+}
+pub enum LiveVenue {
+    Aster(PrivateHttp),
+    Hyperliquid { read: Client, trade: TradingClient },
+}
+pub enum Monitor {
+    Aster(perp_arb_aster_private::monitor::Monitor),
+    Hyperliquid(perp_arb_hyperliquid_private::monitor::Monitor),
+}
+impl Monitor {
+    pub async fn shutdown(self) -> Result<()> {
+        match self {
+            Self::Aster(m) => m.shutdown().await.map_err(|e| e.to_string()),
+            Self::Hyperliquid(m) => m.shutdown().await.map_err(|e| e.to_string()),
+        }
+    }
+}
+impl LiveVenue {
+    pub async fn connect(order: &Order) -> Result<Self> {
+        order.validate().map_err(|e| e.to_string())?;
+        match order.venue.as_str() {
+            "aster" => {
+                let key = Zeroizing::new(
+                    std::env::var("ASTER_API_WALLET_PRIVATE_KEY")
+                        .map_err(|_| "missing ASTER_API_WALLET_PRIVATE_KEY")?,
+                );
+                let credentials =
+                    auth::Credentials::new(&key, &order.account).map_err(|e| e.to_string())?;
+                Ok(Self::Aster(
+                    PrivateHttp::new(credentials, HttpPolicy::default())
+                        .map_err(|e| e.to_string())?,
+                ))
+            }
+            "hyperliquid" => {
+                let key = Zeroizing::new(
+                    std::env::var("HYPERLIQUID_PRIVATE_KEY")
+                        .map_err(|_| "missing HYPERLIQUID_PRIVATE_KEY")?,
+                );
+                let read = hl_client(&order.account, order.network)?;
+                let credentials = signing::Credentials::new(&key).map_err(|e| e.to_string())?;
+                let trade = read.trading(credentials).await.map_err(|e| e.to_string())?;
+                Ok(Self::Hyperliquid { read, trade })
+            }
+            _ => Err("unsupported venue".into()),
+        }
+    }
+    pub async fn monitor(&self, c: Coordinator) -> Result<Monitor> {
+        match self {
+            Self::Aster(client) => {
+                perp_arb_aster_private::monitor::start(client.clone(), c, Default::default())
+                    .await
+                    .map(Monitor::Aster)
+                    .map_err(|e| e.to_string())
+            }
+            Self::Hyperliquid { read, .. } => {
+                perp_arb_hyperliquid_private::monitor::start(read.clone(), c, Default::default())
+                    .await
+                    .map(Monitor::Hyperliquid)
+                    .map_err(|e| e.to_string())
+            }
+        }
+    }
+}
+impl Venue for LiveVenue {
+    async fn submit(&self, o: &Order) -> Result<Accepted> {
+        match self {
+            Self::Aster(c) => c.submit_limit(o).await.map_err(|e| e.to_string()),
+            Self::Hyperliquid { trade, .. } => {
+                trade.submit_limit(o).await.map_err(|e| e.to_string())
+            }
+        }
+    }
+    async fn cancel(&self, o: &Order) -> Result<()> {
+        match self {
+            Self::Aster(c) => c.cancel_limit(o).await.map_err(|e| e.to_string()),
+            Self::Hyperliquid { trade, .. } => {
+                trade.cancel_limit(o).await.map_err(|e| e.to_string())
+            }
+        }
+    }
+    async fn lookup(&self, r: &Request) -> Result<Outcome> {
+        match self {
+            Self::Aster(c) => c.lookup_submission(r).await.map_err(|e| e.to_string()),
+            Self::Hyperliquid { read, .. } => {
+                read.lookup_submission(r).await.map_err(|e| e.to_string())
+            }
+        }
+    }
+}

@@ -1,0 +1,35 @@
+{
+    "complete":  true,
+    "consumers":  4,
+    "error":  null,
+    "public_only":  true,
+    "scope":  "Connection smoke test; watch notifications may coalesce. No fill latency or profitability measurement.",
+    "seconds":  30,
+    "shutdown_cleared":  true,
+    "venues":  [
+                   {
+                       "accepted_bbo":  345,
+                       "accepted_depth":  233,
+                       "connections_started":  1,
+                       "fresh_samples":  296,
+                       "last_reason":  null,
+                       "timer_samples":  300,
+                       "unavailable_samples":  4,
+                       "venue":  "aster",
+                       "watch_notifications":  497
+                   },
+                   {
+                       "accepted_bbo":  240,
+                       "accepted_depth":  56,
+                       "connections_started":  1,
+                       "fresh_samples":  292,
+                       "last_reason":  null,
+                       "timer_samples":  300,
+                       "unavailable_samples":  8,
+                       "venue":  "hyperliquid",
+                       "watch_notifications":  258
+                   }
+               ],
+    "validation_date":  "2026-11-09",
+    "binary_sha256":  "0406772bc3f747eb4b8f7b1c5ae7e47a53783350377341b02fbd2af600417f23"
+}

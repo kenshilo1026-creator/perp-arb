@@ -1,0 +1,40 @@
+{
+  "exit_code": 1,
+  "binary_sha256": "e8786affd5020975e7ab4ff0cb370e0ddd65a6598bcd0f18ae147bee5081cadc",
+  "stdout": {
+    "account_audit": {
+      "coverage": "main_perp_and_spot",
+      "expected_supplied": false,
+      "matched": false,
+      "open_orders": 0,
+      "positions": 0,
+      "spot_balances": 1,
+      "wallets": 1
+    },
+    "acknowledgements": 16,
+    "attempts": 4,
+    "connected_before_stop": true,
+    "connections": 4,
+    "duplicate_fills": 90,
+    "fault": null,
+    "last_error": "Network",
+    "mode": "read_only",
+    "new_fills": 30,
+    "order_reconciliation_complete": false,
+    "order_updates": 0,
+    "pongs": 2,
+    "queries": 87,
+    "query_failures": 0,
+    "reconciliation_needed_before_stop": 0,
+    "recovery_verification": true,
+    "shutdown_completed": true,
+    "snapshots": 4,
+    "tracked_orders": 13,
+    "transport_failures": 1,
+    "transport_recovery_passed": false,
+    "unknown_order_queries": 0,
+    "unresolved_external_orders": 1,
+    "unresolved_fill_orders_before_stop": 0
+  },
+  "stderr": "recovery verification incomplete or unhealthy; inspect counters"
+}

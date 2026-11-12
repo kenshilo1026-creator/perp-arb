@@ -1,0 +1,25 @@
+[package]
+name = "perp-arb-order-test"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "order-test"
+path = "src/main.rs"
+
+[dependencies]
+perp-arb-core = { path = "../core" }
+perp-arb-private-events = { path = "../private-events" }
+perp-arb-execution = { path = "../execution" }
+perp-arb-aster-private = { path = "../aster-private" }
+perp-arb-hyperliquid-private = { path = "../hyperliquid-private" }
+perp-arb-market-data = { path = "../market-data" }
+serde.workspace = true
+serde_json.workspace = true
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "signal", "time"] }
+zeroize = "1"
+sha2 = "0.10.9"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["test-util"] }

@@ -1,0 +1,1421 @@
+{
+  "schema": 1,
+  "files": [
+    {
+      "path": "browser_extensions/variational/background.js",
+      "sha256": "84dd5c29f7ce8f32037535d9c34f9c74d8c2de2086c08641c7a4668680a9fbbf",
+      "phase": "7_browser_bridge",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "browser_extensions/variational/manifest.json",
+      "sha256": "8f0a8802f3d12bc420723a0ec5492ae6838e5ea5750ac48b355d9ed6cbcbe007",
+      "phase": "7_browser_bridge",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "browser_extensions/variational/popup.html",
+      "sha256": "7b6cad9ff3bbe649997d8ea7424134d8ca240ad85ee60d4ddfb4d437db861b9f",
+      "phase": "7_browser_bridge",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "browser_extensions/variational/popup.js",
+      "sha256": "a74d59c4be03e562bdb0b8468b52ff9dc6a7acb5214b5f7d038ac17100d65e14",
+      "phase": "7_browser_bridge",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "configs/execution_venues.json",
+      "sha256": "dad0da499e88b45e960b843b3d4e300a41f0713fae1edad48c013a146e7d2935",
+      "phase": "config_compatibility_each_batch",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "configs/funding_risk.jsonc",
+      "sha256": "af3e9f53451746f791ccccd604c335d6656d8d28e3898e0a853dc6ccf92d2ccf",
+      "phase": "config_compatibility_each_batch",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "configs/margin_topup.jsonc",
+      "sha256": "ff4f0584fc62d64ce2c32b4e103982aed81eba81dee230a73ed0059dd3dc7bc2",
+      "phase": "config_compatibility_each_batch",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "configs/spread_dispatcher.json",
+      "sha256": "0c41412007f711ec83b0be670c626ad7799972146ad266eb9f38a281abae64e2",
+      "phase": "config_compatibility_each_batch",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "configs/spread_monitor.jsonc",
+      "sha256": "efed88da8906b5e595916f21043082b1457166ee46042efe4dd8a25354bf46eb",
+      "phase": "config_compatibility_each_batch",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "configs/spread_strategy.example.json",
+      "sha256": "b8252b36d478e9829f28cf465f9c1f23bafcc4d979259cc0b210f9eb7f7d8078",
+      "phase": "config_compatibility_each_batch",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "configs/symbol_mappings.json",
+      "sha256": "d079ceff7ae815b447999001d1db9076ab5c16d2212dc2f7413587e8bff72508",
+      "phase": "config_compatibility_each_batch",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "funding_arbitrage_monitor_demo.py",
+      "sha256": "188f7b19bf4de5a4b473b385f1a5bca314cd25ec8bb1c60c2fadb4f861df99a9",
+      "phase": "7_funding_history_shared_utilities",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "hydra_basis/__init__.py",
+      "sha256": "18ab54e7f874b7a0a7a8aa43a545446a188b7f8e89e86e081fc4f88ab5174e32",
+      "phase": "7_funding_history_shared_utilities",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "hydra_basis/adapters/__init__.py",
+      "sha256": "b717ea5bd1e1b7f8672de9c1fd82f0885978c121f6ecb4be3fc8603cbf648983",
+      "phase": "2_market_then_4_venue_execution",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "hydra_basis/adapters/arcus.py",
+      "sha256": "90f3daf2eb874a021c626c0de335ddba7f72002d30f326fe4bdc77398c17e54f",
+      "phase": "2_market_then_4_venue_execution",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "hydra_basis/adapters/aster.py",
+      "sha256": "d86afa686526f15172953eafcb550f5494e66a175990e1cd2282879d5d94a2ac",
+      "phase": "2_market_then_4_venue_execution",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "hydra_basis/adapters/base.py",
+      "sha256": "3fac73371cd18668aa659207423be23a694bd9571307e3859bf2d47f840835cd",
+      "phase": "2_market_then_4_venue_execution",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "hydra_basis/adapters/entropy.py",
+      "sha256": "616f133c445188f39a4b9d8473228d52c7adb4a55a9bed7e1591b9e0fe669e53",
+      "phase": "2_market_then_4_venue_execution",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "hydra_basis/adapters/hyperliquid.py",
+      "sha256": "1128c4d733d20fd344987323c0a28bbd6a02a3fbcd2604a2c5dd7c109c5d62c6",
+      "phase": "2_market_then_4_venue_execution",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "hydra_basis/adapters/lighter.py",
+      "sha256": "a15f4951e61d38e91b5f69153f3ca593944a516026a1ff9a469079f1d28bc52d",
+      "phase": "2_market_then_4_venue_execution",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "hydra_basis/adapters/loris_browser.py",
+      "sha256": "265a899294c7a749b7f5ff7605c5213dbf966d6417c28e76096f458c1d5ba9d3",
+      "phase": "2_market_then_4_venue_execution",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "hydra_basis/adapters/mexc.py",
+      "sha256": "c5fd7ae1fe23a485d4855336198cc8d76cb394b2dd53d4dd6c10f5bdfb543cb2",
+      "phase": "2_market_then_4_venue_execution",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "hydra_basis/adapters/ondo.py",
+      "sha256": "79f83d887f48f8487cd463065b86deb9787466f55d90ddef9a32aae0dd6f1c65",
+      "phase": "2_market_then_4_venue_execution",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "hydra_basis/adapters/registry.py",
+      "sha256": "cebeec775107e90fc5f6743bffcc1e936c8289513a3f6fc074cb5efaa4e574bd",
+      "phase": "2_market_then_4_venue_execution",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "hydra_basis/adapters/request_limiters.py",
+      "sha256": "21e33f2e91caaa2b3c9a6c9511990f76dc3f8feebe08f743b799b342530644aa",
+      "phase": "2_market_then_4_venue_execution",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "hydra_basis/adapters/stubs.py",
+      "sha256": "2dd772ac50b52a942cb5f0cc087b863c603e2703d27108b07710680fce96a89d",
+      "phase": "2_market_then_4_venue_execution",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "hydra_basis/adapters/tradexyz.py",
+      "sha256": "bd8dd9e50fcd7018ffdcdfa1bd684b154998c7c3bddcb2766a34534a9b5a95ca",
+      "phase": "2_market_then_4_venue_execution",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "hydra_basis/adapters/variational.py",
+      "sha256": "a80bc5f31a73a29e610eb3c9c58b3c2542fb0007b4eec42a94281de4e3a823f2",
+      "phase": "2_market_then_4_venue_execution",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "hydra_basis/alerts.py",
+      "sha256": "40c461af40f6509f340cb4b298fe05bc40a1ca1b3cda42c5cc972d5533d85af3",
+      "phase": "7_funding_history_shared_utilities",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "hydra_basis/async_utils.py",
+      "sha256": "a5edea55f515958fa86fd210b316532f117e51609f4e00984ad6e4e1e7fa107d",
+      "phase": "7_funding_history_shared_utilities",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "hydra_basis/backfill.py",
+      "sha256": "d89a7b999611d6338cbda4fa8275ac766acf915daae48295ad06395802aae5b9",
+      "phase": "7_funding_history_shared_utilities",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "hydra_basis/backfill_ws_spreads.py",
+      "sha256": "f78f575b72ee9f3e97a66be39fc23719631cbc53a2693f1931aa790a9a0efe62",
+      "phase": "7_funding_history_shared_utilities",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "hydra_basis/config.py",
+      "sha256": "696ea2232ee9550a187732b637a9b09615073ec62f8e2ea0d5576f5bdc3a7ec8",
+      "phase": "7_funding_history_shared_utilities",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "hydra_basis/env.py",
+      "sha256": "3e2db977392818f6985603ec704effaf0f57cb5b1d5b5307ff62bd3d935aaf5b",
+      "phase": "7_funding_history_shared_utilities",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "hydra_basis/execution_engine/__init__.py",
+      "sha256": "5384bfdb2df380b6557cc7a71d16891415bccaa87699406e236f752c6415389f",
+      "phase": "3_private_events_then_4_execution_then_5_strategy",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "hydra_basis/execution_engine/apy_service.py",
+      "sha256": "65b9335fcd863d71ec9246c7255d57f4562907ae8786a0286cadf2950deda654",
+      "phase": "3_private_events_then_4_execution_then_5_strategy",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "hydra_basis/execution_engine/arcus_adapter.py",
+      "sha256": "b89b834101646c59094fcf93a5501a1d3e651d8742fa620cfb7a224cf286d10c",
+      "phase": "3_private_events_then_4_execution_then_5_strategy",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "hydra_basis/execution_engine/aster_adapter.py",
+      "sha256": "fd7edbf30ee717a818a13bcb044219a5e79212e79d7816c38d4ea0c93ef8041e",
+      "phase": "3_private_events_then_4_execution_then_5_strategy",
+      "status": "partial_verified",
+      "ported_scope": "V3 EIP-712 read-request authentication, per-process signer nonce sharing, fixed POST/PUT listenKey and GET order transport with quotas/timeouts/redacted errors; Python auth vectors, loopback WS/HTTP and short live renewal/rotation tests; read-only double-sample positions, wallet balances and open orders with weighted quota and WS revision fencing; explicit single-limit submit/cancel transport and complete-intent manual test runner with loopback validation; no real Aster fill/query acceptance, margin/leverage management or automated strategy wiring"
+    },
+    {
+      "path": "hydra_basis/execution_engine/aster_depth_stream.py",
+      "sha256": "fab47ed9854c1fc7b5b31245f1e75557cc3e097abaa4575a019b38315281f017",
+      "phase": "3_private_events_then_4_execution_then_5_strategy",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "hydra_basis/execution_engine/executor.py",
+      "sha256": "954c552ae8901786371fa1a928e8f54569c1f3a1fd9e8a3580854b4391d7531a",
+      "phase": "3_private_events_then_4_execution_then_5_strategy",
+      "status": "partial_verified",
+      "ported_scope": "Paper single-maker cumulative obligations and hedge reservation, private coordinator watches; optional durable intents/client IDs and restart replay with process-exit/corruption/fault fixtures; separate single-limit test runner has complete intent persistence, submit/cancel and explicit client-ID resume; no automated two-leg real execution, reprice, batching, background recovery or full-account persistence"
+    },
+    {
+      "path": "hydra_basis/execution_engine/hedge_safety.py",
+      "sha256": "95751e3a09cd45bb41220563157361d48e383b4785f3ef5de53f6d4fd9c9b7d2",
+      "phase": "3_private_events_then_4_execution_then_5_strategy",
+      "status": "partial_verified",
+      "ported_scope": "Paper cumulative hedge reservation, terminal-only residual retry parity and signed exposure; single-writer journal for known-maker/hedge intents, sync-before-dispatch permit and unknown-client-ID read-only lookup; no broker, compensation, full cash ledger or live unknown-submission acceptance"
+    },
+    {
+      "path": "hydra_basis/execution_engine/hyperliquid_adapter.py",
+      "sha256": "25b50366d015d6652198ecc1be6d30df390520f13506843c44936d46bee95959",
+      "phase": "3_private_events_then_4_execution_then_5_strategy",
+      "status": "partial_verified",
+      "ported_scope": "Instrument up/down rounding and szDecimals; orderStatus quantity/terminal parity, address-only private orderUpdates/userFills subscriptions, unaggregated trade dedup, ACK/snapshot gating and independent bounded REST polling. Funding/nonfunding ledger invalidation, scoped per-dex positions/cash, spot balances and open orders; special events remain pending independent expected-ledger proof, never zero fills. Paper cumulative execution bridge only. Account-bound mainnet/testnet EIP-712 order/cancel signing and manual complete-intent test runner with eight Python signature vectors and loopback validation; no real live order acceptance, durable full-account recovery or default HALF_EVEN wire formatter"
+    },
+    {
+      "path": "hydra_basis/execution_engine/interfaces.py",
+      "sha256": "ce215de16f308ab7b668d48f9de4e6756c36f834241a26c99f6d046b88caca78",
+      "phase": "3_private_events_then_4_execution_then_5_strategy",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "hydra_basis/execution_engine/lighter_adapter.py",
+      "sha256": "41913ba6c7cdb057cb22c6e2af3b4f9f98ce7747554f5407ffc12c6a42b42803",
+      "phase": "3_private_events_then_4_execution_then_5_strategy",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "hydra_basis/execution_engine/lighter_live.py",
+      "sha256": "088f2f230b131809702ed71223fc92edaa6b1914b3ac8dbe6eae2c4319827b4e",
+      "phase": "3_private_events_then_4_execution_then_5_strategy",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "hydra_basis/execution_engine/maker_price_guard.py",
+      "sha256": "263352ea9c07d66858c4b90195b8d74a041ed6245a6023e2a749af18cea1f872",
+      "phase": "1_math_then_4_execution",
+      "status": "partial_verified",
+      "ported_scope": "adverse_price_gap only; no bounded maker price or guard lifecycle"
+    },
+    {
+      "path": "hydra_basis/execution_engine/market_data.py",
+      "sha256": "39edba76fd40390966b0ede5c745f985c35ede2f3ca6f34aa6949e447cb8ab8f",
+      "phase": "3_private_events_then_4_execution_then_5_strategy",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "hydra_basis/execution_engine/mexc_adapter.py",
+      "sha256": "d8fa1576014681a8b89c526153f71fe6b1c828de9e25307827f2e4befe13327c",
+      "phase": "3_private_events_then_4_execution_then_5_strategy",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "hydra_basis/execution_engine/mexc_depth_stream.py",
+      "sha256": "6a4f1dc445816748c96e9dec75874783d59163f852c3259f10ec0a306e13c823",
+      "phase": "3_private_events_then_4_execution_then_5_strategy",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "hydra_basis/execution_engine/mexc_spot_adapter.py",
+      "sha256": "659a4eeb6dc6d8ba1d9dfaa907dcff0b9866ef3afb6ac7965769c27f97674c28",
+      "phase": "3_private_events_then_4_execution_then_5_strategy",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "hydra_basis/execution_engine/models.py",
+      "sha256": "118bf1f9330f8647f919c118429e05a415352b79beca46b39a5a0ecc9afd90e1",
+      "phase": "3_private_events_then_4_execution_then_5_strategy",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "hydra_basis/execution_engine/ondo_adapter.py",
+      "sha256": "a6cefade3b2f2e4d9f6f5214c8d8863dfb05cf925d50d9a3d13deee8440c7742",
+      "phase": "3_private_events_then_4_execution_then_5_strategy",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "hydra_basis/execution_engine/order_fill.py",
+      "sha256": "de15921a792f408e7eefbba502e4c29fbe29707c693a3986c1e78ac89f8427c8",
+      "phase": "3_private_events_then_4_execution_then_5_strategy",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "hydra_basis/execution_engine/order_service.py",
+      "sha256": "ac7fd300db10550b9c2a24d7b46ac90896ecbe14e99375ac1c9134ab658e8b84",
+      "phase": "3_private_events_then_4_execution_then_5_strategy",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "hydra_basis/execution_engine/order_stream.py",
+      "sha256": "476ec6b7d0cad7272d7da586bdc99f7c7a2cf14dfc6dbce850bfa2c4bf974279",
+      "phase": "3_private_events_then_4_execution_then_5_strategy",
+      "status": "partial_verified",
+      "ported_scope": "Aster cumulative decoder, per-account coordination, bounded ingress, per-order cursors, WS/REST dedup and gap/query fencing; Aster private transport plus short live authentication/renewal/local socket rotation verified without trading; Hyperliquid separate cumulative orders/trade dedup and independent query recovery; scoped account reconciliation and special-event routing; paper-only maker/hedge watches; single-order journal bridge in manual test runner; no MEXC protobuf or automated two-leg execution"
+    },
+    {
+      "path": "hydra_basis/execution_engine/orderbook_spread_store.py",
+      "sha256": "4b5d2c0bac4fd16e2469eb8d3d5273adf1190d19e9d019a9e1a8c16a7b7dd5dc",
+      "phase": "3_private_events_then_4_execution_then_5_strategy",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "hydra_basis/execution_engine/preview.py",
+      "sha256": "136b9658bb35dde720c70f24bf9b06824e699e8dd4cf90596c84f6b56d055aee",
+      "phase": "3_private_events_then_4_execution_then_5_strategy",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "hydra_basis/execution_engine/priority.py",
+      "sha256": "5af18c0a2d53c4f0fe94ab96e57de67fd3241e56982efb65fead0864ce78ede8",
+      "phase": "3_private_events_then_4_execution_then_5_strategy",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "hydra_basis/execution_engine/risk.py",
+      "sha256": "55dcfaded7a9b734a7b159de96606d33f3abfb6c360672c5d9d35b7bf12481e4",
+      "phase": "3_private_events_then_4_execution_then_5_strategy",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "hydra_basis/execution_engine/runtime.py",
+      "sha256": "aea4213ac0ec102e74b6482f54a04706449338a008aee7424b2d753af9295a75",
+      "phase": "3_private_events_then_4_execution_then_5_strategy",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "hydra_basis/execution_engine/signal_store.py",
+      "sha256": "3ad4f52a8de7b2e72e3e32e4a73617ff12e716e348b897d2d737b7ab63505e71",
+      "phase": "3_private_events_then_4_execution_then_5_strategy",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "hydra_basis/execution_engine/state_machine.py",
+      "sha256": "79abaa50320c265a4137c0b8ad045abc3f1074b2a5e7cd63d2dad2e2e9635bc0",
+      "phase": "3_private_events_then_4_execution_then_5_strategy",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "hydra_basis/execution_engine/variational_broker.py",
+      "sha256": "bec73f02c9e42177b695d083933a0b1323542bdbb2d95405b6657e6efa5d69bd",
+      "phase": "3_private_events_then_4_execution_then_5_strategy",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "hydra_basis/execution_engine/variational_browser.py",
+      "sha256": "07d23e9f6fd908cc66f630822af7c4e109518d30cc7d2158ee957e74bcd96b79",
+      "phase": "3_private_events_then_4_execution_then_5_strategy",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "hydra_basis/execution_engine/variational_monitor_adapter.py",
+      "sha256": "286af14942759d6b8c97e57ec961f8603b981baafe2890905b6c787778d4324a",
+      "phase": "3_private_events_then_4_execution_then_5_strategy",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "hydra_basis/formatting.py",
+      "sha256": "a194149aeec1289ec3fa4378bceac7845438d675b60263e38d60cc5a06bda073",
+      "phase": "7_funding_history_shared_utilities",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "hydra_basis/funding_engine/__init__.py",
+      "sha256": "34594d0764a7d0c0c09819012fd0c51ff0af9574398fc60950ea8c572a88e76a",
+      "phase": "7_funding_monitor",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "hydra_basis/funding_engine/analysis.py",
+      "sha256": "2ad1c7fa92a2ba6cad94f1f2863252a9131508b3649c331e26694d28447d2526",
+      "phase": "7_funding_monitor",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "hydra_basis/funding_engine/models.py",
+      "sha256": "a19fd7e1ce67e1b929365a5ef188884b875ba62516fbbd3c87fd8d8b089c79ab",
+      "phase": "7_funding_monitor",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "hydra_basis/funding_engine/normalization.py",
+      "sha256": "946d7e9606fda7a21b4e0b471d94efaccbbbad93c3265181efca4d0b34fbbc35",
+      "phase": "7_funding_monitor",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "hydra_basis/history_store.py",
+      "sha256": "d620ffdd67e2176e2bfcd0bf5aa88ce5072b3df512e4f9d511bbc675a38cdd04",
+      "phase": "7_funding_history_shared_utilities",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "hydra_basis/monitor_errors.py",
+      "sha256": "62449187fdd5a63a5850da4873eb77245c2c13c245581d0998f87cebbbc156bc",
+      "phase": "7_funding_history_shared_utilities",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "hydra_basis/monitor_quotes.py",
+      "sha256": "3bca3f2d7887ff1eeecfd33c146ac235a3ed93b59b7c23f5772afea82cafe146",
+      "phase": "7_funding_history_shared_utilities",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "hydra_basis/notifications/__init__.py",
+      "sha256": "40d533b0d7969745cc36ae73f6fb030f908b1ccd8b4615051f385f8c63cd094c",
+      "phase": "7_funding_monitor",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "hydra_basis/notifications/telegram.py",
+      "sha256": "87f8aef9160516a036b02d8a70c719cc3ab082420daf21381ff0188fc613eca8",
+      "phase": "7_funding_monitor",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "hydra_basis/risk_management/__init__.py",
+      "sha256": "3c78788ea0fb8b468bf16f215d385ccca713e31b0d6625da9c1c4e1f920e5b92",
+      "phase": "6_risk_persistence",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "hydra_basis/risk_management/closers.py",
+      "sha256": "6ce33786d37826ada088d7931829a424a0609b799470de52356e50ccbf43c2a5",
+      "phase": "6_risk_persistence",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "hydra_basis/risk_management/common.py",
+      "sha256": "2e1d9beeaf0fdb5b9dcb6f247d14da4e0d0f275492a28580efa226120cd47dc5",
+      "phase": "6_risk_persistence",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "hydra_basis/risk_management/exchange_watchers.py",
+      "sha256": "32019df526c5b745bed92d6979ee60ee688cf52ff07b7c27458995315bf6e4bb",
+      "phase": "6_risk_persistence",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "hydra_basis/risk_management/funding_risk.py",
+      "sha256": "3d3e7a00506fcadf88c9ffd065e59db92294f4320c943054351ab163b7058f32",
+      "phase": "6_risk_persistence",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "hydra_basis/risk_management/funding_runtime.py",
+      "sha256": "6bddc8e8c723c245f4c836228797ce32b93c90c18d944e55296c60c322c62733",
+      "phase": "6_risk_persistence",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "hydra_basis/risk_management/manager.py",
+      "sha256": "ba5a6cc1ff7bdaf05de7718d5f0df77b2eaef33559a699feef75826ff34f73c9",
+      "phase": "6_risk_persistence",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "hydra_basis/risk_management/margin_topup.py",
+      "sha256": "73b348394886ffde8b93fc3612416e5a113c00a7f709a9d3c2ebd3222359f17b",
+      "phase": "6_risk_persistence",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "hydra_basis/risk_management/models.py",
+      "sha256": "c5f16f361ed197f1c28022dd76a943beb448afa295c09cea317eb73891da8d91",
+      "phase": "6_risk_persistence",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "hydra_basis/risk_management/persistence.py",
+      "sha256": "601b675c56950ac0394bef1d5bbeb483ec3a16b15b1f45691e99e69efc432689",
+      "phase": "6_risk_persistence",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "hydra_basis/risk_management/reconciliation.py",
+      "sha256": "4cba6bfb0f4ba91269282ad9f4102782847603b52357ae7cd774d73c86f59fb9",
+      "phase": "6_risk_persistence",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "hydra_basis/risk_management/recording.py",
+      "sha256": "daf42ef3b7459ef9e9a1659912e86c18e066f6eabc1fb7d1c979ada02eae10d3",
+      "phase": "6_risk_persistence",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "hydra_basis/risk_management/registry.py",
+      "sha256": "d93ab5d534ce55d9ce5bd3f90028502f431c143574264c7f5329006a8cedde39",
+      "phase": "6_risk_persistence",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "hydra_basis/risk_management/runtime.py",
+      "sha256": "c87f119de06ddfa37ab5dbd415ae923a0d6a8a95a4ab2633de1f42b237605112",
+      "phase": "6_risk_persistence",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "hydra_basis/risk_management/supervisor.py",
+      "sha256": "f80f827fe86357bae4821564b298b15a91a6019d05bc5c612b50dbcc7380ac51",
+      "phase": "6_risk_persistence",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "hydra_basis/risk_management/watchers.py",
+      "sha256": "a1ec82e8a334ba95afaab9d5eda81939bcc9b8a1d26a66a3ed213adf9b620117",
+      "phase": "6_risk_persistence",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "hydra_basis/runtime.py",
+      "sha256": "fad80f37b604b69905a62b7f66eb68de7a4d3a4c64fdee21096f7f6e356d2c1d",
+      "phase": "7_funding_history_shared_utilities",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "hydra_basis/spread_monitor/__init__.py",
+      "sha256": "3c78788ea0fb8b468bf16f215d385ccca713e31b0d6625da9c1c4e1f920e5b92",
+      "phase": "7_funding_monitor",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "hydra_basis/spread_monitor/config.py",
+      "sha256": "00fe54173364988f15709c17faca74a919b18034a49d390746205bbb94174d35",
+      "phase": "7_funding_monitor",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "hydra_basis/spread_monitor/engine.py",
+      "sha256": "4651f10a435c88611b25001365b5c97bc6bb5303ef0956c79996408813c36e5c",
+      "phase": "7_funding_monitor",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "hydra_basis/spread_monitor/formatting.py",
+      "sha256": "01bb8058b26c639d91fceba689939a1624e90b87f67572d228385825a11bec56",
+      "phase": "7_funding_monitor",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "hydra_basis/spread_monitor/models.py",
+      "sha256": "de88cf4a4c9e86f6cb1da72e2afd747b49c82927ed2ccd5b0f2a507f16b9d85f",
+      "phase": "7_funding_monitor",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "hydra_basis/spread_monitor/runtime.py",
+      "sha256": "83c27b65e1010ac7bfd5166c20ae0dc0f330badc38f1e4403787d0bd7cbf834a",
+      "phase": "7_funding_monitor",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "hydra_basis/spread_monitor/selector.py",
+      "sha256": "a4a499cc10e136f4cc11197bddb71a3927ce576658bcadd8bf3a2a78bff04851",
+      "phase": "7_funding_monitor",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "hydra_basis/spread_strategy/__init__.py",
+      "sha256": "3cc0638c07026e15d93f2a2e19ac99081fecb7450ff2ecd5cb00f3939603cb60",
+      "phase": "3_private_events_then_4_execution_then_5_strategy",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "hydra_basis/spread_strategy/broker.py",
+      "sha256": "c522ddfff88e90f5aeb78e91e7217f6e3ad053ac07bc09c19fde36faa9914d4b",
+      "phase": "3_private_events_then_4_execution_then_5_strategy",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "hydra_basis/spread_strategy/core.py",
+      "sha256": "1401802c721545edc2902fac4a34b912e0d9ed327b5f8f02f8894ffba7936c83",
+      "phase": "1_math_then_4_execution",
+      "status": "partial_verified",
+      "ported_scope": "spread_bps and round_step only"
+    },
+    {
+      "path": "hydra_basis/spread_strategy/dispatcher.py",
+      "sha256": "253150bec9673c2d4a7eb5a2e805d93e6b13e5401d394c510e178fcb3173b600",
+      "phase": "2_market_then_5_strategy",
+      "status": "partial_verified",
+      "ported_scope": "QuoteStore common read-only selection/revisions; Aster/Hyperliquid per-venue multi-symbol WS ownership, bounded controls/pacing, consumer and metadata handoff; no scanner, group strategy scheduling, other venues or trading dispatcher"
+    },
+    {
+      "path": "hydra_basis/spread_strategy/engine.py",
+      "sha256": "627333458f3baccfe4b701d42dee956be2c188e2e213166c43215aa658574e69",
+      "phase": "3_private_events_then_4_execution_then_5_strategy",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "hydra_basis/spread_strategy/estimates.py",
+      "sha256": "0ba44a4632c9987264a80de298e1da6a81b370ebb03314491b1f2c497d963fe5",
+      "phase": "3_private_events_then_4_execution_then_5_strategy",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "hydra_basis/spread_strategy/feeds.py",
+      "sha256": "1739a25a068e4c8a1c7068cf9086708d949e09ac921fdc0a5cf3e0afdb594361",
+      "phase": "2_market_then_5_strategy",
+      "status": "partial_verified",
+      "ported_scope": "Ticker/depth math/freshness; Aster/Hyperliquid depth+BBO shared read-only cache and StoreFeed common selection policy; stricter conflict invalidation tested separately; no other venues or strategy wiring"
+    },
+    {
+      "path": "hydra_basis/spread_strategy/history.py",
+      "sha256": "09a443d4dd1f4f39a68a54e43e4d3f3d6b6fb66c0d2ea842cd79f994fe28e90d",
+      "phase": "3_private_events_then_4_execution_then_5_strategy",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "hydra_basis/spread_strategy/instruments.py",
+      "sha256": "9ac5e8f2210c24c1d670c92828e497c7a1587056e4fbc6f3727241032842adcb",
+      "phase": "2_market_then_5_strategy",
+      "status": "partial_verified",
+      "ported_scope": "Aster/Hyperliquid metadata parsing, rounding/static checks/common lot; public HTTP v1/v3/meta reads with pooled client, shared per-venue weight/cooldown and versioned refresh cache verified separately; no other venues, cross-process limiter or execution wiring"
+    },
+    {
+      "path": "hydra_basis/spread_strategy/locks.py",
+      "sha256": "340adf37c67f1bf5853754e1b509d019663d8fe3335098ce63811ed5191d3b65",
+      "phase": "3_private_events_then_4_execution_then_5_strategy",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "hydra_basis/spread_strategy/telemetry.py",
+      "sha256": "e735b568e7fd237fa508324a22d079a52deea58c16f9091d9fc52507f2e101e8",
+      "phase": "3_private_events_then_4_execution_then_5_strategy",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "hydra_basis/streams/__init__.py",
+      "sha256": "6120adccce0eac9e245bad63788acf6dec449c1256324637551bebdc4986dc53",
+      "phase": "2_market_then_4_venue_execution",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "hydra_basis/streams/aster.py",
+      "sha256": "3b3069b47e59758e40230e2ae6c2fe1a2de70446af30aa6293cb8a129e5d41ad",
+      "phase": "2_market_then_4_venue_execution",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "hydra_basis/streams/base.py",
+      "sha256": "a33ea6357c953cd9feafa0dee128a11de02f5b4a94f57384c3d6bd993cde4ee8",
+      "phase": "2_market_then_4_venue_execution",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "hydra_basis/streams/hyperliquid.py",
+      "sha256": "aedda5429b579bca39320ce0d6a2187392db88920b4c13cb9ebb6263819c5656",
+      "phase": "2_market_then_4_venue_execution",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "hydra_basis/streams/lighter.py",
+      "sha256": "e13a7feb522d7e794bb73da6699129de272c37cd15f45798ce72359c3351cd10",
+      "phase": "2_market_then_4_venue_execution",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "hydra_basis/streams/manager.py",
+      "sha256": "691f47faf91a0b1e11d57586460de380978d773acd89317cd1b6c221ddab9b57",
+      "phase": "2_market_then_4_venue_execution",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "hydra_basis/streams/mexc.py",
+      "sha256": "ecc7a185554b095e59a1ddfefaba1adff0668697d28a18df5c3a74e86f8f3973",
+      "phase": "2_market_then_4_venue_execution",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "hydra_basis/symbol_mapping.py",
+      "sha256": "ce1f4ce8e8ce1f6846d91ac668e1bbe475a48e4ac0977b1a159b0f63ad350de0",
+      "phase": "7_funding_history_shared_utilities",
+      "status": "partial_verified",
+      "ported_scope": "Provided JSON mapping precedence and native/canonical lookup for current config; strict malformed/case-collision validation; no filesystem default-path cache"
+    },
+    {
+      "path": "hydra_basis/universe.py",
+      "sha256": "7f00c3b1c4450ed57260ef78aa186bcf240f4032366b50f37108acd7b166f297",
+      "phase": "7_funding_history_shared_utilities",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "requirements-web.txt",
+      "sha256": "1b6047433cc9479ea063887fc6e42c8899578bdb74f5dd95b5630c89d7ccadd2",
+      "phase": "dependencies_each_batch",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "requirements.txt",
+      "sha256": "e43577cb215ee2afceec428b0f26e8f93458d72f303793aa6475b1397a4185db",
+      "phase": "dependencies_each_batch",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "scripts/__init__.py",
+      "sha256": "6348d4f508a35b72c07f1c9739d6bc925f249ce3192fe28e84eac0cba7831e84",
+      "phase": "cli_parity_each_batch",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "scripts/_bootstrap.py",
+      "sha256": "5d11158906d5405aab97d639d0d04b44e4d333a0fe195bad924c925f6d61b570",
+      "phase": "cli_parity_each_batch",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "scripts/backfill_funding_history.py",
+      "sha256": "5c1a1bc035baf452ffc8ba8c51c2c9d360bd9174c978f1e6fa52d3d8d9f920a5",
+      "phase": "cli_parity_each_batch",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "scripts/benchmark_hyperliquid_feed.py",
+      "sha256": "32d5450e95a1161ae54ca521c7319db652a441150d5c72c89d16f9ee1e99c63e",
+      "phase": "cli_parity_each_batch",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "scripts/check_mexc_order_stream.py",
+      "sha256": "4600b2674b15e94195fd22ff9a10f1a25bf7224f7bf35296d468c8444a1bb4c6",
+      "phase": "cli_parity_each_batch",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "scripts/debug_spread_progress.py",
+      "sha256": "0a7d204a97b768c2788040e7aa123529e84617581b70f06ee9b172dd9e5cc4d2",
+      "phase": "cli_parity_each_batch",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "scripts/debug_spread_streams.py",
+      "sha256": "07b224133e4879c213a18dca106741df86be4a74f373239f2177af87505dd6f0",
+      "phase": "cli_parity_each_batch",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "scripts/debug_spread_task_probe.py",
+      "sha256": "b9929ce0eb8db3c1e8f194446972e9d43a0abb821d9fc698a27a0f871521e192",
+      "phase": "cli_parity_each_batch",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "scripts/place_order.py",
+      "sha256": "5534b4e200a5a3b1bd202533b74b667ff2f483b7af3da2123f8774c51212c41d",
+      "phase": "cli_parity_each_batch",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "scripts/record_spread_market.py",
+      "sha256": "1be576adf12a099f2fc369e1b19731f07fcdbe80575333fd6eddcbe85bf6f6fe",
+      "phase": "cli_parity_each_batch",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "scripts/replay_spread_execution.py",
+      "sha256": "f67120ffe14343ac728defa2829cf852b1838b4c0c401362536fdf04b4e07bbe",
+      "phase": "cli_parity_each_batch",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "scripts/run_execution_preview.py",
+      "sha256": "a565f3776a82b3fcdfdbc4afddc50fd868f5e13af6be6de6f9410cfa8b191ec4",
+      "phase": "cli_parity_each_batch",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "scripts/run_funding_monitor.py",
+      "sha256": "2a6f9a4978df3f65faa655627f314c0f6420e2f8f722a28d83419dee4914f7c6",
+      "phase": "cli_parity_each_batch",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "scripts/run_order_ui.py",
+      "sha256": "51a175b9938f9aa693710e487928942d2cdcd8428a69450af4542cef06f1ffa7",
+      "phase": "8_web",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "scripts/run_risk_manager.py",
+      "sha256": "a9a028ab707628a66535640530ec0d308e83c86dda450549169052b0e01b22fe",
+      "phase": "6_risk_persistence",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "scripts/run_spot_perp_arbitrage.py",
+      "sha256": "b0f21493a88090b6f272c449519e5e7b74f1f4d4b478dacfed7589c2d4b37fa4",
+      "phase": "cli_parity_each_batch",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "scripts/run_spread_dispatcher.py",
+      "sha256": "79332d102b284744acd2a4dd0a60e2019776d4249e2b774c55daaa1a9f9b588a",
+      "phase": "cli_parity_each_batch",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "scripts/run_spread_monitor.py",
+      "sha256": "e5cebdd4b6024c6ad78b61aa4674b101e144b61f778c6e315911c140d099ccc7",
+      "phase": "cli_parity_each_batch",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "scripts/run_spread_strategy.py",
+      "sha256": "edf37edb0cccfe527b066eb2c22796bcf46b82c50a5c4a55eddf3457083486bd",
+      "phase": "cli_parity_each_batch",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "scripts/test_single_order.py",
+      "sha256": "7e8bf74d545d8ceeb3b70873615eeb5fd49f395ddd94589eb5eec526d64cc929",
+      "phase": "cli_parity_each_batch",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "tests/test_apy_service.py",
+      "sha256": "d6bbf3625927556119921c94fba7b666230626bc00b5a1d6c60f750ce1e93b36",
+      "phase": "validation_each_batch",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "tests/test_arcus.py",
+      "sha256": "14daa8de9ca814813ab61533fca73d7244dddafaedf16bec168b6d81be135431",
+      "phase": "validation_each_batch",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "tests/test_aster_cancel_race.py",
+      "sha256": "906e5bf598c565a982c981fa3832c9d876ef7e51eb4c3dfce515918f3cc0f2e7",
+      "phase": "validation_each_batch",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "tests/test_aster_fast_quotes.py",
+      "sha256": "18ed702da43ace79d5728ca02caaf7e270255cbe76634a7b8d2d270397807978",
+      "phase": "validation_each_batch",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "tests/test_aster_lighter_close_safety.py",
+      "sha256": "46ea7e012d8f9220496d419a96529db716cf8b2217e75e8460ba91cc9ae7f085",
+      "phase": "validation_each_batch",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "tests/test_aster_nonce.py",
+      "sha256": "c1d74551ab452bf308838b4bf681862dad6c2e3ac71df4db9a8ca38f3e81e7c6",
+      "phase": "validation_each_batch",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "tests/test_backfill_performance.py",
+      "sha256": "c59808e29ee280e7badd439a76fe01c1d4726353f86d87731665a33eec8e68e3",
+      "phase": "validation_each_batch",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "tests/test_backfill_speedups.py",
+      "sha256": "4a2c74635f68335860818f81d198eaabee0cb67cfdb35938b08ecd33d1d6b0f1",
+      "phase": "validation_each_batch",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "tests/test_clip_sizing.py",
+      "sha256": "b627750df5ee503158aca7685033aa95960b6629b7df309868940acb75987ff5",
+      "phase": "validation_each_batch",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "tests/test_depth_execution.py",
+      "sha256": "14b1f8ba9cecf314927eb589d7a52bccd4b2a3914b43bca74d3c1992b45a0107",
+      "phase": "validation_each_batch",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "tests/test_depth_recovery.py",
+      "sha256": "77dadf61c62cc5a3e994226b096fb7996a6dca374050c31edf1ba135c69eff65",
+      "phase": "validation_each_batch",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "tests/test_entropy.py",
+      "sha256": "52f58c4c639d4ae6df46ab874160d0386371f8edabb88afc58612ffa8aa5d3dd",
+      "phase": "validation_each_batch",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "tests/test_execution_engine.py",
+      "sha256": "7b6bf2889acb61b89337c27c9f78f18e59c9e33ed1dc2d04ea919e0a7cd839dc",
+      "phase": "validation_each_batch",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "tests/test_funding_analysis.py",
+      "sha256": "987c42be54068384b16cd3b9c7b0359f169b017a2adc5130c82c99d00aae58cd",
+      "phase": "validation_each_batch",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "tests/test_funding_monitor.py",
+      "sha256": "dd4846eafee8c215650b0a0c23c8c4fa6f07dda74bea3b3ffb7263c54431b3ae",
+      "phase": "validation_each_batch",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "tests/test_funding_window.py",
+      "sha256": "20a3768bac39ba69938d9dbd9b003effddee947598708e5785c41ad20a1c5a4c",
+      "phase": "validation_each_batch",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "tests/test_hedge_order_stream.py",
+      "sha256": "6cf4e30ce44a5f3fe779327c2490034f6b5c5be439056cf67a41c5bdc0e14051",
+      "phase": "validation_each_batch",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "tests/test_hedge_safety.py",
+      "sha256": "c5c93d55b89fa81b35962a0734f16f24e3f3f78ac221dbcdece63ec2393a0066",
+      "phase": "validation_each_batch",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "tests/test_hyperliquid_fast_feed.py",
+      "sha256": "2673947fa68efda7f0b402d4c9cbf38005297b3fd72ec135043648528844574b",
+      "phase": "validation_each_batch",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "tests/test_hyperliquid_mexc_fill_safety.py",
+      "sha256": "6744f32c4c3f24682871267f4e38af6d8f7068705761301c48b0c7a9d65b9a6a",
+      "phase": "validation_each_batch",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "tests/test_lighter_margin_setup.py",
+      "sha256": "d37302c4758d8d276bafff0a6c230d66002fefb611cfeaad2cdf7674c2f3d60b",
+      "phase": "validation_each_batch",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "tests/test_maker_first_hedge.py",
+      "sha256": "2e2a652e1cd549eb5c23bdfe21a215ff0c02dd537d8721eb505ce48408176bfa",
+      "phase": "validation_each_batch",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "tests/test_maker_price_guard.py",
+      "sha256": "6eb85dd310275b7f07bfa8ec4258e06a193e50abc040f0b41b8b0e314ddfa948",
+      "phase": "validation_each_batch",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "tests/test_market_monitor.py",
+      "sha256": "b3537a910de5b524527836e7599cfd90122a9f5eea116dc271597e6c2c390a8a",
+      "phase": "validation_each_batch",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "tests/test_mexc_order_stream_auth.py",
+      "sha256": "87a22e9504be97b394e802e4b31a56368ba86b5f6d7f21eb5621f198cb460afb",
+      "phase": "validation_each_batch",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "tests/test_monitor_cache.py",
+      "sha256": "918b52aa02318736c9a95495d6971f920a2c8a490605752e669e3ac861964d17",
+      "phase": "validation_each_batch",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "tests/test_monitor_entry_gap.py",
+      "sha256": "91c3d9b909a3ece7877390a2b5fa7cfc2d1744594cd14d407480d5e8070228ac",
+      "phase": "validation_each_batch",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "tests/test_ondo.py",
+      "sha256": "3723367d82217dbf15676e2a5b6824c756a815f61c6c6afba828d51759f91713",
+      "phase": "validation_each_batch",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "tests/test_order_service.py",
+      "sha256": "c3ed49a6c22d9a333b61278b08fc4b77d363f182af7355d675d1ddfe88336db3",
+      "phase": "validation_each_batch",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "tests/test_order_stream.py",
+      "sha256": "4527faf3f39b37e66ae4d3f7ee62fac62b96aa4fdf84d1895fac3279d2eac258",
+      "phase": "validation_each_batch",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "tests/test_order_web.py",
+      "sha256": "e97455201c415ade46a39b7ef937684f09d2b2149c4531339723d21adef374a7",
+      "phase": "validation_each_batch",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "tests/test_quiet_depth_fallback.py",
+      "sha256": "f92baec890e2caf382eeae2e89850a2729f6518fc2ebde02dd8a384d55c04048",
+      "phase": "validation_each_batch",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "tests/test_risk_management.py",
+      "sha256": "1ad761c845004b9c080c334c1641d3767fc9b9643b11bf150cf1347546355809",
+      "phase": "validation_each_batch",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "tests/test_single_order_script.py",
+      "sha256": "b3ca752c8f6c3a0aaa62be7e09a3d4a3594c3ba173b88ad6a3f4c389740bb0ef",
+      "phase": "validation_each_batch",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "tests/test_spot_perp_arbitrage_script.py",
+      "sha256": "088d9153768c77d00979c28581406ea31c03e46c1a45c8f16b816bd675744314",
+      "phase": "validation_each_batch",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "tests/test_spot_perp_latency.py",
+      "sha256": "61b9c71a256da0861c5170243d5155815903c5324267a357bcfbe6d00066baa9",
+      "phase": "validation_each_batch",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "tests/test_spread_dispatcher.py",
+      "sha256": "ca09a7f7ad5778d3f75b1a59acdb807ad73fc0cc0525d92043cb2a64dab75d6c",
+      "phase": "validation_each_batch",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "tests/test_spread_execution_events.py",
+      "sha256": "5cde0af7a4a5e24c2137db0bf8c01e7e78ed9b028fbca0e6e15a3dcafe909ecd",
+      "phase": "validation_each_batch",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "tests/test_spread_hedge_coordinator.py",
+      "sha256": "dea0d5cbfd34fde60acef72fbf5c44b8682e26c40abaf2b55f5e1dd589f3d365",
+      "phase": "validation_each_batch",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "tests/test_spread_history.py",
+      "sha256": "d6803ea5f465c61f48ceda2a38cf046e59fb9e2239505bf96be8dc3160345193",
+      "phase": "validation_each_batch",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "tests/test_spread_monitor.py",
+      "sha256": "e91e9d7c203f18d86ff790a4d05015705daee7d9eeb83f207cc44281001757b2",
+      "phase": "validation_each_batch",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "tests/test_spread_quote_freshness.py",
+      "sha256": "7c2cae3bb05be16cc6614309ce828febfbf591eae5483529fd094813d2d3027d",
+      "phase": "validation_each_batch",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "tests/test_spread_recording.py",
+      "sha256": "d2d59db53467a4181d89ea69d663ca27c845ea8743e6ca80f02546970d923251",
+      "phase": "validation_each_batch",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "tests/test_spread_strategy.py",
+      "sha256": "a7bc5c5243d8010f46cf1009ce424b32e08e276c28ceb562f519ac3f195867aa",
+      "phase": "validation_each_batch",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "tests/test_variational_extension.py",
+      "sha256": "4df354963f3a08d0f8746a244be7958c9701d0a6d5258a573be1044b369314a1",
+      "phase": "validation_each_batch",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "tests/test_variational_fill_safety.py",
+      "sha256": "0d8ec305f513bacd81e549dadb90be7fa51d1962e7dd6b4d6a40098b42c6f54c",
+      "phase": "validation_each_batch",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "tests/test_variational_maker_default.py",
+      "sha256": "40c25a7cba92932d1fc10f28738e2b9f1130b10a19956dd2c770c45ad676ebc1",
+      "phase": "validation_each_batch",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "web/__init__.py",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "phase": "8_web",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "web/app.py",
+      "sha256": "6a7b8a1cc72a55d55e7d8bb57c878cb29deaccc379557515c994cb88da6a7ead",
+      "phase": "8_web",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "web/monitor.py",
+      "sha256": "dad019dfb27ccedf48c205d24539dbfaac835c7d6540cc7d853a3fe85ec56a7f",
+      "phase": "8_web",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "web/monitor_cache.py",
+      "sha256": "efca15ee7f6988e894c8f467cbddd45a86778b843e1b216476ea7ac2affd41e7",
+      "phase": "8_web",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "web/static/app.js",
+      "sha256": "62f4a6b73da7c2bc677d045440b05baa54c0538256f0ca45ee57eb60cef1a52c",
+      "phase": "8_web",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "web/static/hyperliquid-benchmark.html",
+      "sha256": "19c2595a1822b97863fe39a91f582bc888f7c1d410acf3cb68b0107dc68b9171",
+      "phase": "8_web",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "web/static/hyperliquid-benchmark.js",
+      "sha256": "3f0669f16650a9c450fba570c0fec3cdd4929dad137c0b0bf3633e583c90c75c",
+      "phase": "8_web",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "web/static/index.html",
+      "sha256": "d2289195436adf3d2e8608b9ba5f43711889b8446cc804fb5d2d19e31607f86b",
+      "phase": "8_web",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "web/static/monitor.css",
+      "sha256": "89bb311bc4d1a7e870c22f194a0423fe8d218512e4a62cc38f7146374a03d477",
+      "phase": "8_web",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "web/static/monitor.html",
+      "sha256": "f5d7ee7a1af4e0e43da10707c61bba0e374d7079dffedd8d32c697f875fccd6b",
+      "phase": "8_web",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "web/static/monitor.js",
+      "sha256": "95065da06e43ef656554d06dbfe53f782e6fe511ddd147bf53ed01dbf48cc9fd",
+      "phase": "8_web",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "web/static/style.css",
+      "sha256": "3c40422e07ceeb0f925e0ffdb24d14e040a87183def0259307478ceec3ba7897",
+      "phase": "8_web",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "web/static/vendor/uPlot.iife.min.js",
+      "sha256": "7f29cd14e36d84141ab49c5e0a806d88e4d855596a9bc0e10799bc2c114b4c4f",
+      "phase": "8_web",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "web/static/vendor/uPlot.min.css",
+      "sha256": "df630c6a8d6f8eeaff264b50f73ce5b114f646ffd9a0bb74f049b0a00135fa04",
+      "phase": "8_web",
+      "status": "planned",
+      "ported_scope": null
+    }
+  ],
+  "excluded": "Untracked variational-v1, secrets, live data, generated caches and git internals are not copied.",
+  "notes": "Partial verification covers only the listed scope; no production replacement; manual Aster/Hyperliquid single-order test capability is separate from automated strategy parity. JS/HTML/CSS remain browser assets; Rust replaces their backend/bridge where appropriate."
+}

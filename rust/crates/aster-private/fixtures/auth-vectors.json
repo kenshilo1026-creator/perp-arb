@@ -1,0 +1,62 @@
+{
+  "test_key": "0000000000000000000000000000000000000000000000000000000000000001",
+  "user": "0x0000000000000000000000000000000000000001",
+  "signer": "0x7e5f4552091a69125d5dfcb7b8c2659029395bdf",
+  "vectors": [
+    {
+      "params": [],
+      "nonce": 1794326400000000,
+      "encoded": "nonce=1794326400000000&signer=0x7e5f4552091a69125d5dfcb7b8c2659029395bdf&user=0x0000000000000000000000000000000000000001",
+      "signature": "0x78cf650bd1cd27e953267dd9001ef522710c429afdb3e77f1ec7d7c2e4ecc9d5197e282f6415c51e09453ee9cfb15531b457fe409b975ca5f9e5ff310cfb3a621b",
+      "digest": "813580eeecb666cc9ae91588b7424b8e07882fd6996d0d8fef7e400864a046ce"
+    },
+    {
+      "params": [
+        [
+          "symbol",
+          "ETHUSDT"
+        ],
+        [
+          "orderId",
+          "9007199254740993"
+        ]
+      ],
+      "nonce": 1794326400000001,
+      "encoded": "symbol=ETHUSDT&orderId=9007199254740993&nonce=1794326400000001&signer=0x7e5f4552091a69125d5dfcb7b8c2659029395bdf&user=0x0000000000000000000000000000000000000001",
+      "signature": "0x0db98565cef35d6f73996b8dded23bc0ef1e0f302c5e7a199433fb3e2c07a2aa0d91077f36253a9e1a091f1e1cc3b09db8baa8f2ad6556ffdca11cf538caef8a1b",
+      "digest": "bed581872455047c524782e49c278e966606ddde9b48118c802d7fa2cabccbb7"
+    },
+    {
+      "params": [
+        [
+          "symbol",
+          "币安人生USDT"
+        ],
+        [
+          "orderId",
+          "2"
+        ]
+      ],
+      "nonce": 1794326400000002,
+      "encoded": "symbol=%E5%B8%81%E5%AE%89%E4%BA%BA%E7%94%9FUSDT&orderId=2&nonce=1794326400000002&signer=0x7e5f4552091a69125d5dfcb7b8c2659029395bdf&user=0x0000000000000000000000000000000000000001",
+      "signature": "0x439fb33d1887919be45614f52d1bc88791a2f546633b81a97d81e733babac45f784d974643ac59bdb6a4654ab455b9801de0a27f6d54284499adfd18acc104671c",
+      "digest": "f2d1082a3f6b9ae3c8ddaaee51d7e6dee5173d4100c0ccf79bceaa78c5815f28"
+    },
+    {
+      "params": [
+        [
+          "symbol",
+          "A B+%~/USDT"
+        ],
+        [
+          "orderId",
+          "3"
+        ]
+      ],
+      "nonce": 1794326400000003,
+      "encoded": "symbol=A+B%2B%25~%2FUSDT&orderId=3&nonce=1794326400000003&signer=0x7e5f4552091a69125d5dfcb7b8c2659029395bdf&user=0x0000000000000000000000000000000000000001",
+      "signature": "0x0502070183841b1b3d36959bb978aa5d56709f86b09c90f4b56d3524a1fadc11701c8af826ddbb4870814cb0351edafea4b32dc9b50103c289319543bfcdd4de1b",
+      "digest": "ee4d5f6a5554b4596f817bbd973e10ad93205e0215534df75c5b55d9d61b1e9c"
+    }
+  ]
+}

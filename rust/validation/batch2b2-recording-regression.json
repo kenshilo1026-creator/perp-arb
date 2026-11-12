@@ -1,0 +1,47 @@
+{
+  "status": "passed",
+  "frames": 208,
+  "counts": {
+    "aster": 151,
+    "hyperliquid": 57
+  },
+  "accepted": 206,
+  "accepted_by_venue": {
+    "aster": 151,
+    "hyperliquid": 55
+  },
+  "fresh_frames_by_venue": {
+    "aster": 151,
+    "hyperliquid": 53
+  },
+  "mismatches": [],
+  "live_replay_mismatches": [],
+  "dataset_sha256": "16014b09a52db6c89376de42bc68eee7666edf5f429199f31a644fe7cb203288",
+  "binary_sha256": "a8e029d3af7c5f8d29c6847bcb0887390cc1d0d8563fa86c01973c23f9060cce",
+  "source_sha256": {
+    "crates/market-data/src/bin/instrument-replay.rs": "a85b4c82740bfa7f1ec79e6ed25273ecee6489b8409a5af6d945bc11ebf7ed9a",
+    "crates/market-data/src/bin/market-probe.rs": "8d95c3cd1007ed7168960c43c2ca3fb27455d8f81135b1c56a1d9f4f46a42776",
+    "crates/market-data/src/bin/market-replay.rs": "62e706cac64178f24fcecb90065f4e6d54b4ddedca72df6e3e1a43363f3f0f2b",
+    "crates/market-data/src/bin/shared-probe.rs": "d16de6e0bc36a15f8f6550cf53d5df8c733485abe30cb947ba0c0dc87e066f3a",
+    "crates/market-data/src/bin/shared-replay.rs": "bcf2e5c34f2048be807a870477bf6d0e28fe34c0bc2261f8ea5fe50cafe37820",
+    "crates/market-data/src/catalog.rs": "787bf6347db83446a8463af583886c78222bfff353c73da3d64dce184b68b8e4",
+    "crates/market-data/src/hub.rs": "2101bfe69bd40943bbc668205ed4912638fa347cde389f2afe7ebf837effd884",
+    "crates/market-data/src/lib.rs": "4e68c0503bdb674b2b8341ae4835b47b6ac1c91679fb710a5cb02ae60d9f1774",
+    "crates/market-data/src/recorder.rs": "3fc2b959850ac345292a55eeba9be96bd66f16f4a71d5ae5a50673906bd2224e",
+    "crates/market-data/src/shared.rs": "5e20cb272653a0384f788d2a6d504644eb3c3736057c4ecdbf7086089bfca701",
+    "crates/market-data/tests/catalog.rs": "4ae85650a6062d6a78a11515e8858ac06a2d791073accc2eb099fbc1d02494ad",
+    "crates/market-data/tests/shared.rs": "0d2e1c1866e174a3447b76ae1062ec17632a89a73ec85d3847f52ad614664c05",
+    "crates/market-data/tests/snapshots.rs": "501859e95284b1b7d13e9b1d24a8185f3bdd925375a9722307145b036512be57"
+  },
+  "scope": "Exact book/time/availability parity; sampled local JSON parse and cache times, not fill latency. Rust additionally validates book consistency.",
+  "python": {
+    "parse_and_cache_ns_p50": 27200,
+    "parse_and_cache_ns_p95": 48200,
+    "parse_and_cache_ns_p99": 63000
+  },
+  "rust": {
+    "parse_and_cache_ns_p50": 14600,
+    "parse_and_cache_ns_p95": 23000,
+    "parse_and_cache_ns_p99": 30900
+  }
+}

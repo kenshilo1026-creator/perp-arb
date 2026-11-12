@@ -1,0 +1,13 @@
+{
+  "venue": "hyperliquid",
+  "network": "testnet",
+  "account": "REPLACE_WITH_ACCOUNT_ADDRESS",
+  "symbol": "ETH",
+  "side": "BUY",
+  "quantity": "0.01",
+  "limit_price": "2000",
+  "tif": "post_only",
+  "reduce_only": false,
+  "max_notional_usd": "25",
+  "wait_seconds": 5
+}

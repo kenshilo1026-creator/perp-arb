@@ -1,0 +1,24 @@
+{
+  "date": "2026-11-11",
+  "duration_seconds": 90,
+  "exit_code": 0,
+  "summary": {
+    "connected_before_stop": true,
+    "connection_attempts": 4,
+    "connections": 4,
+    "fault": null,
+    "last_error": null,
+    "mode": "read_only",
+    "query_failures": 0,
+    "query_successes": 0,
+    "reconciliation_needed_before_stop": 0,
+    "recovery_verification": true,
+    "renewals": 6,
+    "shutdown_completed": true,
+    "tracked_orders": 0,
+    "ws_events": 0
+  },
+  "diagnostic": "",
+  "binary_sha256": "fbf2c827b7de686f2fdb9d22e208cb920875cf640971b33e822989fe7e9e4aa7",
+  "scope": "Explicit read-only live test. Controlled local socket rotation; no orders/cancels or shared listenKey deletion. Raw account payloads not recorded."
+}

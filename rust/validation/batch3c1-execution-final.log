@@ -1,0 +1,54 @@
+COMMAND ['C:\\Users\\kenho\\.cargo\\bin\\cargo.exe', 'fmt', '--manifest-path', 'rust/Cargo.toml', '--all']
+COMMAND ['C:\\Users\\kenho\\.cargo\\bin\\cargo.exe', 'test', '--manifest-path', 'rust/Cargo.toml', '-p', 'perp-arb-execution', '--locked']
+   Compiling tokio v1.54.1
+   Compiling perp-arb-private-events v0.1.0 (C:\Users\kenho\Documents\learning\perp-arb\rust\crates\private-events)
+   Compiling perp-arb-execution v0.1.0 (C:\Users\kenho\Documents\learning\perp-arb\rust\crates\execution)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 17.33s
+     Running unittests src\lib.rs (rust\target\debug\deps\perp_arb_execution-a2bf89caced9837e.exe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src\bin\execution-replay.rs (rust\target\debug\deps\execution_replay-366be2f253bc454f.exe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\coordination.rs (rust\target\debug\deps\coordination-c6414c0bb84a5458.exe)
+
+running 6 tests
+test partial_cancel_gap_holds_reservation_until_terminal_reconciliation ... ok
+test acknowledgements_duplicates_and_fill_before_ack_do_not_double_hedge ... ok
+test cancel_race_dust_and_rejected_hedge_keep_exact_obligation ... ok
+test private_coordinator_to_execution_partial_fills_while_hedge_is_unknown ... ok
+test wrong_account_order_and_quantity_cannot_release_unknown_submission ... ok
+test both_live_coordinator_interfaces_drive_paper_hedge_to_completion ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+   Doc-tests perp_arb_execution
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+COMMAND ['C:\\Users\\kenho\\.cargo\\bin\\cargo.exe', 'clippy', '--manifest-path', 'rust/Cargo.toml', '--workspace', '--all-targets', '--locked', '--', '-D', 'warnings']
+    Checking perp-arb-execution v0.1.0 (C:\Users\kenho\Documents\learning\perp-arb\rust\crates\execution)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 4.86s
+COMMAND ['C:\\Users\\kenho\\.cargo\\bin\\cargo.exe', 'build', '--manifest-path', 'rust/Cargo.toml', '-p', 'perp-arb-execution', '--release', '--locked']
+   Compiling serde_core v1.0.229
+   Compiling tokio v1.54.1
+   Compiling serde_json v1.0.154
+   Compiling perp-arb-private-events v0.1.0 (C:\Users\kenho\Documents\learning\perp-arb\rust\crates\private-events)
+   Compiling perp-arb-execution v0.1.0 (C:\Users\kenho\Documents\learning\perp-arb\rust\crates\execution)
+    Finished `release` profile [optimized] target(s) in 26.87s
+COMMAND ['C:\\Users\\kenho\\AppData\\Local\\Programs\\Python\\Python311\\python.exe', 'rust/tools/verify_execution.py']
+{
+  "cases": 1200,
+  "mismatches": 0,
+  "scope": "Cumulative hedge quantity and terminal-only residual retry parity; no live trades or PnL backtest.",
+  "python_source_sha256": "95751e3a09cd45bb41220563157361d48e383b4785f3ef5de53f6d4fd9c9b7d2",
+  "binary_sha256": "35b20cfe4ad79c00af138123aa9bd6c3d34feb6a5dd0f253499f5e96ed235add"
+}

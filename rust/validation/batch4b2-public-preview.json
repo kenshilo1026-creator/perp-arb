@@ -1,0 +1,61 @@
+{
+  "scope": "help, pre-I/O flag rejection and public metadata only; no private account reads or trading",
+  "binary_sha256": "996379881bc1620536154b3292de5384e10d543084bca3b85ff4250979be2d03",
+  "results": [
+    {
+      "args": [
+        "--help"
+      ],
+      "exit_code": 0,
+      "elapsed_ms": 422.0,
+      "stdout": "Rust 單筆永續委託測試（非跨所自動策略）\n\norder-test preview --plan PLAN.json\norder-test submit --plan PLAN.json --journal NEW.wal --live\norder-test inspect --journal EXISTING.wal\norder-test recover --journal EXISTING.wal --live\n\npreview 只讀公開商品資料；inspect 只讀本機帳本。\nsubmit 會送出一筆真實委託，到期撤回剩餘量；成交部分不自動反向平倉。\nrecover 只查證及撤回該 client ID，絕不重新提交委託。\nHyperliquid 支援 testnet/mainnet；Aster 此批只支援 v3 mainnet。\n金鑰只讀程序環境，不載入 .env：ASTER_API_WALLET_PRIVATE_KEY / HYPERLIQUID_PRIVATE_KEY。\n詳細欄位及限制見 rust/crates/order-test/README.md。\n",
+      "stderr": ""
+    },
+    {
+      "args": [
+        "submit",
+        "--plan",
+        "DOES-NOT-EXIST.json",
+        "--journal",
+        "DOES-NOT-EXIST.wal"
+      ],
+      "exit_code": 1,
+      "elapsed_ms": 125.0,
+      "stdout": "",
+      "stderr": "order-test: submit/recover require --live; inspect/preview do not accept it\n"
+    },
+    {
+      "args": [
+        "preview",
+        "--plan",
+        "rust/artifacts/preview-only-aster-mainnet.json"
+      ],
+      "exit_code": 0,
+      "elapsed_ms": 937.0,
+      "stdout": "{\n  \"credentials_loaded\": false,\n  \"max_notional_usd\": \"25\",\n  \"mode\": \"preview\",\n  \"order\": {\n    \"account\": \"0x0000000000000000000000000000000000000001\",\n    \"asset\": null,\n    \"client_id\": \"paf9d78946d186edeb460569e56cdc3378\",\n    \"limit_price\": \"2000\",\n    \"network\": \"mainnet\",\n    \"quantity\": \"0.01\",\n    \"reduce_only\": false,\n    \"side\": \"BUY\",\n    \"symbol\": \"ETHUSDT\",\n    \"tif\": \"post_only\",\n    \"venue\": \"aster\"\n  },\n  \"wait_seconds\": 5\n}\n",
+      "stderr": ""
+    },
+    {
+      "args": [
+        "preview",
+        "--plan",
+        "rust/artifacts/preview-only-hyperliquid-mainnet.json"
+      ],
+      "exit_code": 0,
+      "elapsed_ms": 500.0,
+      "stdout": "{\n  \"credentials_loaded\": false,\n  \"max_notional_usd\": \"25\",\n  \"mode\": \"preview\",\n  \"order\": {\n    \"account\": \"0x0000000000000000000000000000000000000001\",\n    \"asset\": 1,\n    \"client_id\": \"0x2684c9927968c88220570726dd22807b\",\n    \"limit_price\": \"2000\",\n    \"network\": \"mainnet\",\n    \"quantity\": \"0.01\",\n    \"reduce_only\": false,\n    \"side\": \"BUY\",\n    \"symbol\": \"ETH\",\n    \"tif\": \"post_only\",\n    \"venue\": \"hyperliquid\"\n  },\n  \"wait_seconds\": 5\n}\n",
+      "stderr": ""
+    },
+    {
+      "args": [
+        "preview",
+        "--plan",
+        "rust/artifacts/preview-only-hyperliquid-testnet.json"
+      ],
+      "exit_code": 0,
+      "elapsed_ms": 485.0,
+      "stdout": "{\n  \"credentials_loaded\": false,\n  \"max_notional_usd\": \"25\",\n  \"mode\": \"preview\",\n  \"order\": {\n    \"account\": \"0x0000000000000000000000000000000000000001\",\n    \"asset\": 4,\n    \"client_id\": \"0x5f6fc1f529c84529fb192a68f0b0c5d0\",\n    \"limit_price\": \"2000\",\n    \"network\": \"testnet\",\n    \"quantity\": \"0.01\",\n    \"reduce_only\": false,\n    \"side\": \"BUY\",\n    \"symbol\": \"ETH\",\n    \"tif\": \"post_only\",\n    \"venue\": \"hyperliquid\"\n  },\n  \"wait_seconds\": 5\n}\n",
+      "stderr": ""
+    }
+  ]
+}

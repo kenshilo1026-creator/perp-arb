@@ -1,0 +1,451 @@
+powershell.exe :    Compiling perp-arb-private-events v0.1.0 
+(C:\Users\kenho\Documents\learning\perp-arb\rust\crates\private-events)
+At line:2 char:1
++ & powershell -NoProfile -File rust/tools/check.ps1 -Format *> rust/ar ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (   Compiling pe...private-events):String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.43s
+     Running unittests src\main.rs (rust\target\debug\deps\core_replay-1803670b912454dd.exe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\protocol.rs (rust\target\debug\deps\protocol-8680d36c2d016389.exe)
+
+running 3 tests
+test arithmetic_failure_is_explicit_and_does_not_lose_following_cases ... ok
+test explicit_empty_and_unsized_depth_produce_different_results ... ok
+test omitted_depth_and_bad_side_are_protocol_errors ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.92s
+
+     Running unittests src\lib.rs (rust\target\debug\deps\perp_arb_core-6bec969e206c7804.exe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\instruments.rs (rust\target\debug\deps\instruments-bcb98082069744f6.exe)
+
+running 6 tests
+test common_lot_is_lcm_not_maximum_and_handles_trailing_zeroes ... ok
+test extended_products_keep_sub_decimal_precision_for_thresholds ... ok
+test hl_five_figures_decimal_caps_and_integer_exception ... ok
+test exact_ticks_and_static_min_max_notional_boundaries ... ok
+test unit_conversions_preserve_notional_and_refuse_rounded_quantities ... ok
+test rejects_invalid_metadata_offsets_and_arithmetic_underflow ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\market_math.rs (rust\target\debug\deps\market_math-82f5f4ab71f95d4e.exe)
+
+running 11 tests
+test bad_sizes_and_quantities_fail_even_when_unsized ... ok
+test freshness_boundaries_match_production_defaults ... ok
+test extended_rounding_preserves_digits_on_both_sides_of_a_tick ... ok
+test empty_visible_depth_is_not_an_unsized_venue ... ok
+test rejects_invalid_or_silently_rounded_inputs ... ok
+test zero_source_timestamp_is_preserved_and_extreme_times_do_not_wrap ... ok
+test malformed_depth_is_rejected_at_ingestion ... ok
+test tick_rounding_handles_signs_exact_ticks_and_disabled_steps ... ok
+test overflow_and_underflow_report_errors_instead_of_panicking_or_zero_prices ... ok
+test prices_use_the_original_denominator_and_sign ... ok
+test whole_clip_vwap_and_marginal_use_different_prices ... ok
+
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src\lib.rs (rust\target\debug\deps\perp_arb_market_data-0ba45553d2956ee0.exe)
+
+running 52 tests
+test hub::multiplex::tests::offline_subscription_churn_does_not_retain_removed_markets ... ok
+test hub::tests::capacity_is_bounded_and_released_when_consumers_drop ... ok
+test hub::tests::last_drop_cancels_stalled_handshake_without_reconnecting ... ok
+test hub::tests::consumer_handoff_leaves_other_old_symbol_consumer_alive ... ok
+test hub::tests::metadata_expiry_invalidates_without_a_new_network_request ... ok
+test hub::tests::malformed_frame_or_wrong_ack_fails_closed ... ok
+test hub::tests::dropping_hub_clears_views_even_with_live_subscribers ... ok
+test hub::tests::pacing_reserves_pongs_and_preserves_rolling_window ... ok
+test hub::tests::reconnect_budget_cannot_be_reset_by_a_new_socket ... ok
+test hub::tests::limited_control_sends_do_not_block_existing_market_reads ... ok
+test hub::tests::last_consumer_and_stalled_handshake_can_stop_promptly ... ok
+test hub::tests::missing_ack_times_out_even_when_quotes_arrive ... ok
+test hub::tests::native_unicode_control_and_ping_pong_are_supported ... ok
+test hub::tests::closing_socket_invalidates_all_and_reconnect_resets_sequence ... ok
+test metadata::tests::ban_is_not_retried_and_deadline_does_not_shorten_server_cooldown ... ok
+test metadata::tests::configuration_and_catalog_identity_validation ... ok
+test metadata::tests::changed_precision_delisting_and_asset_ids_replace_atomically ... ok
+test metadata::tests::cooldown_only_extends_and_does_not_affect_other_venue ... ok
+test hub::tests::two_aster_markets_and_duplicate_consumers_share_one_socket ... ok
+test metadata::tests::cancelled_refresh_releases_singleflight_and_does_not_publish ... ok
+test metadata::tests::exhausted_5xx_retries_are_counted_and_bounded ... ok
+test metadata::tests::malformed_envelope_never_replaces_snapshot_as_healthy ... ok
+test hub::tests::adding_and_removing_market_preserves_other_market_on_socket ... ok
+test metadata::tests::malformed_json_is_not_retried_as_transient_http ... ok
+test metadata::tests::other_venue_can_fetch_while_aster_is_in_cooldown ... ok
+test metadata::tests::failed_refresh_invalidates_old_rules_and_failure_backoff_coalesces ... ok
+test metadata::tests::overflowing_retry_after_fails_closed_without_panicking ... ok
+test metadata::tests::connection_refusal_is_retried_within_budget_and_deadline ... ok
+test metadata::tests::overlapping_refreshes_publish_once ... ok
+test metadata::tests::overlapping_failed_refreshes_share_one_error_and_request ... ok
+test metadata::tests::rejected_instrument_does_not_hide_other_valid_updates ... ok
+test metadata::tests::request_methods_body_no_credentials_and_cache_hits ... ok
+test metadata::tests::redirects_and_oversize_length_or_chunks_are_rejected ... ok
+test metadata::tests::retry_after_seconds_dates_and_invalid_are_distinct ... ok
+test metadata::tests::expiry_uses_monotonic_age_without_network_on_reads ... ok
+test metadata::tests::missing_retry_after_and_ip_weight_headers_block_without_retry_storm ... ok
+test metadata::tests::stopping_during_fetch_cancels_public_io ... ok
+test hub::tests::metadata_failure_pauses_then_recovers_and_delisted_coin_stays_off ... ok
+test metadata::tests::weighted_rolling_window_and_cancelled_wait_do_not_overspend ... ok
+test recorder::tests::existing_recording_is_preserved_and_tls_is_initialized_before_io ... ok
+test recorder::tests::full_recording_queue_is_a_failure_instead_of_silent_loss ... ok
+test metadata::tests::slow_response_respects_total_deadline ... ok
+test metadata::tests::transient_errors_are_bounded_and_client_errors_not_retried ... ok
+test hub::tests::metadata_generation_refresh_reconnects_before_reusing_quotes ... ok
+test hub::tests::remove_during_pending_subscribe_ack_unsubscribes_without_publishing ... ok
+test hub::tests::mismatched_hl_ack_and_duplicate_ack_are_not_quotes ... ok
+test metadata::tests::periodic_refresh_and_shutdown_have_no_orphan_requests ... ok
+test hub::tests::hyperliquid_routes_native_case_and_both_channels_only_after_ack ... ok
+test hub::tests::same_symbol_drop_readd_fences_old_socket ... ok
+test metadata::tests::retry_after_429_is_shared_between_aster_versions ... ok
+test hub::tests::active_btc_and_heartbeats_cannot_hide_frozen_eth ... ok
+test metadata::tests::retryable_statuses_obey_retry_after_before_success ... ok
+
+test result: ok. 52 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.96s
+
+     Running unittests src\bin\instrument-replay.rs (rust\target\debug\deps\instrument_replay-b231e8fb8a47852b.exe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src\bin\market-probe.rs (rust\target\debug\deps\market_probe-7b485f998ffedc4a.exe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src\bin\market-replay.rs (rust\target\debug\deps\market_replay-7083f12897e971ae.exe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src\bin\metadata-probe.rs (rust\target\debug\deps\metadata_probe-e8578ea60ca7b820.exe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src\bin\multiplex-probe.rs (rust\target\debug\deps\multiplex_probe-d6dfb4d7233177fa.exe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src\bin\shared-probe.rs (rust\target\debug\deps\shared_probe-d1e6fdfdc48a9e20.exe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src\bin\shared-replay.rs (rust\target\debug\deps\shared_replay-ed6cad7605e1ce19.exe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\catalog.rs (rust\target\debug\deps\catalog-de598d182e8495df.exe)
+
+running 9 tests
+test mappings_obey_venue_precedence_and_reject_case_collisions ... ok
+test preserves_hl_native_spelling_and_original_asset_index ... ok
+test aster_prefers_trading_suffix_and_exact_native_does_not_switch_settlement ... ok
+test aliases_need_explicit_units_before_common_quantity_and_native_markets_work ... ok
+test explicit_new_quote_assets_keep_their_own_denomination ... ok
+test market_and_limit_have_independent_lots_and_caps ... ok
+test non_ascii_native_symbol_is_preserved_and_only_url_path_is_encoded ... ok
+test rejects_duplicate_delisted_inconsistent_and_unsupported_metadata ... ok
+test no_precision_fallback_for_missing_or_invalid_filters ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\shared.rs (rust\target\debug\deps\shared-54daa8907d74342c.exe)
+
+running 8 tests
+test acknowledgements_cannot_recover_a_disconnected_market ... ok
+test channel_watermarks_are_independent_and_old_updates_do_not_notify ... ok
+test changed_size_invalidates_full_depth_until_new_depth_arrives ... ok
+test subscriptions_are_native_case_correct_and_share_bbo_depth_socket ... ok
+test reconnect_rejects_late_old_frames_errors_and_disconnects ... ok
+test equal_source_time_conflict_is_conservative_in_either_arrival_order ... ok
+test unchanged_bbo_does_not_refresh_depth_age_and_reads_recheck_clock ... ok
+test malformed_missing_size_null_side_and_future_source_clear_both_channels ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\snapshots.rs (rust\target\debug\deps\snapshots-d32aca88ad138471.exe)
+
+running 8 tests
+test acknowledgements_do_not_make_a_disconnected_feed_healthy ... ok
+test subscriptions_are_partial_snapshots_and_preserve_coin_spelling ... ok
+test disconnect_clears_book_and_new_connection_can_reset_sequence ... ok
+test repeated_or_older_sequence_cannot_refresh_receipt_time ... ok
+test aster_wrapper_zero_size_and_source_time_follow_python_contract ... ok
+test a_future_timestamp_cannot_pin_the_cache_against_valid_new_quotes ... ok
+test smaller_snapshot_removes_old_tail_and_refuses_oversized_clip ... ok
+test invalid_snapshot_invalidates_previous_book ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src\lib.rs (rust\target\debug\deps\perp_arb_private_events-0b0e5aa2ff5304d7.exe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src\bin\private-replay.rs (rust\target\debug\deps\private_replay-3c21de920e1e2731.exe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\coordination.rs (rust\target\debug\deps\coordination-2fed546971d61595.exe)
+
+running 34 tests
+test capacity_fault_never_evicts_open_or_terminal_dedup_state ... ok
+test cancel_race_retains_late_fills_and_demands_reconciliation ... ok
+test aborting_worker_invalidates_health_without_erasing_fills ... ok
+test disconnect_and_reconnect_do_not_clear_known_fills_or_certify_recovery ... ok
+test actor_coalesces_snapshots_without_losing_cumulative_fills ... ok
+test aster_decode_requires_real_cumulative_fields_and_exact_id ... ok
+test exact_decimal_quantities_preserve_tiny_fills ... ok
+test aster_ingestion_fault_wakes_health_and_retains_known_quantity ... ok
+test aster_rest_reconciliation_updates_existing_subscriber ... ok
+test dropping_all_producers_finishes_worker_and_invalidates_views ... ok
+test concurrent_ws_rest_and_slow_consumer_keep_exact_exposure ... ok
+test filled_cannot_be_reopened_or_reset_by_stale_rest ... ok
+test independent_cursors_and_order_replacement_do_not_share_cumulative_totals ... ok
+test malformed_quantity_never_erases_known_fills ... ok
+test expiry_is_a_gap_not_a_zero_fill_or_rejection ... ok
+test newer_regressed_quantity_and_conflicting_terminal_states_require_recovery ... ok
+test old_socket_can_contribute_fills_but_not_disconnect_new_socket ... ok
+test older_timestamp_with_more_fills_is_not_discarded ... ok
+test orders_symbols_accounts_and_venues_are_isolated ... ok
+test original_quantity_changes_are_identity_conflicts ... ok
+test pre_ack_fill_is_preserved_and_ack_is_not_a_fill ... ok
+test query_ticket_cannot_be_applied_to_another_order ... ok
+test rest_fallback_before_first_ws_does_not_claim_stream_health ... ok
+test rest_query_racing_a_new_ws_event_cannot_certify_reconciliation ... ok
+test rest_query_started_before_disconnect_cannot_reconcile_gap ... ok
+test rest_update_time_is_not_compared_to_ws_dispatch_time ... ok
+test tokens_cannot_cross_two_coordinators_for_the_same_account ... ok
+test unrelated_events_expiry_and_rest_error_are_distinct ... ok
+test unrepresentable_delta_is_an_error_instead_of_silent_rounding ... ok
+test websocket_rest_race_deduplicates_in_both_orders ... ok
+test zero_fill_cancel_is_visible ... ok
+test permutations_of_duplicates_and_reordering_account_for_exact_total ... ok
+test bounded_ingress_blocks_and_admitted_event_survives_caller_cancellation ... ok
+test shutdown_drains_commands_already_admitted_after_stop_request ... ok
+
+test result: ok. 34 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
+
+   Doc-tests perp_arb_core
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests perp_arb_market_data
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests perp_arb_private_events
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+    Checking perp-arb-private-events v0.1.0 (C:\Users\kenho\Documents\learning\perp-arb\rust\crates\private-events)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.59s
+   Compiling perp-arb-private-events v0.1.0 (C:\Users\kenho\Documents\learning\perp-arb\rust\crates\private-events)
+    Finished `release` profile [optimized] target(s) in 6.43s
+..............
+----------------------------------------------------------------------
+Ran 14 tests in 0.085s
+
+OK
+{
+  "status": "passed",
+  "cases": 571,
+  "python_version": "3.11.9 (tags/v3.11.9:de54cf5, Apr  2 2024, 10:12:12) [MSC v.1938 64 bit (AMD64)]",
+  "platform": "Windows-10-10.0.26200-SP0",
+  "numeric_policy": "round/marginal/bool/null exact; divisions abs <= 1e-24 + abs(expected)*1e-26; not a trading gate",
+  "benchmark_scope": "Prepared pure calculations; excludes parse/WS/signing/network/matching. Percentiles of batch means, not event tail latency.",
+  "python_benchmark": {
+    "metric": "batch_mean_ns_per_case",
+    "rounds": 21,
+    "repeats": 100,
+    "cases": 571,
+    "samples": [
+      939.0420315236428,
+      940.1366024518388,
+      943.539404553415,
+      949.2224168126095,
+      962.8266199649737,
+      988.4693520140105,
+      992.7425569176883,
+      997.1558669001752,
+      1001.0963222416813,
+      1007.2329246935201,
+      1011.877408056042,
+      1015.415061295972,
+      1029.5096322241682,
+      1034.5884413309982,
+      1053.800350262697,
+      1060.0560420315237,
+      1066.3082311733801,
+      1214.4956217162871,
+      1316.4255691768826,
+      2086.9737302977233,
+      2480.9982486865147
+    ],
+    "p50": 1011.877408056042,
+    "p95": 2086.9737302977233
+  },
+  "nonidentical_decimal_count": 140,
+  "rust_benchmark": {
+    "cases": 571,
+    "metric": "batch_mean_ns_per_case",
+    "p50": 107.91243432574431,
+    "p95": 132.25744308231174,
+    "profile": "release",
+    "repeats": 100,
+    "rounds": 21,
+    "samples": [
+      72.29422066549913,
+      81.17338003502627,
+      84.32049036777583,
+      89.18739054290718,
+      89.68651488616463,
+      90.15936952714536,
+      95.63747810858143,
+      97.86690017513135,
+      99.69176882661996,
+      103.25043782837128,
+      107.91243432574431,
+      115.99649737302977,
+      117.90192644483362,
+      121.31523642732049,
+      122.52014010507881,
+      123.29246935201401,
+      126.71978984238179,
+      127.17513134851139,
+      131.48686514886165,
+      132.25744308231174,
+      150.15936952714537
+    ]
+  },
+  "binary_sha256": "b14c0f2f5085c3f551cb3f5c3accf02f6a3bab0ba469ada1e3c4aaac5327242c",
+  "batch_mean_speedup_p50": 9.37683793696647
+}
+report: C:\Users\kenho\Documents\learning\perp-arb\rust\artifacts\batch1-validation.json
+{
+  "status": "passed",
+  "frames": 120,
+  "counts": {
+    "aster": 60,
+    "hyperliquid": 60
+  },
+  "accepted": 120,
+  "accepted_by_venue": {
+    "aster": 60,
+    "hyperliquid": 60
+  },
+  "fresh_frames_by_venue": {
+    "aster": 60,
+    "hyperliquid": 60
+  },
+  "mismatches": [],
+  "live_replay_mismatches": [],
+  "dataset_sha256": "15e0dd365e22369d43d3f45f2cdfd9df3055849cf98af9b5a997d0aef57b77a9",
+  "binary_sha256": "a086e0c0050efaf81b99b8c5bea768f5d4b4b8f4861f439034e2ff201bd89458",
+  "scope": "Exact book/time/availability parity; sampled local JSON parse and cache times, not fill latency. Rust additionally validates book consistency.",
+  "python": {
+    "parse_and_cache_ns_p50": 48100,
+    "parse_and_cache_ns_p95": 163700,
+    "parse_and_cache_ns_p99": 183900
+  },
+  "rust": {
+    "parse_and_cache_ns_p50": 8100,
+    "parse_and_cache_ns_p95": 38200,
+    "parse_and_cache_ns_p99": 51100
+  }
+}
+{
+  "status": "passed",
+  "events": 560,
+  "mismatches": [],
+  "fresh_by_venue": {
+    "aster": 160,
+    "hyperliquid": 160
+  },
+  "dataset_sha256": "db1d0bff31e5c22514583a868df1e8a3bc4fb5ffd336f92d6aef0bd84c182452",
+  "binary_sha256": "62a3dac02dd4ef3345cef65490085ed3b68b1ebe5ae5fdd61fbcd8f536fc321a",
+  "scope": "Exact common-policy book, source-time, freshness, VWAP, marginal and insufficient-capacity parity. Not a trading or P&L backtest; stricter Rust safety cases tested separately."
+}
+{
+  "status": "passed",
+  "cases": 1018,
+  "operations": {
+    "resolve": 15,
+    "math": 913,
+    "common_lot": 6,
+    "map": 84
+  },
+  "accepted_metadata": 10,
+  "rejected_metadata": 5,
+  "native_aster_cases": 5,
+  "active_native_rejections": [],
+  "metadata_rejection_reasons": {
+    "no trading Aster contract": 2,
+    "Aster contract is not a trading perpetual": 1,
+    "missing or ambiguous Hyperliquid coin": 1,
+    "delisted or malformed Hyperliquid coin": 1
+  },
+  "dataset_sha256": "891d677d591d3ba18dd8155251d26421a6412d902464f5f2018d046d619299ec",
+  "binary_sha256": "7ab22980366a574b39a13a00688d92a45f4ff63191dc0359362b479190a44f40",
+  "recording_sha256": null,
+  "scope": "Exact instrument rounding/common lots/static size error categories/mapping/base-resolution parity. Native Aster rows are injected into Python's production filter parser; explicit USD1/U lookup extends the old base suffix resolver. Max/market fields separately normalized from metadata; stricter safety cases have Rust tests. No order execution or latency claim."
+}
+{
+  "batch": "3a",
+  "common_events": 901,
+  "mismatches": 0,
+  "intentional_differences": [
+    {
+      "case": "older_timestamp_more_fills_after_partially_filled",
+      "python_quantity": "2",
+      "rust_quantity": "4",
+      "reason": "Preserve newly observed fills; never hide exposure due to timestamp order."
+    },
+    {
+      "case": "older_timestamp_more_fills_after_canceled",
+      "python_quantity": "2",
+      "rust_quantity": "4",
+      "reason": "Preserve newly observed fills; never hide exposure due to timestamp order."
+    }
+  ],
+  "scope": "Offline Aster cumulative event normalization and coordination only; no live private WS or order submission.",
+  "binary_sha256": "e0756562790322b50feb0a0a1ca175fe096a69ec67265913426e3ac04aa17765",
+  "python_sources": {
+    "hydra_basis/execution_engine/order_stream.py": "476ec6b7d0cad7272d7da586bdc99f7c7a2cf14dfc6dbce850bfa2c4bf974279",
+    "hydra_basis/execution_engine/order_fill.py": "de15921a792f408e7eefbba502e4c29fbe29707c693a3986c1e78ac89f8427c8"
+  }
+}
+Inventory matches: 202 source/config/test/assets files
+Core, partial public-market and private-event offline validation passed. This does not authorize live trading.

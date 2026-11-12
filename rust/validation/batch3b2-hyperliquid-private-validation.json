@@ -1,0 +1,10 @@
+{
+  "cases": 601,
+  "mismatches": 0,
+  "scope": "Order-status quantity, order ID and terminal parity only. Trade snapshot dedup is tested separately in Rust; no live trading or PnL backtest.",
+  "intentional_differences": [
+    "Preserve native symbol case; reject unknown status and inconsistent filled sizes. User fills never added to REST cumulative totals."
+  ],
+  "binary_sha256": "dd906dc984b0d4e51ea62ec0abc8b14ef063f78b06347afb97dc1de77506c5ab",
+  "python_source_sha256": "25b50366d015d6652198ecc1be6d30df390520f13506843c44936d46bee95959"
+}

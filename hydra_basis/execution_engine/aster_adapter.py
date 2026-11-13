@@ -5,6 +5,7 @@ import asyncio
 from contextlib import asynccontextmanager
 import os
 import time
+from hydra_basis.execution_engine.execution_trace import mark, timed_stage
 from decimal import Decimal, ROUND_FLOOR
 from urllib.parse import urlencode
 
@@ -298,6 +299,7 @@ class AsterExecutionAdapter:
                     raise RuntimeError(f"aster order {resp.status}: {result}")
                 return result
 
+    @timed_stage("aster.http.POST")
     async def _post_signed_query(self, url: str, params: dict) -> dict:
         query = urlencode(params)
         headers = {
@@ -305,6 +307,7 @@ class AsterExecutionAdapter:
             "User-Agent": "funding-arb-execution/0.1",
         }
         async with self._request_session() as session:
+            mark("aster.http_dispatch", method="POST")
             async with session.post(f"{url}?{query}", headers=headers) as resp:
                 content_type = resp.headers.get("Content-Type", "")
                 if "application/json" not in content_type.lower():
@@ -318,6 +321,7 @@ class AsterExecutionAdapter:
                     raise RuntimeError(f"aster order {resp.status}: {result}")
                 return result
 
+    @timed_stage("aster.http.GET")
     async def _get_signed_query(self, url: str, params: dict) -> dict:
         query = urlencode(params)
         headers = {
@@ -325,6 +329,7 @@ class AsterExecutionAdapter:
             "User-Agent": "funding-arb-execution/0.1",
         }
         async with self._request_session() as session:
+            mark("aster.http_dispatch", method="GET")
             async with session.get(f"{url}?{query}", headers=headers) as resp:
                 content_type = resp.headers.get("Content-Type", "")
                 if "application/json" not in content_type.lower():
@@ -338,6 +343,7 @@ class AsterExecutionAdapter:
                     raise RuntimeError(f"aster order {resp.status}: {result}")
                 return result
 
+    @timed_stage("aster.http.DELETE")
     async def _delete_signed_query(self, url: str, params: dict) -> dict:
         query = urlencode(params)
         headers = {
@@ -345,6 +351,7 @@ class AsterExecutionAdapter:
             "User-Agent": "funding-arb-execution/0.1",
         }
         async with self._request_session() as session:
+            mark("aster.http_dispatch", method="DELETE")
             async with session.delete(f"{url}?{query}", headers=headers) as resp:
                 content_type = resp.headers.get("Content-Type", "")
                 if "application/json" not in content_type.lower():
@@ -394,9 +401,11 @@ class AsterExecutionAdapter:
             f"aster nonce remained rejected after {max_nonce_attempts} signed attempts: {last_error}"
         ) from last_error
 
+    @timed_stage("aster.order_submission")
     async def _post_order(self, params: dict) -> dict:
         return await self._post_signed_action(f"{self.BASE_URL}/fapi/v3/order", params)
 
+    @timed_stage("aster.order_query")
     async def _get_order_status(self, *, symbol: str, order_id: object) -> dict:
         raw_symbol = await self._resolve_raw_symbol(symbol)
         params = self.build_signed_params({
@@ -603,6 +612,7 @@ class AsterExecutionAdapter:
         data = await self._post_signed_action(f"{self.BASE_URL}/fapi/v3/positionMargin", params)
         return {"ok": True, "raw": data}
 
+    @timed_stage("aster.limit_order")
     async def place_limit_order(
         self, *, symbol: str, side: str, amount: str, clip_usd: float, price: str,
         reduce_only: bool = False, post_only: bool = False,
@@ -623,6 +633,7 @@ class AsterExecutionAdapter:
         })
         return {"ok": True, "order_id": data.get("orderId"), "raw": data}
 
+    @timed_stage("aster.market_order")
     async def place_market_order(
         self, *, symbol: str, side: str, amount: str, clip_usd: float,
         reduce_only: bool = False, limit_price: str | None = None,

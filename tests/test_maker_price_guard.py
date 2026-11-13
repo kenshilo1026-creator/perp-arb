@@ -1,5 +1,7 @@
 import asyncio
 import unittest
+import tempfile
+from pathlib import Path
 from decimal import Decimal as D
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -12,6 +14,56 @@ from hydra_basis.execution_engine.maker_price_guard import (
 )
 from hydra_basis.execution_engine.state_machine import ExecutionStateMachine
 from scripts.run_spot_perp_arbitrage import build_spot_perp_plan, execute_spot_perp_plan
+
+
+class ImprovedMakerPriceTests(unittest.IsolatedAsyncioTestCase):
+    async def test_live_syn_snapshot_best_bid_passes_but_full_clip_vwap_exceeds_limit(self):
+        # Public WS observation on 2026-11-13: top bid cannot fill 1,000 SYN.
+        book = {"bid": "0.11808", "ask": "0.1182", "age_ms": 0,
+                "bids": [("0.11808", "356.3"), ("0.11806", "43.9"),
+                         ("0.11804", "328.5"), ("0.11802", "359.3")]}
+        guard = MakerPriceGuard(fetch_books=AsyncMock(return_value=({}, book)),
+                               tick_size=AsyncMock(return_value="0.0001"),
+                               maker_side="BUY", taker_side="SELL", quantity=D("1000"))
+        self.assertLess(adverse_price_gap(D("0.1183"), D(book["bid"]), "BUY"), D("0.002"))
+        self.assertEqual(guard.taker_price(book), D("0.118049704"))
+        with self.assertRaisesRegex(MakerPriceRecheck, "0.2116%"):
+            await guard.check("0.1183")
+
+    async def test_one_tick_improvement_respects_passivity_and_adverse_gap(self):
+        cases = [
+            ("BUY", "0.1187", "0.1191", "0.1187", "0.1188"),
+            ("SELL", "0.1187", "0.1191", "0.1191", "0.1190"),
+            # One-tick spread: stay passive rather than cross the book.
+            ("BUY", "0.1187", "0.1188", "0.1187", "0.1187"),
+            ("SELL", "0.1187", "0.1188", "0.1188", "0.1188"),
+            # The cross-venue 0.2% band takes precedence over improving priority.
+            ("BUY", "0.1187", "0.1191", "0.1185", "0.1187"),
+            ("SELL", "0.1183", "0.1187", "0.1189", "0.1187"),
+        ]
+        for side, bid, ask, taker_price, expected in cases:
+            with self.subTest(side=side, bid=bid, ask=ask, taker=taker_price):
+                guard = MakerPriceGuard(
+                    fetch_books=AsyncMock(return_value=({"bid": bid, "ask": ask},
+                        {"bid": taker_price, "ask": taker_price})),
+                    tick_size=AsyncMock(return_value="0.0001"), maker_side=side,
+                    taker_side="SELL" if side == "BUY" else "BUY", improve_maker_by_one_tick=True)
+                price = D(await guard.prepare(bid if side == "BUY" else ask))
+                self.assertEqual(price, D(expected))
+                self.assertLess(adverse_price_gap(price, D(taker_price), side), D("0.002"))
+                self.assertTrue(price < D(ask) if side == "BUY" else price > D(bid))
+
+    async def test_replacements_use_current_book_and_exchange_tick_without_accumulation(self):
+        books = AsyncMock(return_value=({"bid": "0.11870", "ask": "0.11910"},
+                                       {"bid": "0.11870", "ask": "0.11910"}))
+        guard = MakerPriceGuard(fetch_books=books, tick_size=AsyncMock(return_value="0.00001"),
+                               maker_side="BUY", taker_side="SELL", improve_maker_by_one_tick=True)
+        first = await guard.prepare("0.11870")
+        self.assertEqual(D(first), D("0.11871"))
+        self.assertEqual(await guard.prepare(first), first)
+        books.return_value = ({"bid": "0.11880", "ask": "0.11910"},
+                              {"bid": "0.11880", "ask": "0.11910"})
+        self.assertEqual(D(await guard.prepare(first)), D("0.11881"))
 
 
 class PriceBandTests(unittest.TestCase):
@@ -49,6 +101,11 @@ class PriceBandTests(unittest.TestCase):
 
 
 class GuardExecutionTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        directory = self.enterContext(tempfile.TemporaryDirectory())
+        self.enterContext(patch("hydra_basis.execution_engine.execution_trace.TRACE_PATH",
+                                Path(directory) / "test_timing.jsonl"))
+
     def guard(self, fetch, side="BUY"):
         return MakerPriceGuard(fetch_books=fetch, tick_size=AsyncMock(return_value="0.0001"),
                                maker_side=side, taker_side="SELL" if side == "BUY" else "BUY",
@@ -197,6 +254,13 @@ class GuardExecutionTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(prices, ["0.2276"])
                 self.assertEqual(amounts, [qty])
                 self.assertEqual(result["executed_quantity"], qty)
+                timing = result["execution_timing"]
+                self.assertEqual(timing["maker_confirmation_source"], "reconciled")
+                self.assertIsNone(timing["maker_observed_to_hedge_call_ms"])
+                self.assertGreaterEqual(timing["maker_resolved_to_hedge_call_ms"], 0)
+                stages = [e["stage"] for e in result["execution_trace"]["events"]]
+                self.assertIn("maker.cancel_with_retries.start", stages)
+                self.assertLess(stages.index("maker.cancel_with_retries.end"), stages.index("maker.fill_resolved"))
 
     async def test_cancel_failure_never_replaces_or_hedges(self):
         with patch("hydra_basis.execution_engine.executor.asyncio.sleep", new=AsyncMock()):
@@ -222,7 +286,8 @@ class GuardExecutionTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_spot_perp_open_allows_favourable_gap_and_close_caps_adverse_gap(self):
         for mode, spot, perp, expected in (
-            ("open", {"bid": 0.0999, "ask": 0.1}, {"bid": 1.09, "ask": 1.1}, "1.1000"),
+            ("open", {"bid": 0.0999, "ask": 0.1}, {"bid": 1.09, "ask": 1.1}, "1.0999"),
+            ("close", {"bid": 0.1187, "ask": 0.1189}, {"bid": 0.1187, "ask": 0.1191}, "0.1188"),
             ("close", {"bid": 0.2262, "ask": 0.2263}, {"bid": 0.2276, "ask": 0.228}, "0.2266"),
         ):
             with self.subTest(mode=mode):

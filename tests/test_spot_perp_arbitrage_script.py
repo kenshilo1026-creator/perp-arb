@@ -830,7 +830,7 @@ class SpotPerpArbitrageRecordingTests(unittest.IsolatedAsyncioTestCase):
                 "binance_spot:place_market",
             ],
         )
-        self.assertEqual(prices, ["10.1", "11.1"])
+        self.assertEqual(prices, ["10.09", "11.09"])
 
 
     async def test_maker_timeout_retries_transient_cancel_before_replacing_order(self) -> None:
@@ -1705,7 +1705,7 @@ class SpotPerpArbitrageRecordingTests(unittest.IsolatedAsyncioTestCase):
                 )
 
         self.assertTrue(result["ok"])
-        self.assertEqual(prices, ["10.09"])
+        self.assertEqual(prices, ["10.08"])
 
 
     async def test_open_execution_records_live_spot_and_perp_legs(self) -> None:

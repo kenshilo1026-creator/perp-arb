@@ -1,0 +1,120 @@
+{
+  "symbol": "SYN",
+  "total_per_snapshot": "1000",
+  "maker": "aster BUY",
+  "taker": "binance SELL",
+  "public_filters": {
+    "binance": {
+      "PRICE_FILTER": {
+        "filterType": "PRICE_FILTER",
+        "minPrice": "0.00001000",
+        "maxPrice": "1000.00000000",
+        "tickSize": "0.00001000"
+      },
+      "LOT_SIZE": {
+        "filterType": "LOT_SIZE",
+        "minQty": "0.10000000",
+        "maxQty": "92141578.00000000",
+        "stepSize": "0.10000000"
+      },
+      "ICEBERG_PARTS": {
+        "filterType": "ICEBERG_PARTS",
+        "limit": 100
+      },
+      "MARKET_LOT_SIZE": {
+        "filterType": "MARKET_LOT_SIZE",
+        "minQty": "0.00000000",
+        "maxQty": "13373.01583333",
+        "stepSize": "0.00000000"
+      },
+      "TRAILING_DELTA": {
+        "filterType": "TRAILING_DELTA",
+        "minTrailingAboveDelta": 10,
+        "maxTrailingAboveDelta": 2000,
+        "minTrailingBelowDelta": 10,
+        "maxTrailingBelowDelta": 2000
+      },
+      "PERCENT_PRICE_BY_SIDE": {
+        "filterType": "PERCENT_PRICE_BY_SIDE",
+        "bidMultiplierUp": "1.2",
+        "bidMultiplierDown": "0.5",
+        "askMultiplierUp": "2",
+        "askMultiplierDown": "0.8",
+        "avgPriceMins": 5
+      },
+      "NOTIONAL": {
+        "filterType": "NOTIONAL",
+        "minNotional": "5.00000000",
+        "applyMinToMarket": true,
+        "maxNotional": "9000000.00000000",
+        "applyMaxToMarket": false,
+        "avgPriceMins": 5
+      },
+      "MAX_NUM_ORDERS": {
+        "filterType": "MAX_NUM_ORDERS",
+        "maxNumOrders": 200
+      },
+      "MAX_NUM_ORDER_LISTS": {
+        "filterType": "MAX_NUM_ORDER_LISTS",
+        "maxNumOrderLists": 20
+      },
+      "MAX_NUM_ALGO_ORDERS": {
+        "filterType": "MAX_NUM_ALGO_ORDERS",
+        "maxNumAlgoOrders": 5
+      },
+      "MAX_NUM_ORDER_AMENDS": {
+        "filterType": "MAX_NUM_ORDER_AMENDS",
+        "maxNumOrderAmends": 10
+      }
+    },
+    "aster": {
+      "PRICE_FILTER": {
+        "minPrice": "0.0001000",
+        "maxPrice": "200",
+        "filterType": "PRICE_FILTER",
+        "tickSize": "0.0001000"
+      },
+      "LOT_SIZE": {
+        "stepSize": "1",
+        "filterType": "LOT_SIZE",
+        "maxQty": "12000000",
+        "minQty": "1"
+      },
+      "MARKET_LOT_SIZE": {
+        "stepSize": "1",
+        "filterType": "MARKET_LOT_SIZE",
+        "maxQty": "1200000",
+        "minQty": "1"
+      },
+      "MAX_NUM_ORDERS": {
+        "limit": 200,
+        "filterType": "MAX_NUM_ORDERS"
+      },
+      "MAX_NUM_ALGO_ORDERS": {
+        "limit": 10,
+        "filterType": "MAX_NUM_ALGO_ORDERS"
+      },
+      "MIN_NOTIONAL": {
+        "notional": "5",
+        "filterType": "MIN_NOTIONAL"
+      },
+      "PERCENT_PRICE": {
+        "multiplierDown": "0.9000",
+        "multiplierUp": "1.1000",
+        "ltMultiplierDown": "0.9000",
+        "multiplierDecimal": "4",
+        "filterType": "PERCENT_PRICE",
+        "ltMultiplierUp": "1.1000"
+      }
+    }
+  },
+  "samples": 3114,
+  "full_size": 3098,
+  "reduced": 16,
+  "wait": 0,
+  "errors": [],
+  "max_gap": "0.001999922011239449979731990733",
+  "min_nonzero_size": "347.00000000",
+  "max_size": "1000.00000000",
+  "note": "Independent snapshot sizing replay, no fill or profitability simulation and no real orders."
+}

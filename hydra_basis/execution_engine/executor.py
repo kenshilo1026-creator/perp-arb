@@ -4,6 +4,7 @@ import asyncio
 from decimal import Decimal
 import inspect
 import time
+from hydra_basis.execution_engine.execution_trace import mark, observation, timed_stage, traced_execution
 from typing import Awaitable, Callable
 
 from hydra_basis.execution_engine.order_fill import extract_filled_quantity
@@ -411,6 +412,7 @@ def resolve_executed_quantity(
     return requested_quantity
 
 
+@timed_stage("maker.fill_wait")
 async def wait_for_maker_fill(
     maker_adapter,
     *,
@@ -454,6 +456,7 @@ async def wait_for_maker_fill(
     )
 
 
+@timed_stage("maker.cancel_attempt")
 async def cancel_maker_order(
     maker_adapter,
     *,
@@ -478,6 +481,7 @@ async def cancel_maker_order(
     return result
 
 
+@timed_stage("maker.cancel_with_retries")
 async def cancel_maker_order_with_retries(
     maker_adapter,
     *,
@@ -544,6 +548,7 @@ async def execute_single_clip(
     maker_reduce_only: bool = False,
     taker_reduce_only: bool = False,
     verify_hedge_fill: bool = False,
+    require_balanced_positions: bool = True,
     maker_market_type: str = "perp",
     taker_market_type: str = "perp",
 ) -> dict[str, object]:
@@ -582,10 +587,12 @@ async def execute_single_clip(
         maker_reduce_only=maker_reduce_only,
         taker_reduce_only=taker_reduce_only,
         verify_hedge_fill=verify_hedge_fill,
+        require_balanced_positions=require_balanced_positions,
         maker_market_type=maker_market_type, taker_market_type=taker_market_type,
     )
 
 
+@traced_execution
 async def execute_single_clip_with_sides(
     *,
     symbol: str,
@@ -617,6 +624,7 @@ async def execute_single_clip_with_sides(
     maker_reduce_only: bool = False,
     taker_reduce_only: bool = False,
     verify_hedge_fill: bool = False,
+    require_balanced_positions: bool = True,
     maker_market_type: str = "perp",
     taker_market_type: str = "perp",
 ) -> dict[str, object]:
@@ -698,7 +706,10 @@ async def execute_single_clip_with_sides(
             position_quantity(maker_adapter, symbol, market_type=maker_market_type),
             position_quantity(taker_adapter, symbol, market_type=taker_market_type),
         )
-        if abs(maker_position_baseline + taker_position_baseline) > max(
+        # Manual-sized spot/perp execution may preserve an existing imbalance.
+        # Always keep both baselines: fill verification still checks this clip's
+        # actual position deltas, without trading the historical difference.
+        if require_balanced_positions and abs(maker_position_baseline + taker_position_baseline) > max(
             Decimal(str(quantity)) * Decimal("0.001"), Decimal("0.00000001")
         ):
             raise RuntimeError("FAIL-CLOSED existing position imbalance before maker dispatch: "
@@ -796,7 +807,9 @@ async def execute_single_clip_with_sides(
                             Decimal(guarded_price), taker_pre_price, maker_side)),
                     }
                 maker_submission_started = True
+                mark("maker.dispatch", attempt=maker_attempt + 1)
                 maker_result = await maker_adapter.place_limit_order(**maker_kwargs)
+                observation("maker.submit_returned", maker_result)
                 attempt_record["maker_result"] = maker_result
                 # If the order was placed without an explicit price (e.g. variational Mid click),
                 # capture the actual price used so reprice comparisons have a baseline.
@@ -1130,8 +1143,10 @@ async def execute_single_clip_with_sides(
         raise RuntimeError("maker order was not submitted")
 
     fill_observation = maker_fill_result or {}
-    maker_observed_ns = fill_observation.get("observed_monotonic_ns", time.monotonic_ns())
+    maker_observed_ns = fill_observation.get("observed_monotonic_ns")
     maker_confirmation_source = fill_observation.get("source", "reconciled")
+    observation("maker.fill_resolved", fill_observation)
+    maker_resolved_ns = time.monotonic_ns()
     requested_quantity = Decimal(str(quantity))
     executed_quantity = resolve_executed_quantity(
         requested_quantity=requested_quantity,
@@ -1372,10 +1387,12 @@ async def execute_single_clip_with_sides(
             execution_timing = {
                 "maker_confirmation_source": maker_confirmation_source,
                 "hedge_confirmation_source": hedge_result.get("source", "rest"),
-                "maker_observed_to_hedge_call_ms": (first_hedge_call_ns - maker_observed_ns) / 1_000_000,
+                "maker_observed_to_hedge_call_ms": ((first_hedge_call_ns - maker_observed_ns) / 1_000_000
+                                                    if maker_observed_ns is not None else None),
+                "maker_resolved_to_hedge_call_ms": (first_hedge_call_ns - maker_resolved_ns) / 1_000_000,
                 "hedge_call_duration_ms": (hedge_returned_ns - first_hedge_call_ns) / 1_000_000,
             }
-            if hedge_result.get("first_submit_ns") is not None:
+            if hedge_result.get("first_submit_ns") is not None and maker_observed_ns is not None:
                 execution_timing["maker_observed_to_submit_ms"] = (hedge_result["first_submit_ns"] - maker_observed_ns) / 1_000_000
             if verify_hedge_fill:
                 await confirm_pair_execution(

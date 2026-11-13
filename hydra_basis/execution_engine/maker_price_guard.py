@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from hydra_basis.execution_engine.execution_trace import mark
 from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR, ROUND_HALF_UP
 from typing import Awaitable, Callable
 from hydra_basis.execution_engine.mexc_depth_stream import DepthQuoteUnavailable
@@ -18,7 +19,7 @@ class MakerPriceRecheck(RuntimeError):
 
 
 async def create_maker_guard(*, maker_adapter, taker_adapter, symbol, fetch_books,
-                             maker_side, taker_side, quantity):
+                             maker_side, taker_side, quantity, improve_maker_by_one_tick=False):
     """Only prices a resting maker. It must never gate a hedge after a fill."""
     tick = getattr(maker_adapter, "get_price_tick_size", None)
     if not callable(tick):
@@ -61,6 +62,7 @@ async def create_maker_guard(*, maker_adapter, taker_adapter, symbol, fetch_book
 
     return MakerPriceGuard(fetch_books=books, tick_size=lambda: tick(symbol),
         maker_side=maker_side, taker_side=taker_side, quantity=quantity,
+        improve_maker_by_one_tick=improve_maker_by_one_tick,
         fetch_taker_book=taker_quote if callable(taker_quote) else None,
         wait_for_update=getattr(taker_adapter, "wait_for_hedge_quote", None), prepare_books=ready_books)
 
@@ -106,7 +108,8 @@ class MakerPriceGuard:
                  taker_side: str, max_gap: Decimal = MAKER_TAKER_MAX_GAP,
                  check_seconds: float = MAKER_PRICE_CHECK_SECONDS,
                  quantity: Decimal | None = None,
-                 fetch_taker_book=None, wait_for_update=None, prepare_books=None) -> None:
+                 fetch_taker_book=None, wait_for_update=None, prepare_books=None,
+                 improve_maker_by_one_tick: bool = False) -> None:
         self.fetch_books = fetch_books
         self.tick_size = tick_size
         self.maker_side = maker_side
@@ -117,6 +120,7 @@ class MakerPriceGuard:
         self.fetch_taker_book = fetch_taker_book
         self.wait_for_update = wait_for_update
         self.prepare_books = prepare_books
+        self.improve_maker_by_one_tick = improve_maker_by_one_tick
         self.taker_book: dict | None = None
         if {maker_side.upper(), taker_side.upper()} != {"BUY", "SELL"}:
             raise ValueError("maker price guard requires opposite BUY/SELL sides")
@@ -167,12 +171,23 @@ class MakerPriceGuard:
     async def prepare(self, desired: str) -> str:
         tick = Decimal(await self.tick_size())
         maker, taker = await self.prepare_books() if self.prepare_books is not None else await self._books()
+        target = Decimal(desired)
+        if self.improve_maker_by_one_tick:
+            # Rebase on the latest book for every submission/replacement;
+            # never keep adding ticks to a previous order's price.
+            target = (Decimal(str(maker["bid"])) + tick if self.maker_side.upper() == "BUY"
+                      else Decimal(str(maker["ask"])) - tick)
         price = bounded_maker_price(
-            desired=Decimal(desired), taker=self.taker_price(taker),
+            desired=target, taker=self.taker_price(taker),
             bid=Decimal(str(maker["bid"])), ask=Decimal(str(maker["ask"])),
             side=self.maker_side, tick=tick, max_gap=self.max_gap,
         )
         self.taker_book = taker
+        hedge_price = self.taker_price(taker)
+        mark("maker.pre_submit_quote", maker_price=str(price), hedge_vwap=str(hedge_price),
+             gap=str(adverse_price_gap(price, hedge_price, self.maker_side)),
+             quote_age_ms=taker.get("age_ms"), quote_source_ms=taker.get("ts_ms"),
+             quantity=str(self.quantity) if self.quantity is not None else None)
         if price != Decimal(desired):
             print(f"[maker-band] price {desired} -> {price}; max gap={self.max_gap:.2%}", flush=True)
         return format(price, "f")
@@ -189,6 +204,9 @@ class MakerPriceGuard:
         except Exception as exc:
             raise MakerPriceRecheck(f"maker quote unavailable; cancel before refresh: {exc}") from exc
         gap = adverse_price_gap(maker, taker, self.maker_side)
+        mark("maker.gap_check", maker_price=str(maker), hedge_vwap=str(taker), gap=str(gap),
+             quote_age_ms=book.get("age_ms"), quote_source_ms=book.get("ts_ms"),
+             quantity=str(self.quantity) if self.quantity is not None else None)
         if gap >= self.max_gap:
             raise MakerPriceRecheck(
                 f"adverse maker/taker gap {gap:.4%} > {self.max_gap:.2%}: maker={maker} taker={taker}"

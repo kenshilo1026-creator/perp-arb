@@ -9,8 +9,18 @@ from decimal import Decimal
 import aiohttp
 
 from .aster_depth_stream import AsterDepthStream
-from .mexc_depth_stream import decode_rest_depth
+from .mexc_depth_stream import decode_rest_depth, DepthQuoteUnavailable
 from .order_stream import OrderEventStream, OrderStreamError, format_stream_error
+
+
+def binance_error_hint(code):
+    # Static diagnostics only: never echo a signed request or server message.
+    return {
+        -1022: "invalid signature; check matching HMAC API key/secret in .env",
+        -1021: "timestamp outside recvWindow; check clock synchronization",
+        -2014: "invalid API key format",
+        -2015: "API key, IP restriction or permissions rejected",
+    }.get(code, "request rejected; see Binance error code")
 
 
 def decode_binance_order(payload: dict) -> dict | None:
@@ -63,8 +73,12 @@ class BinanceOrderEventStream(OrderEventStream):
                     if payload.get("id") == request["id"]:
                         if payload.get("status") != 200:
                             # Do not retain server text that might echo signed parameters.
+                            error = payload.get("error") or {}
+                            code = error.get("code") if isinstance(error, dict) else None
+                            if type(code) is not int:
+                                code = None
                             raise OrderStreamError("binance_spot subscription", http_status=payload.get("status"),
-                                                   reason="signed subscription rejected")
+                                                   payload={"code": code}, reason=binance_error_hint(code))
                         sid = (payload.get("result") or {}).get("subscriptionId")
                         if type(sid) is not int or sid < 0:
                             raise OrderStreamError("binance_spot subscription", reason="missing subscription ID")
@@ -87,6 +101,32 @@ class BinanceOrderEventStream(OrderEventStream):
 class BinanceSpotDepthStream(AsterDepthStream):
     """Full top-20 snapshots plus BBO warnings; never stitch partial books."""
     venue = "binance_spot"
+
+    async def start(self):
+        try:
+            async with asyncio.timeout(10):
+                self._ws = await self.connect()
+                self.healthy = True
+                self._tasks = [asyncio.create_task(self._read())]
+                if self.fetch_snapshot is not None:
+                    self._tasks.append(asyncio.create_task(self._rest_fallback()))
+                while True:
+                    if not self.healthy:
+                        raise self.unavailable("subscription_unavailable")
+                    try:
+                        self.snapshot()
+                        return
+                    except DepthQuoteUnavailable:
+                        await self._changed.wait()
+        except BaseException:
+            await self.close()
+            raise
+
+    async def _rest_fallback(self):
+        # Give the first WS frame a head start. Only refresh missing/quiet
+        # depth, using the shared request-start freshness and version checks.
+        await asyncio.sleep(0.15)
+        await super()._rest_fallback()
 
     def publish(self, book):
         # Binance partial-depth frames have no exchange timestamp. A newly

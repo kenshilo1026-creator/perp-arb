@@ -1,0 +1,57 @@
+{
+  "samples": 3114,
+  "duration_seconds": 180,
+  "counts": {
+    "independently_verified": 3092,
+    "vwap_mismatches": 0,
+    "effective_price_mismatches": 0,
+    "gap_mismatches": 0
+  },
+  "simulated_cancels": [
+    {
+      "hk_time": "2026-11-13T16:33:30.712000+08:00",
+      "hypothetical_maker_price": "0.1183000",
+      "binance_best_bid": "0.11808000",
+      "binance_depth_vwap": "0.1180497040000000",
+      "guard_price": "0.1180497040000000",
+      "top_bid_gap_pct": "0.1859678782755705832628909552",
+      "guard_gap_pct": "0.2115773457311918850380388842",
+      "depth_age_ms": 0.0,
+      "source": "binance_partial_depth_ws"
+    },
+    {
+      "hk_time": "2026-11-13T16:33:31.456000+08:00",
+      "hypothetical_maker_price": "0.1183000",
+      "binance_best_bid": "0.11808000",
+      "binance_depth_vwap": "0.1180502380000000",
+      "guard_price": "0.1180502380000000",
+      "top_bid_gap_pct": "0.1859678782755705832628909552",
+      "guard_gap_pct": "0.2111259509721048182586644125",
+      "depth_age_ms": 47.00000025331974,
+      "source": "binance_partial_depth_ws"
+    },
+    {
+      "hk_time": "2026-11-13T16:33:45.570000+08:00",
+      "hypothetical_maker_price": "0.1183000",
+      "binance_best_bid": "0.11795000",
+      "binance_depth_vwap": "0.1181054620000000",
+      "guard_price": "0.11795000",
+      "top_bid_gap_pct": "0.2958579881656804733727810651",
+      "guard_gap_pct": "0.2958579881656804733727810651",
+      "depth_age_ms": 156.0000004246831,
+      "source": "rest"
+    },
+    {
+      "hk_time": "2026-11-13T16:33:55.777000+08:00",
+      "hypothetical_maker_price": "0.1181000",
+      "binance_best_bid": "0.11785000",
+      "binance_depth_vwap": "0.1179785000000000",
+      "guard_price": "0.11785000",
+      "top_bid_gap_pct": "0.2116850127011007620660457240",
+      "guard_gap_pct": "0.2116850127011007620660457240",
+      "depth_age_ms": 218.9999995753169,
+      "source": "rest"
+    }
+  ],
+  "note": "Read-only public data. Hypothetical order prices, 300ms replacement assumption, no fill model or actual trading."
+}

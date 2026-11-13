@@ -16,6 +16,14 @@ def plan():
 
 
 class SummaryTests(unittest.TestCase):
+    def test_reconciled_without_original_timestamp_is_unknown_not_zero(self):
+        lines = format_spot_perp_execution_summary(plan=plan(), result={
+            "execution_timing": {"maker_confirmation_source": "reconciled",
+                "maker_observed_to_hedge_call_ms": None, "hedge_call_duration_ms": 79,
+                "maker_resolved_to_hedge_call_ms": 0.1}})
+        self.assertTrue(any("觀測成交 → 呼叫對沖 未知" in line for line in lines))
+        self.assertTrue(any("不含此前查單／撤單等待" in line for line in lines))
+
     def test_reports_close_buy_and_actual_04284_percent(self):
         lines = format_spot_perp_execution_summary(plan=plan(), result={
             "execution_price_summary": {"maker_avg_price": "0.2101", "taker_avg_price": "0.2092"}})
@@ -71,6 +79,8 @@ class LatencyTests(unittest.IsolatedAsyncioTestCase):
         async def execute(**kwargs):
             self.assertEqual(events, ["prepared", "connected", "subscribed", "hedge_subscribed"])
             self.assertEqual(kwargs["maker_fill_poll_interval_seconds"], 0.2)
+            self.assertTrue(kwargs["verify_hedge_fill"])
+            self.assertFalse(kwargs["require_balanced_positions"])
             return {"ok": True}
         maker = SimpleNamespace(prepare_execution=prepare, place_limit_order=AsyncMock(),
                                 prepare_maker_fill_stream=stream)

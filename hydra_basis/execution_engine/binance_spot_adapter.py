@@ -6,13 +6,14 @@ import hashlib
 import hmac
 import os
 import time
+from hydra_basis.execution_engine.execution_trace import mark, timed_stage
 from contextlib import asynccontextmanager
 from decimal import Decimal
 from urllib.parse import urlencode
 
 import aiohttp
 
-from hydra_basis.execution_engine.binance_spot_stream import BinanceSpotDepthStream, BinanceOrderEventStream
+from hydra_basis.execution_engine.binance_spot_stream import BinanceSpotDepthStream, BinanceOrderEventStream, binance_error_hint
 
 from hydra_basis.symbol_mapping import canonicalize_symbol, venue_symbol
 from hydra_basis.execution_engine.order_fill import poll_until_filled
@@ -39,8 +40,10 @@ class BinanceSpotAPIError(OrderStreamError):
     def __init__(self, method, path, status, payload):
         self.http_status = status
         self.code = payload.get("code") if isinstance(payload, dict) else None
+        if type(self.code) is not int:
+            self.code = None
         super().__init__(f"binance_spot {method} {path}", http_status=status,
-                         payload={"code": self.code}, reason="request rejected; see Binance error code")
+                         payload={"code": self.code}, reason=binance_error_hint(self.code))
 
 
 class BinanceSpotExecutionAdapter:
@@ -192,6 +195,7 @@ class BinanceSpotExecutionAdapter:
             return order_data
         return {**order_data, **status}
 
+    @timed_stage("binance_spot.market_order")
     async def place_market_order(
         self, *, symbol: str, side: str, amount: str, clip_usd: float
     ) -> dict:
@@ -230,6 +234,7 @@ class BinanceSpotExecutionAdapter:
                     "post_order_status_ms": (time.monotonic_ns() - submitted) / 1_000_000 if needs_status else 0,
                     "status_query_performed": queried}}
 
+    @timed_stage("binance_spot.limit_order")
     async def place_limit_order(
         self, *, symbol: str, side: str, amount: str, clip_usd: float, price: str, post_only: bool = False
     ) -> dict:
@@ -389,13 +394,16 @@ class BinanceSpotExecutionAdapter:
         self._ensure_credentials()
         return {"X-MBX-APIKEY": self.api_key}
 
+    @timed_stage("binance_spot.request")
     async def _request(self, method, path, params=None, *, signed=True):
         if time.monotonic() < self._blocked_until:
             raise BinanceSpotAPIError(method, path, 429, {})
         values = self._signed_order_params(params or {}) if signed else (params or {})
         headers = self._order_headers() if signed else {}
+        # Only a fixed API path/method, never the signed query or request body.
         try:
             async with self._request_session() as session:
+                mark("binance_spot.http_dispatch", method=method, path=path.split("?")[0])
                 async with session.request(method, f"{self.BASE_URL}{path}", params=values,
                         headers=headers, timeout=aiohttp.ClientTimeout(total=10), allow_redirects=False) as response:
                     if response.status in (418, 429):
@@ -429,6 +437,11 @@ class BinanceSpotExecutionAdapter:
     async def prepare_execution(self, symbol):
         self._ensure_credentials()
         await self.warm_up()
+        # Public metadata cannot validate credentials. Fail here, before the
+        # other venue can submit a maker, if even signed account reads fail.
+        account = await self._get_account()
+        if account.get("canTrade") is not True:
+            raise RuntimeError("Binance spot account cannot trade; check account/API permissions")
         await self._load_symbol_rules(symbol)
 
     @staticmethod
@@ -459,6 +472,7 @@ class BinanceSpotExecutionAdapter:
                                     "raw": {"clientOrderId": client_id, "symbol": params["symbol"]}}
             raise
 
+    @timed_stage("binance_spot.order_query")
     async def _get_order(self, params: dict) -> dict:
         values = self._identity_params(params)
         data = await self._request("GET", "/api/v3/order", values)
@@ -537,6 +551,16 @@ class BinanceSpotExecutionAdapter:
         self.last_base_asset_fee = total
         return -total
 
+    def reset_completed_batch_accounting(self):
+        """Call only after a batch is fully verified, before taking a new baseline.
+
+        Reused WS/session state survives; earlier fees are already reflected in
+        the next batch's live balance and must not be subtracted a second time.
+        """
+        self._submitted_orders.clear()
+        self._fee_cache.clear()
+        self.last_base_asset_fee = Decimal(0)
+
     def minimum_order_notional(self, symbol, *, market):
         filters = self._symbol_rules[self._spot_symbol(symbol)]["filters"]
         minimum = Decimal(0)
@@ -612,8 +636,16 @@ class BinanceSpotExecutionAdapter:
             async with self._request_session() as session:
                 streams = f"{native.lower()}@depth20@100ms/{native.lower()}@bookTicker"
                 return await session.ws_connect(f"wss://stream.binance.com:9443/stream?streams={streams}", heartbeat=20)
-        stream = BinanceSpotDepthStream(connect=connect, symbol=native)
-        await stream.fresh_snapshot()
+        async def fetch_snapshot():
+            return await self._request("GET", "/api/v3/depth", {"symbol": native, "limit": 20}, signed=False)
+        stream = BinanceSpotDepthStream(connect=connect, symbol=native, fetch_snapshot=fetch_snapshot)
+        try:
+            # Cold DNS/TLS and the first book get a separate startup budget.
+            # Cached quotes still expire after 1s; runtime recovery stays 2.5s.
+            await stream.fresh_snapshot(timeout_seconds=10)
+        except BaseException:
+            await stream.close()
+            raise
         self._hedge_depth = stream
 
     def _subscription_request(self):

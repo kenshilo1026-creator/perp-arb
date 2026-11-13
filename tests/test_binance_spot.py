@@ -156,6 +156,21 @@ class BinanceSpotAsyncTests(unittest.IsolatedAsyncioTestCase):
             await confirm_pair_execution(a, perp, symbol="ETH", maker_baseline=D(0), taker_baseline=D(0),
                                          maker_side="BUY", quantity=D("0.01"), maker_market_type="spot", attempts=1)
 
+    async def test_shared_adapter_resets_only_completed_batch_fee_accounting(self):
+        a = adapter()
+        session, stream = object(), object()
+        a._session, a._fill_stream = session, stream
+        a._submitted_orders["7"] = "ETHUSDT"
+        a._fee_cache["7"] = D("0.00001")
+        self.assertEqual(await a.execution_position_adjustment("ETH"), D("-0.00001"))
+        a.reset_completed_batch_accounting()
+        a._submitted_orders["8"] = "ETHUSDT"
+        a._fee_cache["8"] = D("0.00002")
+        self.assertEqual(await a.execution_position_adjustment("ETH"), D("-0.00002"))
+        self.assertIs(a._session, session)
+        self.assertIs(a._fill_stream, stream)
+        self.assertNotIn("7", a._submitted_orders)
+
     async def test_fee_history_must_cover_exact_order_fill(self):
         a = adapter()
         a._submitted_orders["7"] = "ETHUSDT"
@@ -240,10 +255,36 @@ class BinanceSpotAsyncTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_preparation_loads_binance_rules_and_time_before_dispatch(self):
         a = BinanceSpotExecutionAdapter(api_key="k", api_secret="s")
-        a._request = AsyncMock(side_effect=[{"serverTime": int(time.time()*1000)}, metadata()])
+        a._request = AsyncMock(side_effect=[{"serverTime": int(time.time()*1000)}, {"canTrade": True}, metadata()])
         await a.prepare_execution("ETH")
         self.assertEqual(await a.get_price_tick_size("ETH"), "0.01")
-        self.assertEqual([c.args[1] for c in a._request.call_args_list], ["/api/v3/time", "/api/v3/exchangeInfo"])
+        self.assertEqual([c.args[1] for c in a._request.call_args_list],
+                         ["/api/v3/time", "/api/v3/account", "/api/v3/exchangeInfo"])
+
+    async def test_invalid_credentials_stop_before_either_leg_submits(self):
+        from scripts.run_spot_perp_arbitrage import build_spot_perp_plan, execute_spot_perp_plan
+        a = adapter()
+        a.warm_up = AsyncMock()
+        a._get_account = AsyncMock(side_effect=BinanceSpotAPIError(
+            "GET", "/api/v3/account", 400, {"code": -1022, "msg": "test-secret"}))
+        a.place_market_order = AsyncMock()
+        maker = SimpleNamespace(prepare_execution=AsyncMock(), place_limit_order=AsyncMock(), close=AsyncMock())
+        plan = build_spot_perp_plan(symbol="ETH", mode="close", short_venue="aster", quantity=D("0.01"),
+            clip_usd=None, spot_book={"bid": 2000, "ask": 2001}, perp_book={"bid": 2000, "ask": 2001})
+        with patch("scripts.run_spot_perp_arbitrage.build_spot_perp_adapter",
+                   side_effect=lambda venue, **kw: a if venue == "binance_spot" else maker):
+            with self.assertRaisesRegex(BinanceSpotAPIError, "code=-1022.*matching HMAC") as caught:
+                await execute_spot_perp_plan(plan=plan, leverage=1)
+        self.assertNotIn("test-secret", str(caught.exception))
+        maker.place_limit_order.assert_not_awaited()
+        a.place_market_order.assert_not_awaited()
+
+    async def test_preflight_rejects_account_without_trade_permission(self):
+        a = adapter()
+        a.warm_up = AsyncMock()
+        a._get_account = AsyncMock(return_value={"canTrade": False})
+        with self.assertRaisesRegex(RuntimeError, "cannot trade"):
+            await a.prepare_execution("ETH")
 
     async def test_user_ws_accepts_pre_ack_fill_and_never_double_counts(self):
         a = adapter()
@@ -264,12 +305,87 @@ class BinanceSpotAsyncTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_user_ws_auth_failure_closes_socket_and_does_not_leak_server_echo(self):
         a = adapter()
-        ws = FakeWS([{"id": "spot-orders", "status": 401, "error": {"msg": "test-secret"}}])
+        ws = FakeWS([{"id": "spot-orders", "status": 400, "error": {"code": -1022, "msg": "test-secret"}}])
         stream = BinanceOrderEventStream(connect=AsyncMock(return_value=ws), subscription=a._subscription_request)
         with self.assertRaises(OrderStreamError) as caught:
             await stream.start()
         self.assertNotIn("test-secret", str(caught.exception))
+        self.assertIn("code=-1022", str(caught.exception))
+        self.assertIn("matching HMAC", str(caught.exception))
         self.assertTrue(ws.closed)
+
+    async def test_cold_depth_connection_can_exceed_runtime_recovery_budget(self):
+        a = adapter()
+        payload = {"lastUpdateId": 1, "bids": [["2000", "1"]], "asks": [["2001", "1"]]}
+        ws = FakeWS([{"stream": "ethusdt@depth20@100ms", "data": payload}])
+        async def connect(*args, **kwargs):
+            await asyncio.sleep(2.6)
+            return ws
+        a._session = SimpleNamespace(closed=False, ws_connect=connect, close=AsyncMock())
+        a._request = AsyncMock(return_value=payload)
+        try:
+            await a.prepare_hedge_quotes("ETH")
+            self.assertEqual((await a.hedge_quote())["quote_source"], "binance_partial_depth_ws")
+            await asyncio.sleep(0.2)
+            a._request.assert_not_awaited()
+            a._hedge_depth._received = time.monotonic() - 1.01
+            with self.assertRaises(DepthQuoteUnavailable):
+                await a.hedge_quote()
+        finally:
+            await a.close()
+        self.assertTrue(ws.closed)
+
+    async def test_quiet_depth_bootstraps_from_rest_and_yields_to_newer_ws(self):
+        a = adapter()
+        ws = FakeWS([])
+        payload = {"lastUpdateId": 1, "bids": [["2000", "1"]], "asks": [["2001", "1"]]}
+        a._session = SimpleNamespace(closed=False, ws_connect=AsyncMock(return_value=ws), close=AsyncMock())
+        a._request = AsyncMock(return_value=payload)
+        try:
+            await a.prepare_hedge_quotes("ETH")
+            a._request.assert_awaited_once_with("GET", "/api/v3/depth", {"symbol": "ETHUSDT", "limit": 20}, signed=False)
+            stream = a._hedge_depth
+            self.assertEqual(stream.snapshot()["quote_source"], "rest")
+            # A slower REST response must not overwrite a newer WS update.
+            stream._received = time.monotonic() - 0.6
+            async def older_rest():
+                stream.publish({**decode_rest_depth({**payload, "lastUpdateId": 2}),
+                                "quote_source": "binance_partial_depth_ws"})
+                return payload
+            stream.fetch_snapshot = older_rest
+            with self.assertRaises(DepthQuoteUnavailable):
+                await stream._refresh_rest()
+            self.assertEqual(stream.snapshot()["version"], 2)
+        finally:
+            await a.close()
+        self.assertTrue(ws.closed)
+        self.assertFalse(stream._tasks)
+
+    async def test_slow_rest_snapshot_does_not_reset_freshness(self):
+        async def slow_fetch():
+            await asyncio.sleep(0.1)
+            return {"lastUpdateId": 1, "bids": [["2000", "1"]], "asks": [["2001", "1"]]}
+        stream = BinanceSpotDepthStream(connect=AsyncMock(), symbol="ETHUSDT",
+                                        max_age_seconds=0.05, fetch_snapshot=slow_fetch)
+        stream.healthy = True
+        with self.assertRaises(TimeoutError):
+            await stream._refresh_rest()
+        with self.assertRaises(DepthQuoteUnavailable):
+            stream.snapshot()
+
+    async def test_cancelled_start_closes_unassigned_depth_stream(self):
+        a = adapter()
+        ws = FakeWS([])
+        a._session = SimpleNamespace(closed=False, ws_connect=AsyncMock(return_value=ws), close=AsyncMock())
+        a._request = AsyncMock(side_effect=TimeoutError)
+        task = asyncio.create_task(a.prepare_hedge_quotes("ETH"))
+        await asyncio.sleep(0.2)
+        task.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+        self.assertTrue(ws.closed)
+        self.assertIsNone(a._hedge_depth)
+        await a.close()
 
     async def test_depth_ws_and_bbo_wake_guard_without_refreshing_old_depth(self):
         payload = {"lastUpdateId": 1, "bids": [["2000", "1"]], "asks": [["2001", "1"]]}

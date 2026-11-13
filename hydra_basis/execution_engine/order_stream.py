@@ -169,7 +169,9 @@ class OrderEventStream:
         self._changed.set()
         self._changed = asyncio.Event()
 
-    def publish(self, status):
+    def publish(self, status, *, received_ns=None, received_unix_ms=None):
+        received_ns = time.monotonic_ns() if received_ns is None else received_ns
+        received_unix_ms = time.time_ns() // 1_000_000 if received_unix_ms is None else received_unix_ms
         quantity = Decimal(str(status["executedQty"]))
         original = Decimal(str(status["origQty"]))
         if (not quantity.is_finite() or not original.is_finite()
@@ -189,7 +191,7 @@ class OrderEventStream:
             if quantity == Decimal(str(old["executedQty"])) and status["status"] == old["status"]:
                 return
         self._sequence += 1
-        self._cache[key] = (self._sequence, dict(status), time.monotonic_ns())
+        self._cache[key] = (self._sequence, {**status, "_received_unix_ms": received_unix_ms}, received_ns)
         self._cache.move_to_end(key)
         if len(self._cache) > 1024:
             removed, _ = self._cache.popitem(last=False)
@@ -197,6 +199,7 @@ class OrderEventStream:
         self._notify()
 
     def _handle(self, message):
+        received_ns, received_unix_ms = time.monotonic_ns(), time.time_ns() // 1_000_000
         if message.type == aiohttp.WSMsgType.TEXT:
             payload = json.loads(message.data)
             if self.channel:
@@ -212,7 +215,7 @@ class OrderEventStream:
         else:
             return False
         if status is not None:
-            self.publish(status)
+            self.publish(status, received_ns=received_ns, received_unix_ms=received_unix_ms)
         return False
 
     async def start(self):

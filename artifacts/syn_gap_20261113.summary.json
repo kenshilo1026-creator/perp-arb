@@ -1,0 +1,15 @@
+{
+  "symbol": "SYN",
+  "quantity": "1000",
+  "seconds": 60.0,
+  "tick": "0.0001000",
+  "simulation": "No orders. Reprice 300ms after a hypothetical cancel; no fill model.",
+  "counts": {
+    "hypothetical_submissions": 1,
+    "fresh_samples": 1025
+  },
+  "examples": {},
+  "guard_gap_min_pct": 0.005967959527824621,
+  "guard_gap_max_pct": 0.18638532883642495,
+  "capture": "C:\\Users\\kenho\\Documents\\learning\\perp-arb\\artifacts\\syn_gap_20261113.jsonl"
+}

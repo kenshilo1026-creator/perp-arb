@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from hydra_basis.execution_engine.execution_trace import timed_stage, observation
 from decimal import Decimal
 from typing import Awaitable, Callable
 
@@ -121,6 +122,7 @@ def terminal_fill_quantity(result: object) -> Decimal | None:
     return None
 
 
+@timed_stage("pair.position_confirmation")
 async def confirm_pair_execution(
     maker_adapter, taker_adapter, *, symbol: str, maker_baseline: Decimal,
     taker_baseline: Decimal, maker_side: str, quantity: Decimal,
@@ -158,6 +160,7 @@ async def confirm_pair_execution(
     raise RuntimeError(f"FAIL-CLOSED hedge live position confirmation failed: {last}")
 
 
+@timed_stage("order.terminal_reconciliation")
 async def wait_for_terminal_order(
     fetch_status: Callable[[], Awaitable[dict]], *, initial: dict | None = None,
     attempts: int = 20, poll_delay: float = 0.5,
@@ -181,6 +184,7 @@ async def wait_for_terminal_order(
                        f"last_status={result} last_error={last_error}")
 
 
+@timed_stage("hedge.dispatch_and_confirm")
 async def execute_confirmed_market_order(
     adapter, *, symbol: str, side: str, quantity: Decimal, clip_usd: float,
     baseline: Decimal, reduce_only: bool = False, max_attempts: int = 3,
@@ -248,6 +252,7 @@ async def execute_confirmed_market_order(
             result = getattr(exc, "order_result", None)
         record = {"amount": str(remaining), "result": result, "error": error, "dispatch_ns": dispatch_ns}
         attempts.append(record)
+        observation("hedge.adapter_result", result)
         terminal_quantity = terminal_fill_quantity(result)
         if terminal_quantity is None:
             query = getattr(adapter, "get_order_execution", None)
@@ -292,6 +297,7 @@ async def execute_confirmed_market_order(
             if resolution.get("position_complete"):
                 return completed(source="live_position_delta")
             if "status" in resolution:
+                observation("hedge.terminal_confirmation", resolution["status"])
                 record["order_status"] = resolution["status"]
                 terminal_quantity = resolution["quantity"]
         if terminal_quantity is not None:

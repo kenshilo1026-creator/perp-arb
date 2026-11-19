@@ -4,7 +4,7 @@ import argparse
 import asyncio
 import math
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from decimal import Decimal
 from pathlib import Path
 
@@ -29,7 +29,7 @@ from hydra_basis.execution_engine.market_data import (
     fetch_binance_spot_orderbook,
     fetch_orderbook_snapshot,
 )
-from hydra_basis.execution_engine.maker_price_guard import MakerPriceGuard, create_maker_guard, adverse_price_gap
+from hydra_basis.execution_engine.maker_price_guard import MakerPriceGuard, create_maker_guard, adverse_price_gap, MakerGapTimeout, wait_for_quote_update, MAKER_TAKER_MAX_GAP
 from hydra_basis.execution_engine.binance_spot_adapter import BinanceSpotExecutionAdapter
 from hydra_basis.execution_engine.order_stream import prepare_private_order_streams
 from hydra_basis.execution_engine.order_service import Deps, progress_printer, run_batched_execution
@@ -54,6 +54,7 @@ from scripts.place_order import (
 load_environment()
 
 BINANCE_SPOT_VENUE = "binance_spot"
+GAP_WAIT_TIMEOUT_SECONDS = 60.0
 SUPPORTED_MODES = {"open", "close"}
 SUPPORTED_SHORT_VENUES = {"aster", "hyperliquid", "lighter", "variational"}
 LIVE_CONFIRMATION_PHRASE = "PLACE LIVE SPOT PERP ORDER"
@@ -212,24 +213,40 @@ def build_spot_perp_plan(
     clip_usd: float | None,
     spot_book: dict[str, float | int],
     perp_book: dict[str, float | int],
+    maker_venue_override: str | None = None,
 ) -> SpotPerpPlan:
     normalized_mode = normalize_mode(mode)
     normalized_short_venue = normalize_short_venue(short_venue)
-    spot_spread_pct = compute_spread_pct(spot_book)
-    perp_spread_pct = compute_spread_pct(perp_book)
-    preferred_maker = default_maker_for_pair(normalized_short_venue, BINANCE_SPOT_VENUE)
-    if preferred_maker is not None:
-        maker_venue, taker_venue = preferred_maker, BINANCE_SPOT_VENUE
-    else:
-        taker_venue = BINANCE_SPOT_VENUE if spot_spread_pct <= perp_spread_pct else normalized_short_venue
-        maker_venue = normalized_short_venue if taker_venue == BINANCE_SPOT_VENUE else BINANCE_SPOT_VENUE
+    spot_quote, perp_quote = spot_book.get("fast_quote") or spot_book, perp_book.get("fast_quote") or perp_book
+    spot_spread_pct = compute_spread_pct(spot_quote)
+    perp_spread_pct = compute_spread_pct(perp_quote)
     sides = spot_perp_sides(mode=normalized_mode)
     side_by_venue = {
         BINANCE_SPOT_VENUE: sides[BINANCE_SPOT_VENUE],
         normalized_short_venue: sides["perp"],
     }
+    preferred_maker = default_maker_for_pair(normalized_short_venue, BINANCE_SPOT_VENUE)
+    if normalized_short_venue == "aster":
+        quotes = {BINANCE_SPOT_VENUE: spot_quote, "aster": perp_quote}
+        def role_score(maker):
+            taker = BINANCE_SPOT_VENUE if maker == "aster" else "aster"
+            maker_price = Decimal(maker_limit_price(quotes[maker], side_by_venue[maker]))
+            taker_price = Decimal(taker_price_from_orderbook(quotes[taker], side_by_venue[taker]))
+            return adverse_price_gap(maker_price, taker_price, side_by_venue[maker]), compute_spread_pct(quotes[taker])
+        preferred_maker = min(("aster", BINANCE_SPOT_VENUE), key=role_score)
+    if maker_venue_override is not None:
+        if normalized_short_venue != "aster" or maker_venue_override not in {"aster", BINANCE_SPOT_VENUE}:
+            raise ValueError("maker role override is only supported for Aster/Binance")
+        preferred_maker = maker_venue_override
+    if preferred_maker is not None:
+        maker_venue = preferred_maker
+        taker_venue = BINANCE_SPOT_VENUE if maker_venue == normalized_short_venue else normalized_short_venue
+    else:
+        taker_venue = BINANCE_SPOT_VENUE if spot_spread_pct <= perp_spread_pct else normalized_short_venue
+        maker_venue = normalized_short_venue if taker_venue == BINANCE_SPOT_VENUE else BINANCE_SPOT_VENUE
     taker_book = spot_book if taker_venue == BINANCE_SPOT_VENUE else perp_book
     maker_book = spot_book if maker_venue == BINANCE_SPOT_VENUE else perp_book
+    maker_quote, taker_quote = maker_book.get("fast_quote") or maker_book, taker_book.get("fast_quote") or taker_book
     base_quantity = compute_base_quantity(
         quantity=quantity,
         clip_usd=clip_usd,
@@ -241,8 +258,8 @@ def build_spot_perp_plan(
         ) / Decimal("2")
     )
     maker_side = side_by_venue[maker_venue]
-    maker_execution_price = Decimal(maker_limit_price(maker_book, maker_side))
-    taker_execution_price = Decimal(taker_price_from_orderbook(taker_book, side_by_venue[taker_venue]))
+    maker_execution_price = Decimal(maker_limit_price(maker_quote, maker_side))
+    taker_execution_price = Decimal(taker_price_from_orderbook(taker_quote, side_by_venue[taker_venue]))
     return SpotPerpPlan(
         symbol=symbol.strip().upper(),
         mode=normalized_mode,
@@ -251,7 +268,7 @@ def build_spot_perp_plan(
         taker_venue=taker_venue,
         maker_side=maker_side,
         taker_side=side_by_venue[taker_venue],
-        maker_price=maker_limit_price(maker_book, maker_side),
+        maker_price=maker_limit_price(maker_quote, maker_side),
         quantity=base_quantity,
         clip_usd=effective_clip_usd,
         spot_spread_pct=spot_spread_pct,
@@ -343,8 +360,8 @@ def format_spot_perp_execution_summary(
     else:
         gap = adverse_price_gap(Decimal(str(maker)), Decimal(str(taker)), plan.maker_side)
         lines.append(f"實際不利成交價差（以 Maker 均價為分母）: {gap:.4%}")
-        if gap > Decimal("0.002"):
-            lines.append("警告：實際成交價差超過 0.20%；Maker 掛單保護不限制市價對沖的滑點")
+        if gap > MAKER_TAKER_MAX_GAP:
+            lines.append(f"警告：實際成交價差超過 {MAKER_TAKER_MAX_GAP:.2%}；Maker 掛單保護不限制市價對沖的滑點")
     timing = result.get("execution_timing")
     if isinstance(timing, dict):
         def duration(key):
@@ -470,6 +487,8 @@ async def execute_spot_perp_plan(
     registry_path: Path = POSITION_REGISTRY_PATH,
     allow_large_price_gap: bool = False,
     adapters: dict | None = None,
+    sizing_rules=None,
+    remaining_quantity: Decimal | None = None,
 ) -> dict[str, object]:
     maker_adapter = adapters[plan.maker_venue] if adapters is not None else build_spot_perp_adapter(
         plan.maker_venue,
@@ -508,6 +527,10 @@ async def execute_spot_perp_plan(
                 min_hedge_notional = max(min_hedge_notional,
                     spot_adapter.minimum_order_notional(plan.symbol, market=True))
         await prepare_private_order_streams(((plan.maker_venue, maker_adapter), (plan.taker_venue, taker_adapter)))
+        top_level_only = {plan.maker_venue, plan.taker_venue} == {"aster", BINANCE_SPOT_VENUE}
+        if top_level_only and sizing_rules is None:
+            perp_adapter = taker_adapter if plan.taker_venue == "aster" else maker_adapter
+            sizing_rules = await load_spot_perp_size_rules(spot_adapter, perp_adapter, plan.symbol)
         fresh_maker_price = await refresh_spot_perp_maker_price(plan)
         async def guard_books() -> tuple[dict, dict]:
             spot, perp = await fetch_plan_books(
@@ -519,8 +542,14 @@ async def execute_spot_perp_plan(
             maker_adapter=maker_adapter, taker_adapter=taker_adapter, symbol=plan.symbol,
             fetch_books=guard_books, maker_side=plan.maker_side, taker_side=plan.taker_side,
             quantity=plan.quantity,
-            improve_maker_by_one_tick=plan.maker_venue == "aster",
+            improve_maker_by_one_tick=False,
+            follow_maker_quote=True,
+            wait_for_gap_seconds=GAP_WAIT_TIMEOUT_SECONDS,
+            top_level_only=top_level_only, size_rules=sizing_rules,
+            remaining_quantity=remaining_quantity,
         )
+        if top_level_only and maker_guard is None:
+            raise RuntimeError("Aster/Binance best-level execution requires a maker quote guard")
         # For close mode, treating spot as the "short venue" makes the existing
         # side mapper emit spot SELL and perp BUY.
         side_short_venue = plan.short_venue if plan.mode == "open" else BINANCE_SPOT_VENUE
@@ -618,19 +647,78 @@ async def execute_spot_perp_plan(
                 await result
 
 
+async def load_spot_perp_size_rules(spot, perp, symbol):
+    spot_rules = await spot._load_symbol_rules(symbol)
+    raw_symbol = await perp._resolve_raw_symbol(symbol)
+    perp_info = (await perp._load_exchange_info_by_symbol())[raw_symbol]
+    return combined_size_rules(spot_rules["filters"],
+                               {f["filterType"]: f for f in perp_info["filters"]})
+
+
+async def wait_for_pair_quotes(adapters):
+    tasks = [asyncio.create_task(waiter()) for adapter in adapters.values()
+             if callable(waiter := getattr(adapter, "wait_for_hedge_quote", None))]
+    try:
+        if tasks:
+            done, _ = await asyncio.wait(tasks, timeout=.1, return_when=asyncio.FIRST_COMPLETED)
+            for task in done:
+                await task
+        else:
+            await asyncio.sleep(.1)
+    finally:
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
+async def wait_for_depth_sized_plan(*, adapters, symbol, mode, remaining, ticks, rules):
+    last, last_log = "行情尚未可用", None
+    try:
+        async with asyncio.timeout(GAP_WAIT_TIMEOUT_SECONDS):
+            while True:
+                waiter = lambda: wait_for_pair_quotes(adapters)
+                try:
+                    spot_book, perp_book = await asyncio.gather(
+                        adapters[BINANCE_SPOT_VENUE].refresh_hedge_quote(), adapters["aster"].refresh_hedge_quote())
+                    candidates = []
+                    for maker_venue in ("aster", BINANCE_SPOT_VENUE):
+                        plan = build_spot_perp_plan(symbol=symbol, mode=mode, short_venue="aster", quantity=remaining,
+                            clip_usd=None, spot_book=spot_book, perp_book=perp_book, maker_venue_override=maker_venue)
+                        quantity, price, hedge = depth_clip(remaining=remaining, maker_book=plan.maker_orderbook,
+                            taker_book=plan.taker_orderbook, maker_side=plan.maker_side,
+                            tick=ticks[plan.maker_venue], rules=rules, improve=False, wait_for_gap=True,
+                            top_level_only=True)
+                        if quantity > 0:
+                            gap = adverse_price_gap(price, hedge, plan.maker_side)
+                            spread = plan.spot_spread_pct if plan.taker_venue == BINANCE_SPOT_VENUE else plan.perp_spread_pct
+                            candidate = replace(plan, quantity=quantity, clip_usd=plan.clip_usd * float(quantity / remaining),
+                                maker_price=str(price), maker_execution_price=price, taker_execution_price=hedge,
+                                maker_taker_price_gap_pct=price_gap_pct(price, hedge))
+                            candidates.append((gap, spread, candidate, price, hedge))
+                    if candidates:
+                        _, _, plan, price, hedge = min(candidates, key=lambda item: item[:2])
+                        return plan, price, hedge
+                    last = f"價差／可成交深度未符合 {MAKER_TAKER_MAX_GAP:.2%} 及最低下單要求"
+                except (DepthQuoteUnavailable, TimeoutError) as exc:
+                    last = str(exc)
+                now = time.monotonic()
+                if last_log is None or now - last_log >= 5:
+                    print(f"[gap-wait] 暫不掛單；remaining={remaining}；{last}", flush=True)
+                    last_log = now
+                await wait_for_quote_update(waiter)
+    except TimeoutError as exc:
+        raise MakerGapTimeout(f"等待 {GAP_WAIT_TIMEOUT_SECONDS:g} 秒仍未取得可交易價差／深度，退出；remaining={remaining}；{last}") from exc
+
+
 async def execute_depth_sized_batches(*, symbol, mode, total_size, leverage):
     """Binance/Aster auto clips share live books and sessions across batches."""
     adapters = {venue: build_spot_perp_adapter(venue, leverage=leverage, mode=mode)
                 for venue in (BINANCE_SPOT_VENUE, "aster")}
     spot, perp = adapters[BINANCE_SPOT_VENUE], adapters["aster"]
     remaining, completed, batches = total_size, Decimal(0), 0
-    last_wait_log = 0.0
     try:
-        spot_rules = await spot._load_symbol_rules(symbol)
-        raw_symbol = await perp._resolve_raw_symbol(symbol)
-        perp_info = (await perp._load_exchange_info_by_symbol())[raw_symbol]
-        rules = combined_size_rules(spot_rules["filters"],
-                                    {f["filterType"]: f for f in perp_info["filters"]})
+        rules = await load_spot_perp_size_rules(spot, perp, symbol)
         if not total_size.is_finite() or total_size <= 0 or total_size % rules.step:
             raise ValueError(f"total_size_token must be a positive multiple of both venues' step {rules.step}")
         ticks = {BINANCE_SPOT_VENUE: Decimal(await spot.get_price_tick_size(symbol)),
@@ -639,33 +727,16 @@ async def execute_depth_sized_batches(*, symbol, mode, total_size, leverage):
             await adapter.prepare_execution(symbol)
             await adapter.prepare_hedge_quotes(symbol)
         while remaining > 0:
-            try:
-                spot_book, perp_book = await asyncio.gather(spot.refresh_hedge_quote(), perp.refresh_hedge_quote())
-                plan = build_spot_perp_plan(symbol=symbol, mode=mode, short_venue="aster", quantity=remaining,
-                                            clip_usd=None, spot_book=spot_book, perp_book=perp_book)
-                quantity, price, vwap = depth_clip(remaining=remaining, maker_book=plan.maker_orderbook,
-                    taker_book=plan.taker_orderbook, maker_side=plan.maker_side,
-                    tick=ticks[plan.maker_venue], rules=rules, improve=plan.maker_venue == "aster")
-            except DepthQuoteUnavailable as exc:
-                if time.monotonic() - last_wait_log >= 5:
-                    print(f"[auto-size] waiting for fresh depth; remaining={remaining}; {exc}", flush=True)
-                    last_wait_log = time.monotonic()
-                await asyncio.sleep(0.5)
-                continue
-            if quantity == 0:
-                if time.monotonic() - last_wait_log >= 5:
-                    print(f"[auto-size] waiting for tradable depth within 0.20%; remaining={remaining}", flush=True)
-                    last_wait_log = time.monotonic()
-                # Reuse WS caches; do not refetch exchangeInfo/depth on every wake.
-                await adapters[plan.taker_venue].wait_for_hedge_quote()
-                await asyncio.sleep(0.05)
-                continue
-            plan = build_spot_perp_plan(symbol=symbol, mode=mode, short_venue="aster", quantity=quantity,
-                                        clip_usd=None, spot_book=spot_book, perp_book=perp_book)
+            plan, price, vwap = await wait_for_depth_sized_plan(adapters=adapters, symbol=symbol, mode=mode,
+                                                              remaining=remaining, ticks=ticks, rules=rules)
+            quantity = plan.quantity
             batches += 1
             print(f"batch {batches}/auto clip_size_token={quantity} remaining={remaining} "
-                  f"maker_reference={price} hedge_vwap={vwap}", flush=True)
-            result = await execute_spot_perp_plan(plan=plan, leverage=leverage, adapters=adapters)
+                  f"maker={plan.maker_venue} {plan.maker_side} taker={plan.taker_venue} {plan.taker_side} "
+                  f"maker_reference={price} hedge_best={vwap} "
+                  f"adverse_gap={adverse_price_gap(price, vwap, plan.maker_side):.4%}", flush=True)
+            result = await execute_spot_perp_plan(plan=plan, leverage=leverage, adapters=adapters,
+                                                  sizing_rules=rules, remaining_quantity=remaining)
             if not result.get("ok"):
                 raise RuntimeError(f"auto batch failed; completed={completed} remaining={remaining}: {result.get('error')}")
             executed = Decimal(str(result.get("executed_quantity", "0")))
@@ -750,7 +821,7 @@ async def run_spot_perp_arbitrage() -> None:
     print(f"pre_trade_price_gap: {float(plan.maker_taker_price_gap_pct):.2%}")
     print(f"total_size_token: {decimal_to_plain(total_size)}")
     if auto_size:
-        print("clip_size_token: auto (live depth, max adverse gap 0.20%)")
+        print(f"clip_size_token: auto (live depth, max adverse gap {MAKER_TAKER_MAX_GAP:.2%})")
         print("token_batches: dynamic; actual clip size selected before each batch")
         print(f"estimated_total_usd: {plan.clip_usd:.2f}")
     else:
@@ -787,8 +858,10 @@ async def run_spot_perp_arbitrage() -> None:
         # The per-batch spot-perp execution is unchanged; order_service only drives
         # the loop (progress + interval/debounce, left at 0 here to match prior CLI).
         reference_books = [spot_book, perp_book]
+        batch_remaining = total_size
 
         async def _run_batch(this_clip_size: Decimal) -> dict[str, object]:
+            nonlocal batch_remaining
             estimated_clip_usd = estimate_clip_usd_from_books(
                 clip_size=this_clip_size,
                 spot_book=reference_books[0],
@@ -821,7 +894,13 @@ async def run_spot_perp_arbitrage() -> None:
                 leverage=leverage,
                 broker_url=broker_url,
                 allow_large_price_gap=allow_large_price_gap,
+                remaining_quantity=batch_remaining,
             )
+            if result.get("ok"):
+                confirmed = Decimal(str(result.get("executed_quantity", "0")))
+                if not confirmed.is_finite() or not 0 < confirmed <= this_clip_size:
+                    raise RuntimeError("invalid confirmed batch quantity; refusing another maker")
+                batch_remaining -= confirmed
             for line in format_spot_perp_execution_summary(plan=batch_plan, result=result):
                 print(line)
             return result
@@ -865,7 +944,11 @@ async def run_spot_perp_arbitrage() -> None:
 
 
 def main() -> None:
-    asyncio.run(run_spot_perp_arbitrage())
+    try:
+        asyncio.run(run_spot_perp_arbitrage())
+    except MakerGapTimeout as exc:
+        print(f"[gap-timeout] {exc}", flush=True)
+        raise SystemExit(1) from None
 
 
 if __name__ == "__main__":

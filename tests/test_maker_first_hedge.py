@@ -99,7 +99,7 @@ class MakerFirstHedgeTests(unittest.IsolatedAsyncioTestCase):
     def test_reprice_both_sides_strictly_inside_threshold(self):
         for side, taker in (("SELL", D("100.2")), ("BUY", D("99.8"))):
             with self.subTest(side=side):
-                price = bounded_maker_price(desired=D(100), taker=taker,
+                price = bounded_maker_price(desired=D(100), taker=taker, max_gap=D("0.002"),
                     bid=D(99), ask=D(101), side=side, tick=D("0.01"))
                 self.assertLess(adverse_price_gap(price, taker, side), D("0.002"))
 

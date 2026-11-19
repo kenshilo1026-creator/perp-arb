@@ -5,10 +5,14 @@ from decimal import Decimal as D
 from unittest.mock import AsyncMock, patch
 
 from hydra_basis.execution_engine.order_service import Deps, run_batched_execution
+from hydra_basis.execution_engine.depth_sizing import SizeRules
 from scripts.run_spot_perp_arbitrage import build_spot_perp_plan, execute_spot_perp_plan
 
 
 class FilledAdapter:
+    async def get_price_tick_size(self, symbol):
+        return "0.0001"
+
     def __init__(self, position, *, missing_fill=D(0)):
         self.position = D(position)
         self.missing_fill = missing_fill
@@ -42,17 +46,19 @@ class SpotPerpPositionDeltaTests(unittest.IsolatedAsyncioTestCase):
         directory = self.enterContext(tempfile.TemporaryDirectory())
         self.enterContext(patch("hydra_basis.execution_engine.execution_trace.TRACE_PATH",
                                 Path(directory) / "test_timing.jsonl"))
+        self.enterContext(patch("scripts.run_spot_perp_arbitrage.load_spot_perp_size_rules",
+            new=AsyncMock(return_value=SizeRules(D(1), D(1), D(100000), D(5), D("Infinity")))))
 
-    async def run_clip(self, maker, spot, *, quantity="1000", mode="close", venue="aster"):
-        book = {"bid": 0.1209, "ask": 0.1211}
+    async def run_clip(self, maker, spot, *, quantity="1000", mode="close", venue="aster", depth=10000):
+        book = {"bid": 0.1209, "ask": 0.1211, "bid_size": depth, "ask_size": depth}
         plan = build_spot_perp_plan(symbol="SYN", mode=mode, short_venue=venue,
             quantity=D(quantity), clip_usd=None, spot_book=book, perp_book=book)
         with patch("scripts.run_spot_perp_arbitrage.build_spot_perp_adapter",
                    side_effect=lambda v, **kw: spot if v == "binance_spot" else maker), \
              patch("scripts.run_spot_perp_arbitrage.refresh_spot_perp_maker_price",
                    new=AsyncMock(return_value="0.1209")), \
-             patch("scripts.run_spot_perp_arbitrage.record_successful_live_legs", return_value="test-only"), \
-             patch("asyncio.sleep", new=AsyncMock()):
+             patch("scripts.run_spot_perp_arbitrage.fetch_plan_books", new=AsyncMock(return_value=(book, book))), \
+             patch("scripts.run_spot_perp_arbitrage.record_successful_live_legs", return_value="test-only"):
             return await execute_spot_perp_plan(plan=plan, leverage=1)
 
     async def test_close_preserves_existing_difference_and_only_trades_requested_clip(self):
@@ -65,6 +71,18 @@ class SpotPerpPositionDeltaTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(maker.position + spot.position, D("-14.22"))
         self.assertEqual([o["amount"] for o in maker.orders], ["1000"])
         self.assertEqual([o["amount"] for o in spot.orders], ["1000"])
+
+    async def test_reduced_clips_preserve_position_deltas_and_complete_total(self):
+        maker, spot = FilledAdapter("-18282"), FilledAdapter("18267.78")
+        async def batch(q):
+            return await self.run_clip(maker, spot, quantity=str(q), depth=350)
+        result = await run_batched_execution(symbol="SYN", total_size=D(1000), clip_size=D(1000),
+            batch_count=1, clip_usd=121, venues=["aster", "binance_spot"], interval_ms=0, debounce_ms=0,
+            run_batch=batch, on_progress=AsyncMock(), deps=Deps())
+        self.assertEqual(result["executed_qty"], "1000")
+        self.assertEqual([o["amount"] for o in maker.orders], ["350", "350", "300"])
+        self.assertEqual([o["amount"] for o in spot.orders], ["350", "350", "300"])
+        self.assertEqual(maker.position + spot.position, D("-14.22"))
 
     async def test_batches_stop_at_requested_total_without_correcting_old_difference(self):
         maker, spot = FilledAdapter("-18282"), FilledAdapter("18267.78")

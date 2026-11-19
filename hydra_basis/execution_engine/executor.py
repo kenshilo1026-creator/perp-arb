@@ -723,6 +723,7 @@ async def execute_single_clip_with_sides(
                 raise RuntimeError("FAIL-CLOSED close quantity/direction exceeds live position")
 
     maker_fill_result: dict[str, object] | None = None
+    original_quantity, original_clip_usd = quantity, clip_usd
     maker_result: dict[str, object] | None = None
     maker_cancel_result: dict[str, object] | None = None
     maker_attempts: list[dict[str, object]] = []
@@ -779,6 +780,26 @@ async def execute_single_clip_with_sides(
             ) from exc
         raise exc
 
+    async def wait_for_current_maker():
+        # The accepted order identity is retained across fill-wait timeouts.
+        # Used for both the initial wait and tiny partials awaiting more fills.
+        while True:
+            try:
+                return await wait_for_maker_fill(
+                    maker_adapter, maker_result=maker_result, symbol=symbol,
+                    side=maker_side, amount=str(quantity), timeout_seconds=maker_fill_timeout_seconds,
+                    poll_interval_seconds=maker_fill_poll_interval_seconds,
+                )
+            except Exception as exc:
+                message = str(exc).lower()
+                if not (maker_price_guard is not None and getattr(maker_price_guard, "follow_maker_quote", False)
+                        and not isinstance(exc, MakerPriceRecheck)
+                        and ("timeout" in message or "timed out" in message)):
+                    raise
+                await maker_price_guard.check(maker_kwargs["price"])
+                print(f"[maker-keep] resting gap valid; no eligible reprice; keep existing {maker_venue} order", flush=True)
+                await asyncio.sleep(0)
+
     while True:
         state_machine.to_placing_maker_leg()
         attempt_record: dict[str, object] = {"attempt": maker_attempt + 1}
@@ -796,6 +817,15 @@ async def execute_single_clip_with_sides(
                 if maker_price_guard is not None:
                     # Also run immediately before every dispatch, after cancel reconciliation.
                     guarded_price = await maker_price_guard.prepare(str(maker_kwargs["price"]))
+                    prepared_quantity = getattr(maker_price_guard, "prepared_quantity", None)
+                    if prepared_quantity is not None:
+                        if not prepared_quantity.is_finite() or not 0 < prepared_quantity <= original_quantity:
+                            raise RuntimeError("invalid maker quantity selected before dispatch")
+                        if prepared_quantity != quantity:
+                            print(f"[maker-size] quantity {quantity} -> {prepared_quantity}; hedge best-level capacity", flush=True)
+                        quantity = prepared_quantity
+                        clip_usd = original_clip_usd * float(quantity / original_quantity)
+                        maker_kwargs.update(amount=str(quantity), clip_usd=clip_usd)
                     maker_kwargs.update(price=guarded_price, post_only=True)
                     resolved_maker_price = guarded_price
                     taker_pre_price = maker_price_guard.taker_price(maker_price_guard.taker_book)
@@ -828,15 +858,7 @@ async def execute_single_clip_with_sides(
                 maker_attempts.append(attempt_record)
                 break
 
-            fill_wait = wait_for_maker_fill(
-                maker_adapter,
-                maker_result=maker_result,
-                symbol=symbol,
-                side=maker_side,
-                amount=str(quantity),
-                timeout_seconds=maker_fill_timeout_seconds,
-                poll_interval_seconds=maker_fill_poll_interval_seconds,
-            )
+            fill_wait = wait_for_current_maker()
             maker_fill_result = await (
                 wait_with_price_guard(fill_wait, maker_price_guard, maker_kwargs["price"])
                 if maker_price_guard is not None else fill_wait
@@ -1127,7 +1149,7 @@ async def execute_single_clip_with_sides(
                         "refusing replacement"
                     )
                 )
-            print(f"[reprice] cancel ok — placing new order (attempt {maker_attempt + 2})", flush=True)
+            print(f"[reprice] cancel ok — checking entry conditions before replacement (attempt {maker_attempt + 2})", flush=True)
             if maker_price_guard is None:
                 await asyncio.sleep(1.0)
             elif not isinstance(exc, MakerPriceRecheck) and maker_price_refresher is not None:
@@ -1180,15 +1202,7 @@ async def execute_single_clip_with_sides(
                 # A repeated tiny partial fill must not win every race against
                 # the watcher and leave an out-of-band remainder resting forever.
                 await maker_price_guard.check(maker_kwargs["price"])
-            fill_wait = wait_for_maker_fill(
-                maker_adapter,
-                maker_result=maker_result,
-                symbol=symbol,
-                side=maker_side,
-                amount=str(quantity),
-                timeout_seconds=maker_fill_timeout_seconds,
-                poll_interval_seconds=maker_fill_poll_interval_seconds,
-            )
+            fill_wait = wait_for_current_maker()
             maker_fill_result = await (
                 wait_with_price_guard(fill_wait, maker_price_guard, maker_kwargs["price"])
                 if maker_price_guard is not None else fill_wait

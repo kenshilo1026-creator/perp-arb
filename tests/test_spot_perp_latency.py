@@ -1,9 +1,12 @@
 import unittest
+import tempfile
+from pathlib import Path
 from decimal import Decimal as D
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from hydra_basis.execution_engine.aster_adapter import AsterExecutionAdapter
+from hydra_basis.execution_engine.depth_sizing import SizeRules
 from hydra_basis.execution_engine.mexc_spot_adapter import MexcSpotExecutionAdapter
 from hydra_basis.execution_engine.executor import extract_actual_average_price, wait_for_maker_fill
 from scripts.run_spot_perp_arbitrage import build_spot_perp_plan, execute_spot_perp_plan, format_spot_perp_execution_summary
@@ -66,6 +69,16 @@ class SummaryTests(unittest.TestCase):
 
 
 class LatencyTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        directory = self.enterContext(tempfile.TemporaryDirectory())
+        self.enterContext(patch("hydra_basis.execution_engine.execution_trace.TRACE_PATH",
+                                Path(directory) / "test_timing.jsonl"))
+        self.enterContext(patch("scripts.run_spot_perp_arbitrage.load_spot_perp_size_rules",
+            new=AsyncMock(return_value=SizeRules(D(1), D(1), D(100000), D(5), D("Infinity")))))
+        # These tests isolate setup/dispatch ordering; quote policy is exercised
+        # with real guards in test_spot_best_level and position-delta tests.
+        self.enterContext(patch("scripts.run_spot_perp_arbitrage.create_maker_guard", new=AsyncMock()))
+
     async def test_setup_finishes_before_dispatch_and_poll_interval_is_explicit(self):
         events = []
         async def prepare(symbol):

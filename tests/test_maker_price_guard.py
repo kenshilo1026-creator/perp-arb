@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from hydra_basis.execution_engine.aster_adapter import AsterExecutionAdapter
+from hydra_basis.execution_engine.depth_sizing import SizeRules
 from hydra_basis.execution_engine.executor import execute_single_clip_with_sides
 from hydra_basis.execution_engine.maker_price_guard import (
     MakerPriceGuard, MakerPriceRecheck, adverse_price_gap, bounded_maker_price,
@@ -17,12 +18,43 @@ from scripts.run_spot_perp_arbitrage import build_spot_perp_plan, execute_spot_p
 
 
 class ImprovedMakerPriceTests(unittest.IsolatedAsyncioTestCase):
+    async def test_temporary_quote_timeout_does_not_end_entire_gap_wait(self):
+        fetch = AsyncMock(side_effect=[TimeoutError("quote request timed out"),
+            ({"bid": 100, "ask": 101}, {"bid": 100, "ask": 101})])
+        guard = MakerPriceGuard(max_gap=D("0.002"), fetch_books=fetch, tick_size=AsyncMock(return_value="0.1"),
+            maker_side="BUY", taker_side="SELL", wait_for_update=AsyncMock(), wait_for_gap_seconds=1)
+        self.assertEqual(await guard.prepare("100"), "100")
+        self.assertEqual(fetch.await_count, 2)
+
+    async def test_wait_mode_requires_strictly_below_threshold_in_both_directions(self):
+        from hydra_basis.execution_engine.maker_price_guard import MakerGapTimeout
+        for side, maker, hedge in (
+            ("BUY", {"bid": 100, "ask": 101}, {"bid": 99.8, "ask": 99.9}),
+            ("SELL", {"bid": 99, "ask": 100}, {"bid": 100.1, "ask": 100.2}),
+        ):
+            guard = MakerPriceGuard(max_gap=D("0.002"), fetch_books=AsyncMock(return_value=(maker, hedge)),
+                tick_size=AsyncMock(return_value="0.1"), maker_side=side,
+                taker_side="SELL" if side == "BUY" else "BUY", wait_for_gap_seconds=0.02)
+            with self.assertRaises(MakerGapTimeout):
+                await guard.prepare("100")
+
+    async def test_wait_mode_rechecks_full_depth_and_then_resumes(self):
+        maker = {"bid": "0.1154", "ask": "0.1158"}
+        shallow = {"bid": "0.11526", "ask": "0.1153", "bids": [("0.11526", 10), ("0.115", 990)]}
+        deep = {**shallow, "bids": [("0.11526", 1000)]}
+        fetch = AsyncMock(side_effect=[(maker, shallow), (maker, deep)])
+        guard = MakerPriceGuard(max_gap=D("0.002"), fetch_books=fetch, tick_size=AsyncMock(return_value="0.0001"),
+            maker_side="BUY", taker_side="SELL", quantity=D(1000),
+            wait_for_update=AsyncMock(), wait_for_gap_seconds=1)
+        self.assertEqual(await guard.prepare("0.1154"), "0.1154")
+        self.assertEqual(fetch.await_count, 2)
+
     async def test_live_syn_snapshot_best_bid_passes_but_full_clip_vwap_exceeds_limit(self):
         # Public WS observation on 2026-11-13: top bid cannot fill 1,000 SYN.
         book = {"bid": "0.11808", "ask": "0.1182", "age_ms": 0,
                 "bids": [("0.11808", "356.3"), ("0.11806", "43.9"),
                          ("0.11804", "328.5"), ("0.11802", "359.3")]}
-        guard = MakerPriceGuard(fetch_books=AsyncMock(return_value=({}, book)),
+        guard = MakerPriceGuard(max_gap=D("0.002"), fetch_books=AsyncMock(return_value=({}, book)),
                                tick_size=AsyncMock(return_value="0.0001"),
                                maker_side="BUY", taker_side="SELL", quantity=D("1000"))
         self.assertLess(adverse_price_gap(D("0.1183"), D(book["bid"]), "BUY"), D("0.002"))
@@ -43,7 +75,7 @@ class ImprovedMakerPriceTests(unittest.IsolatedAsyncioTestCase):
         ]
         for side, bid, ask, taker_price, expected in cases:
             with self.subTest(side=side, bid=bid, ask=ask, taker=taker_price):
-                guard = MakerPriceGuard(
+                guard = MakerPriceGuard(max_gap=D("0.002"),
                     fetch_books=AsyncMock(return_value=({"bid": bid, "ask": ask},
                         {"bid": taker_price, "ask": taker_price})),
                     tick_size=AsyncMock(return_value="0.0001"), maker_side=side,
@@ -56,7 +88,7 @@ class ImprovedMakerPriceTests(unittest.IsolatedAsyncioTestCase):
     async def test_replacements_use_current_book_and_exchange_tick_without_accumulation(self):
         books = AsyncMock(return_value=({"bid": "0.11870", "ask": "0.11910"},
                                        {"bid": "0.11870", "ask": "0.11910"}))
-        guard = MakerPriceGuard(fetch_books=books, tick_size=AsyncMock(return_value="0.00001"),
+        guard = MakerPriceGuard(max_gap=D("0.002"), fetch_books=books, tick_size=AsyncMock(return_value="0.00001"),
                                maker_side="BUY", taker_side="SELL", improve_maker_by_one_tick=True)
         first = await guard.prepare("0.11870")
         self.assertEqual(D(first), D("0.11871"))
@@ -68,7 +100,7 @@ class ImprovedMakerPriceTests(unittest.IsolatedAsyncioTestCase):
 
 class PriceBandTests(unittest.TestCase):
     def price(self, desired, taker, side, bid="0.22", ask="0.23", tick="0.0001"):
-        return bounded_maker_price(desired=D(desired), taker=D(taker), side=side,
+        return bounded_maker_price(max_gap=D("0.002"), desired=D(desired), taker=D(taker), side=side,
                                    bid=D(bid), ask=D(ask), tick=D(tick))
 
     def test_close_buy_clamps_to_nearest_tick_inside_adverse_limit(self):
@@ -107,7 +139,7 @@ class GuardExecutionTests(unittest.IsolatedAsyncioTestCase):
                                 Path(directory) / "test_timing.jsonl"))
 
     def guard(self, fetch, side="BUY"):
-        return MakerPriceGuard(fetch_books=fetch, tick_size=AsyncMock(return_value="0.0001"),
+        return MakerPriceGuard(max_gap=D("0.002"), fetch_books=fetch, tick_size=AsyncMock(return_value="0.0001"),
                                maker_side=side, taker_side="SELL" if side == "BUY" else "BUY",
                                check_seconds=0.001)
 
@@ -184,7 +216,8 @@ class GuardExecutionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(taker.place_market_order.call_args.kwargs["amount"], "2")
         self.assertEqual(result["executed_quantity"], "2")
 
-    async def run_reprice(self, cancel_qty="0", cancel_error=False, unavailable=False):
+    async def run_reprice(self, cancel_qty="0", cancel_error=False, unavailable=False,
+                          wait_seconds=None, recover_after_cancel=False):
         events = []
         prices = []
         amounts = []
@@ -197,6 +230,8 @@ class GuardExecutionTests(unittest.IsolatedAsyncioTestCase):
                 return {"bid": 0.2276, "ask": 0.228}, {"bid": 0.2275, "ask": 0.2276}
             if unavailable:
                 raise RuntimeError("quote offline")
+            if recover_after_cancel and "cancel" in events:
+                return {"bid": 0.2276, "ask": 0.228}, {"bid": 0.2275, "ask": 0.2276}
             return {"bid": 0.2276, "ask": 0.228}, {"bid": 0.2262, "ask": 0.2263}
 
         class Maker:
@@ -223,6 +258,8 @@ class GuardExecutionTests(unittest.IsolatedAsyncioTestCase):
                 amounts.append(kwargs["amount"])
                 return {"ok": True}
 
+        guard = self.guard(books)
+        guard.wait_for_gap_seconds = wait_seconds
         try:
             result = await execute_single_clip_with_sides(
                 symbol="TOKEN", clip_usd=100, quantity=D("10"), maker_venue="aster",
@@ -230,7 +267,7 @@ class GuardExecutionTests(unittest.IsolatedAsyncioTestCase):
                 maker_adapter=Maker(), taker_adapter=Taker(), max_hedge_retries=0,
                 state_machine=ExecutionStateMachine(), maker_price="0.2276",
                 require_maker_fill_confirmation=True, maker_fill_timeout_seconds=60,
-                max_maker_reprice_attempts=-1, maker_price_guard=self.guard(books),
+                max_maker_reprice_attempts=-1, maker_price_guard=guard,
             )
         except RuntimeError:
             self.assertEqual(prices, ["0.2276"])
@@ -238,6 +275,24 @@ class GuardExecutionTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(amounts, [])
             raise
         return result, events, prices, amounts
+
+    async def test_wait_mode_cancels_once_then_exits_without_replacement(self):
+        from hydra_basis.execution_engine.maker_price_guard import MakerGapTimeout
+        with self.assertRaises(MakerGapTimeout):
+            await self.run_reprice(wait_seconds=0.02)
+
+    async def test_wait_mode_resumes_only_after_recovery(self):
+        result, events, prices, amounts = await self.run_reprice(wait_seconds=1, recover_after_cancel=True)
+        self.assertTrue(result["ok"])
+        self.assertEqual(prices, ["0.2276", "0.2276"])
+        self.assertEqual(events.count("cancel"), 1)
+        self.assertEqual(amounts, ["10"])
+
+    async def test_wait_mode_never_blocks_hedge_for_fill_during_cancel(self):
+        result, events, prices, amounts = await self.run_reprice(cancel_qty="4", wait_seconds=0.02)
+        self.assertTrue(result["ok"])
+        self.assertEqual(prices, ["0.2276"])
+        self.assertEqual(amounts, ["4"])
 
     async def test_resting_order_reprices_without_waiting_for_fill_timeout(self):
         result, events, prices, amounts = await asyncio.wait_for(self.run_reprice(), 2)
@@ -284,15 +339,17 @@ class GuardExecutionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(adapter._post_order.call_args.args[0]["timeInForce"], "GTX")
         self.assertEqual(adapter._post_order.call_args.args[0]["reduceOnly"], "true")
 
-    async def test_spot_perp_open_allows_favourable_gap_and_close_caps_adverse_gap(self):
+    async def test_spot_perp_open_allows_favourable_gap_and_close_waits_on_adverse_gap(self):
         for mode, spot, perp, expected in (
-            ("open", {"bid": 0.0999, "ask": 0.1}, {"bid": 1.09, "ask": 1.1}, "1.0999"),
-            ("close", {"bid": 0.1187, "ask": 0.1189}, {"bid": 0.1187, "ask": 0.1191}, "0.1188"),
-            ("close", {"bid": 0.2262, "ask": 0.2263}, {"bid": 0.2276, "ask": 0.228}, "0.2266"),
+            ("open", {"bid": 0.0999, "ask": 0.1}, {"bid": 1.09, "ask": 1.1}, "1.1"),
+            ("close", {"bid": 0.1187, "ask": 0.1189}, {"bid": 0.1187, "ask": 0.1191}, "0.1187"),
+            ("close", {"bid": 0.2262, "ask": 0.2263}, {"bid": 0.2276, "ask": 0.228}, None),
         ):
             with self.subTest(mode=mode):
+                spot.update(bid_size=1000, ask_size=1000)
                 plan = build_spot_perp_plan(symbol="TOKEN", mode=mode, short_venue="aster",
-                    quantity=D("100"), clip_usd=100, spot_book=spot, perp_book=perp)
+                    quantity=D("100"), clip_usd=100, spot_book=spot, perp_book=perp,
+                    maker_venue_override="aster")
                 maker = SimpleNamespace(
                     get_price_tick_size=AsyncMock(return_value="0.0001"),
                     place_limit_order=AsyncMock(return_value={"ok": True, "raw": {
@@ -310,7 +367,17 @@ class GuardExecutionTests(unittest.IsolatedAsyncioTestCase):
                            side_effect=lambda venue, **kw: maker if venue == "aster" else taker), \
                      patch("scripts.run_spot_perp_arbitrage.fetch_plan_books", new=AsyncMock(return_value=(spot, perp))), \
                      patch("scripts.run_spot_perp_arbitrage.fetch_required_live_position", new=AsyncMock(return_value={})), \
-                     patch("scripts.run_spot_perp_arbitrage.record_successful_live_legs", return_value="test"):
+                     patch("scripts.run_spot_perp_arbitrage.record_successful_live_legs", return_value="test"), \
+                     patch("scripts.run_spot_perp_arbitrage.load_spot_perp_size_rules", new=AsyncMock(
+                         return_value=SizeRules(D(1), D(1), D(10000), D(5), D("Infinity")))), \
+                     patch("scripts.run_spot_perp_arbitrage.GAP_WAIT_TIMEOUT_SECONDS", 0.02):
+                    if expected is None:
+                        from hydra_basis.execution_engine.maker_price_guard import MakerGapTimeout
+                        with self.assertRaises(MakerGapTimeout):
+                            await execute_spot_perp_plan(plan=plan, leverage=1)
+                        maker.place_limit_order.assert_not_awaited()
+                        taker.place_market_order.assert_not_awaited()
+                        continue
                     result = await execute_spot_perp_plan(plan=plan, leverage=1)
                 self.assertTrue(result["ok"])
                 self.assertEqual(D(maker.place_limit_order.call_args.kwargs["price"]), D(expected))

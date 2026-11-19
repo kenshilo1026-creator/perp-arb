@@ -1,9 +1,9 @@
-"""Size a maker clip against complete hedge depth, using exact base units."""
+"""Size maker clips against hedge depth or one best-price level in exact units."""
 from dataclasses import dataclass
 from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR
 from math import lcm
 
-from .maker_price_guard import MAKER_TAKER_MAX_GAP, MakerPriceGuard, adverse_price_gap, bounded_maker_price
+from .maker_price_guard import MAKER_TAKER_MAX_GAP, MakerPriceGuard, adverse_price_gap, bounded_maker_price, passive_entry_price, taker_best_level
 
 D = Decimal
 
@@ -52,28 +52,50 @@ def floor_step(value, step):
 
 
 def depth_clip(*, remaining, maker_book, taker_book, maker_side, tick, rules,
-               improve=False, max_gap=MAKER_TAKER_MAX_GAP):
-    """Return (quantity, maker_price, hedge_vwap); zero quantity means wait.
+               improve=False, max_gap=MAKER_TAKER_MAX_GAP, wait_for_gap=False,
+               top_level_only=False, clip_limit=None):
+    """Return (quantity, maker_price, hedge_price); zero quantity means wait.
 
+    top_level_only uses one best-price level, never a multi-level VWAP.
     Reserve a tradable final clip instead of deliberately leaving dust. No
     rounding of the user's total and no trading beyond its remaining amount.
     """
     if not remaining.is_finite() or remaining <= 0 or remaining % rules.step:
         raise ValueError(f"remaining quantity must be a positive multiple of {rules.step}: {remaining}")
     taker_side = "SELL" if maker_side == "BUY" else "BUY"
-    probe = MakerPriceGuard(fetch_books=None, tick_size=None, maker_side=maker_side, taker_side=taker_side)
+    probe = MakerPriceGuard(fetch_books=None, tick_size=None, maker_side=maker_side, taker_side=taker_side,
+                           top_level_only=top_level_only)
     best = probe.taker_price(taker_book)  # includes quote freshness and faster BBO warnings
     bid, ask = D(str(maker_book["bid"])), D(str(maker_book["ask"]))
     desired = bid + (tick if improve else 0) if maker_side == "BUY" else ask - (tick if improve else 0)
-    price = bounded_maker_price(desired=desired, taker=best, bid=bid, ask=ask,
-                                side=maker_side, tick=tick, max_gap=max_gap)
+    if wait_for_gap:
+        # Do not manufacture an entry opportunity by retreating the maker price.
+        price = passive_entry_price(maker_book, side=maker_side, tick=tick, improve=improve)
+        if adverse_price_gap(price, best, maker_side) >= max_gap:
+            return D(0), price, None
+    else:
+        price = bounded_maker_price(desired=desired, taker=best, bid=bid, ask=ask,
+                                    side=maker_side, tick=tick, max_gap=max_gap)
     # Conservative bounds apply to both venues and either execution role.
-    low = min(price, bid, D(str(taker_book["bid"]))) * (1 - max_gap)
-    high = max(price, ask, D(str(taker_book["ask"]))) * (1 + max_gap)
+    current_taker = (taker_book.get("fast_quote") or taker_book) if top_level_only else taker_book
+    low = min(price, bid, D(str(current_taker["bid"]))) * (1 - max_gap)
+    high = max(price, ask, D(str(current_taker["ask"]))) * (1 + max_gap)
     minimum = (max(rules.minimum, rules.min_notional / low) / rules.step).to_integral_value(rounding=ROUND_CEILING) * rules.step
     if remaining < minimum:
         raise ValueError(f"unexecuted remainder {remaining} is below current exchange minimum {minimum}; no extra quantity submitted")
     maximum = min(remaining, rules.maximum, rules.max_notional / high)
+    if clip_limit is not None:
+        if not clip_limit.is_finite() or clip_limit <= 0:
+            raise ValueError("clip limit must be finite and positive")
+        maximum = min(maximum, clip_limit)
+    if top_level_only:
+        best, capacity = taker_best_level(taker_book, taker_side)
+        qty = floor_step(min(maximum, capacity), rules.step)
+        if 0 < remaining - qty < minimum:
+            qty = floor_step(remaining - minimum, rules.step)
+        if qty < minimum or adverse_price_gap(price, best, maker_side) >= max_gap:
+            return D(0), price, None
+        return qty, price, best
     levels = taker_book.get("bids" if taker_side == "SELL" else "asks")
     if not levels:
         raise ValueError("automatic sizing requires full hedge depth with quantities")

@@ -21,6 +21,7 @@ from scripts.run_spot_perp_arbitrage import (
     spot_perp_sides,
 )
 from hydra_basis.execution_engine.executor import execute_single_clip, extract_average_price
+from hydra_basis.execution_engine.depth_sizing import SizeRules
 from hydra_basis.execution_engine.hyperliquid_adapter import HyperliquidExecutionAdapter
 from hydra_basis.execution_engine.mexc_adapter import MexcExecutionAdapter
 from hydra_basis.execution_engine.mexc_spot_adapter import MexcSpotExecutionAdapter
@@ -100,8 +101,8 @@ class SpotPerpArbitrageScriptTests(unittest.TestCase):
             short_venue="aster",
             quantity=Decimal("0.1"),
             clip_usd=300.0,
-            spot_book={"bid": 2999.0, "ask": 3001.0, "ts_ms": 1},
-            perp_book={"bid": 2990.0, "ask": 3010.0, "ts_ms": 1},
+            spot_book={"bid": 2999.0, "ask": 3001.0, "ts_ms": 1, "bid_size": 10000, "ask_size": 10000},
+            perp_book={"bid": 2990.0, "ask": 3010.0, "ts_ms": 1, "bid_size": 10000, "ask_size": 10000},
         )
 
         self.assertEqual(plan.taker_venue, "binance_spot")
@@ -117,8 +118,8 @@ class SpotPerpArbitrageScriptTests(unittest.TestCase):
             short_venue="hyperliquid",
             quantity=Decimal("0.1"),
             clip_usd=300.0,
-            spot_book={"bid": 2990.0, "ask": 3010.0, "ts_ms": 1},
-            perp_book={"bid": 2999.0, "ask": 3001.0, "ts_ms": 1},
+            spot_book={"bid": 2990.0, "ask": 3010.0, "ts_ms": 1, "bid_size": 10000, "ask_size": 10000},
+            perp_book={"bid": 2999.0, "ask": 3001.0, "ts_ms": 1, "bid_size": 10000, "ask_size": 10000},
         )
 
         self.assertEqual(plan.taker_venue, "hyperliquid")
@@ -128,7 +129,7 @@ class SpotPerpArbitrageScriptTests(unittest.TestCase):
         self.assertEqual(plan.maker_price, "3010")
 
     def test_limit_price_uses_passive_side_of_book(self) -> None:
-        book = {"bid": 100.0, "ask": 100.5, "ts_ms": 1}
+        book = {"bid": 100.0, "ask": 100.5, "ts_ms": 1, "bid_size": 10000, "ask_size": 10000}
 
         self.assertEqual(maker_limit_price(book, "BUY"), "100")
         self.assertEqual(maker_limit_price(book, "SELL"), "100.5")
@@ -137,7 +138,7 @@ class SpotPerpArbitrageScriptTests(unittest.TestCase):
         quantity = compute_base_quantity(
             quantity=None,
             clip_usd=1000.0,
-            taker_book={"bid": 99.0, "ask": 101.0, "ts_ms": 1},
+            taker_book={"bid": 99.0, "ask": 101.0, "ts_ms": 1, "bid_size": 10000, "ask_size": 10000},
         )
 
         self.assertEqual(quantity, Decimal("10"))
@@ -156,8 +157,8 @@ class SpotPerpArbitrageScriptTests(unittest.TestCase):
             short_venue="aster",
             quantity=Decimal("0.1"),
             clip_usd=300.0,
-            spot_book={"bid": 2999.0, "ask": 3001.0, "ts_ms": 1},
-            perp_book={"bid": 2990.0, "ask": 3010.0, "ts_ms": 1},
+            spot_book={"bid": 2999.0, "ask": 3001.0, "ts_ms": 1, "bid_size": 10000, "ask_size": 10000},
+            perp_book={"bid": 2990.0, "ask": 3010.0, "ts_ms": 1, "bid_size": 10000, "ask_size": 10000},
         )
 
         lines = format_spot_perp_execution_summary(
@@ -183,11 +184,11 @@ class SpotPerpArbitrageScriptTests(unittest.TestCase):
         plan = build_spot_perp_plan(
             symbol="ETH",
             mode="open",
-            short_venue="aster",
+            short_venue="hyperliquid",
             quantity=Decimal("0.1"),
             clip_usd=300.0,
-            spot_book={"bid": 2990.0, "ask": 3010.0, "ts_ms": 1},
-            perp_book={"bid": 2999.0, "ask": 3001.0, "ts_ms": 1},
+            spot_book={"bid": 2990.0, "ask": 3010.0, "ts_ms": 1, "bid_size": 10000, "ask_size": 10000},
+            perp_book={"bid": 2999.0, "ask": 3001.0, "ts_ms": 1, "bid_size": 10000, "ask_size": 10000},
         )
 
         lines = format_spot_perp_execution_summary(
@@ -204,7 +205,7 @@ class SpotPerpArbitrageScriptTests(unittest.TestCase):
             lines,
             [
                 "下單成功 binance現貨成交價: 2990",
-                "aster做空成交價: 2999",
+                "hyperliquid做空成交價: 2999",
                 "實際不利成交價差（以 Maker 均價為分母）: -0.3010%",
             ],
         )
@@ -347,6 +348,15 @@ class MissingMakerCancelAdapterTests(unittest.IsolatedAsyncioTestCase):
 
 
 class SpotPerpArbitrageRecordingTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        directory = self.enterContext(TemporaryDirectory())
+        self.enterContext(patch("hydra_basis.execution_engine.execution_trace.TRACE_PATH",
+                                Path(directory) / "test_timing.jsonl"))
+        self.enterContext(patch("scripts.run_spot_perp_arbitrage.GAP_WAIT_TIMEOUT_SECONDS", 0.2))
+        self.enterContext(patch("scripts.run_spot_perp_arbitrage.load_spot_perp_size_rules",
+            new=AsyncMock(return_value=SizeRules(Decimal(".0001"), Decimal(".0001"),
+                Decimal(1000000), Decimal(5), Decimal("Infinity")))))
+
     async def test_close_mode_does_not_prompt_for_leverage(self) -> None:
         printed: list[str] = []
         prompts: list[str] = []
@@ -383,8 +393,8 @@ class SpotPerpArbitrageRecordingTests(unittest.IsolatedAsyncioTestCase):
             patch(
                 "scripts.run_spot_perp_arbitrage.fetch_plan_books",
                 new=AsyncMock(return_value=(
-                    {"bid": 9.99, "ask": 10.01, "ts_ms": 1},
-                    {"bid": 9.9, "ask": 10.1, "ts_ms": 1},
+                    {"bid": 9.99, "ask": 10.01, "ts_ms": 1, "bid_size": 10000, "ask_size": 10000},
+                    {"bid": 9.9, "ask": 10.1, "ts_ms": 1, "bid_size": 10000, "ask_size": 10000},
                 )),
             ), \
             patch("scripts.run_spot_perp_arbitrage.execute_spot_perp_plan", new=AsyncMock(side_effect=fake_execute)), \
@@ -417,8 +427,8 @@ class SpotPerpArbitrageRecordingTests(unittest.IsolatedAsyncioTestCase):
             patch(
                 "scripts.run_spot_perp_arbitrage.fetch_plan_books",
                 new=AsyncMock(return_value=(
-                    {"bid": 9.99, "ask": 10.01, "ts_ms": 1},
-                    {"bid": 11.9, "ask": 12.1, "ts_ms": 1},
+                    {"bid": 9.99, "ask": 10.01, "ts_ms": 1, "bid_size": 10000, "ask_size": 10000},
+                    {"bid": 11.9, "ask": 12.1, "ts_ms": 1, "bid_size": 10000, "ask_size": 10000},
                 )),
             ), \
             patch(
@@ -442,6 +452,7 @@ class SpotPerpArbitrageRecordingTests(unittest.IsolatedAsyncioTestCase):
         prompts: list[str] = []
         execute = AsyncMock(return_value={
             "ok": True,
+            "executed_quantity": "10",
             "execution_price_summary": {
                 "maker_avg_price": "12.1",
                 "taker_avg_price": "10.01",
@@ -468,8 +479,8 @@ class SpotPerpArbitrageRecordingTests(unittest.IsolatedAsyncioTestCase):
             patch(
                 "scripts.run_spot_perp_arbitrage.fetch_plan_books",
                 new=AsyncMock(return_value=(
-                    {"bid": 9.99, "ask": 10.01, "ts_ms": 1},
-                    {"bid": 11.9, "ask": 12.1, "ts_ms": 1},
+                    {"bid": 9.99, "ask": 10.01, "ts_ms": 1, "bid_size": 10000, "ask_size": 10000},
+                    {"bid": 11.9, "ask": 12.1, "ts_ms": 1, "bid_size": 10000, "ask_size": 10000},
                 )),
             ), \
             patch("scripts.run_spot_perp_arbitrage.execute_spot_perp_plan", new=execute), \
@@ -513,8 +524,8 @@ class SpotPerpArbitrageRecordingTests(unittest.IsolatedAsyncioTestCase):
             patch(
                 "scripts.run_spot_perp_arbitrage.fetch_plan_books",
                 new=AsyncMock(return_value=(
-                    {"bid": 9.99, "ask": 10.01, "ts_ms": 1},
-                    {"bid": 9.9, "ask": 10.1, "ts_ms": 1},
+                    {"bid": 9.99, "ask": 10.01, "ts_ms": 1, "bid_size": 10000, "ask_size": 10000},
+                    {"bid": 9.9, "ask": 10.1, "ts_ms": 1, "bid_size": 10000, "ask_size": 10000},
                 )),
             ), \
             patch("scripts.run_spot_perp_arbitrage.execute_spot_perp_plan", new=AsyncMock(side_effect=fake_execute)), \
@@ -542,8 +553,8 @@ class SpotPerpArbitrageRecordingTests(unittest.IsolatedAsyncioTestCase):
             patch(
                 "scripts.run_spot_perp_arbitrage.fetch_plan_books",
                 new=AsyncMock(return_value=(
-                    {"bid": 9.99, "ask": 10.01, "ts_ms": 1},
-                    {"bid": 9.9, "ask": 10.1, "ts_ms": 1},
+                    {"bid": 9.99, "ask": 10.01, "ts_ms": 1, "bid_size": 10000, "ask_size": 10000},
+                    {"bid": 9.9, "ask": 10.1, "ts_ms": 1, "bid_size": 10000, "ask_size": 10000},
                 )),
             ), \
             patch(
@@ -591,8 +602,8 @@ class SpotPerpArbitrageRecordingTests(unittest.IsolatedAsyncioTestCase):
             short_venue="aster",
             quantity=Decimal("10"),
             clip_usd=100.0,
-            spot_book={"bid": 9.99, "ask": 10.01, "ts_ms": 1},
-            perp_book={"bid": 9.9, "ask": 10.1, "ts_ms": 1},
+            spot_book={"bid": 9.99, "ask": 10.01, "ts_ms": 1, "bid_size": 10000, "ask_size": 10000},
+            perp_book={"bid": 9.9, "ask": 10.1, "ts_ms": 1, "bid_size": 10000, "ask_size": 10000},
         )
 
         with TemporaryDirectory() as temp_dir:
@@ -603,8 +614,8 @@ class SpotPerpArbitrageRecordingTests(unittest.IsolatedAsyncioTestCase):
             ), patch(
                 "scripts.run_spot_perp_arbitrage.fetch_plan_books",
                 new=AsyncMock(return_value=(
-                    {"bid": 9.99, "ask": 10.01, "ts_ms": 1},
-                    {"bid": 9.9, "ask": 10.1, "ts_ms": 1},
+                    {"bid": 9.99, "ask": 10.01, "ts_ms": 1, "bid_size": 10000, "ask_size": 10000},
+                    {"bid": 9.9, "ask": 10.1, "ts_ms": 1, "bid_size": 10000, "ask_size": 10000},
                 )),
             ):
                 result = await execute_spot_perp_plan(
@@ -652,7 +663,7 @@ class SpotPerpArbitrageRecordingTests(unittest.IsolatedAsyncioTestCase):
             quantity=Decimal("10"),
             clip_usd=100.0,
             spot_book={"bid": 9.99, "ask": 10.01, "ts_ms": 1, "asks": [(10.01, 1)]},
-            perp_book={"bid": 11.9, "ask": 12.1, "ts_ms": 1},
+            perp_book={"bid": 11.9, "ask": 12.1, "ts_ms": 1, "bid_size": 10000, "ask_size": 10000},
         )
 
         with TemporaryDirectory() as temp_dir:
@@ -664,7 +675,7 @@ class SpotPerpArbitrageRecordingTests(unittest.IsolatedAsyncioTestCase):
                 "scripts.run_spot_perp_arbitrage.fetch_plan_books",
                 new=AsyncMock(return_value=(
                     {"bid": 9.99, "ask": 10.01, "ts_ms": 1, "asks": [(10.01, 1)]},
-                    {"bid": 11.9, "ask": 12.1, "ts_ms": 1},
+                    {"bid": 11.9, "ask": 12.1, "ts_ms": 1, "bid_size": 10000, "ask_size": 10000},
                 )),
             ):
                 with self.assertRaisesRegex(RuntimeError, "insufficient hedge depth"):
@@ -713,8 +724,9 @@ class SpotPerpArbitrageRecordingTests(unittest.IsolatedAsyncioTestCase):
             short_venue="aster",
             quantity=Decimal("10"),
             clip_usd=100.0,
-            spot_book={"bid": 9.99, "ask": 10.01, "ts_ms": 1},
-            perp_book={"bid": 11.9, "ask": 12.1, "ts_ms": 1},
+            spot_book={"bid": 9.99, "ask": 10.01, "ts_ms": 1, "bid_size": 10000, "ask_size": 10000},
+            perp_book={"bid": 11.9, "ask": 12.1, "ts_ms": 1, "bid_size": 10000, "ask_size": 10000},
+            maker_venue_override="aster",
         )
 
         with TemporaryDirectory() as temp_dir:
@@ -725,8 +737,8 @@ class SpotPerpArbitrageRecordingTests(unittest.IsolatedAsyncioTestCase):
             ), patch(
                 "scripts.run_spot_perp_arbitrage.fetch_plan_books",
                 new=AsyncMock(return_value=(
-                    {"bid": 9.99, "ask": 10.01, "ts_ms": 1},
-                    {"bid": 9.9, "ask": 10.1, "ts_ms": 1},
+                    {"bid": 9.99, "ask": 10.01, "ts_ms": 1, "bid_size": 10000, "ask_size": 10000},
+                    {"bid": 9.9, "ask": 10.1, "ts_ms": 1, "bid_size": 10000, "ask_size": 10000},
                 )),
             ):
                 result = await execute_spot_perp_plan(
@@ -788,8 +800,8 @@ class SpotPerpArbitrageRecordingTests(unittest.IsolatedAsyncioTestCase):
             nonlocal fetch_calls
             fetch_calls += 1
             return (
-                {"bid": 9.99, "ask": 10.01, "ts_ms": fetch_calls},
-                {"bid": 9.9, "ask": 11.1 if "aster:cancel" in events else 10.1, "ts_ms": fetch_calls},
+                {"bid": 9.99, "ask": 10.01, "ts_ms": fetch_calls, "bid_size": 10000, "ask_size": 10000},
+                {"bid": 9.9, "ask": 11.1 if "aster:wait_fill" in events else 10.1, "ts_ms": fetch_calls, "bid_size": 10000, "ask_size": 10000},
             )
 
         plan = build_spot_perp_plan(
@@ -798,8 +810,8 @@ class SpotPerpArbitrageRecordingTests(unittest.IsolatedAsyncioTestCase):
             short_venue="aster",
             quantity=Decimal("10"),
             clip_usd=100.0,
-            spot_book={"bid": 9.99, "ask": 10.01, "ts_ms": 1},
-            perp_book={"bid": 9.9, "ask": 10.1, "ts_ms": 1},
+            spot_book={"bid": 9.99, "ask": 10.01, "ts_ms": 1, "bid_size": 10000, "ask_size": 10000},
+            perp_book={"bid": 9.9, "ask": 10.1, "ts_ms": 1, "bid_size": 10000, "ask_size": 10000},
         )
 
         with TemporaryDirectory() as temp_dir:
@@ -830,7 +842,7 @@ class SpotPerpArbitrageRecordingTests(unittest.IsolatedAsyncioTestCase):
                 "binance_spot:place_market",
             ],
         )
-        self.assertEqual(prices, ["10.09", "11.09"])
+        self.assertEqual(prices, ["10.1", "11.1"])
 
 
     async def test_maker_timeout_retries_transient_cancel_before_replacing_order(self) -> None:
@@ -1674,8 +1686,8 @@ class SpotPerpArbitrageRecordingTests(unittest.IsolatedAsyncioTestCase):
 
         async def fake_fetch_plan_books(*, symbol: str, short_venue: str, clip_usd: float):
             return (
-                {"bid": 9.99, "ask": 10.01, "ts_ms": 2},
-                {"bid": 9.9, "ask": 10.09, "ts_ms": 2},
+                {"bid": 9.99, "ask": 10.01, "ts_ms": 2, "bid_size": 10000, "ask_size": 10000},
+                {"bid": 9.9, "ask": 10.09, "ts_ms": 2, "bid_size": 10000, "ask_size": 10000},
             )
 
         plan = build_spot_perp_plan(
@@ -1684,8 +1696,8 @@ class SpotPerpArbitrageRecordingTests(unittest.IsolatedAsyncioTestCase):
             short_venue="aster",
             quantity=Decimal("10"),
             clip_usd=100.0,
-            spot_book={"bid": 9.99, "ask": 10.01, "ts_ms": 1},
-            perp_book={"bid": 9.9, "ask": 10.1, "ts_ms": 1},
+            spot_book={"bid": 9.99, "ask": 10.01, "ts_ms": 1, "bid_size": 10000, "ask_size": 10000},
+            perp_book={"bid": 9.9, "ask": 10.1, "ts_ms": 1, "bid_size": 10000, "ask_size": 10000},
         )
 
         with TemporaryDirectory() as temp_dir:
@@ -1705,7 +1717,7 @@ class SpotPerpArbitrageRecordingTests(unittest.IsolatedAsyncioTestCase):
                 )
 
         self.assertTrue(result["ok"])
-        self.assertEqual(prices, ["10.08"])
+        self.assertEqual(prices, ["10.09"])
 
 
     async def test_open_execution_records_live_spot_and_perp_legs(self) -> None:
@@ -1739,8 +1751,8 @@ class SpotPerpArbitrageRecordingTests(unittest.IsolatedAsyncioTestCase):
             short_venue="aster",
             quantity=Decimal("10"),
             clip_usd=100.0,
-            spot_book={"bid": 9.99, "ask": 10.01, "ts_ms": 1},
-            perp_book={"bid": 9.9, "ask": 10.1, "ts_ms": 1},
+            spot_book={"bid": 9.99, "ask": 10.01, "ts_ms": 1, "bid_size": 10000, "ask_size": 10000},
+            perp_book={"bid": 9.9, "ask": 10.1, "ts_ms": 1, "bid_size": 10000, "ask_size": 10000},
         )
 
         with TemporaryDirectory() as temp_dir:
@@ -1751,8 +1763,8 @@ class SpotPerpArbitrageRecordingTests(unittest.IsolatedAsyncioTestCase):
             ), patch(
                 "scripts.run_spot_perp_arbitrage.fetch_plan_books",
                 new=AsyncMock(return_value=(
-                    {"bid": 9.99, "ask": 10.01, "ts_ms": 1},
-                    {"bid": 9.9, "ask": 10.1, "ts_ms": 1},
+                    {"bid": 9.99, "ask": 10.01, "ts_ms": 1, "bid_size": 10000, "ask_size": 10000},
+                    {"bid": 9.9, "ask": 10.1, "ts_ms": 1, "bid_size": 10000, "ask_size": 10000},
                 )),
             ):
                 result = await execute_spot_perp_plan(
@@ -1800,8 +1812,8 @@ class SpotPerpArbitrageRecordingTests(unittest.IsolatedAsyncioTestCase):
             short_venue="aster",
             quantity=Decimal("10"),
             clip_usd=100.0,
-            spot_book={"bid": 9.99, "ask": 10.01, "ts_ms": 1},
-            perp_book={"bid": 9.9, "ask": 10.1, "ts_ms": 1},
+            spot_book={"bid": 9.99, "ask": 10.01, "ts_ms": 1, "bid_size": 10000, "ask_size": 10000},
+            perp_book={"bid": 9.9, "ask": 10.1, "ts_ms": 1, "bid_size": 10000, "ask_size": 10000},
         )
 
         with TemporaryDirectory() as temp_dir:
@@ -1812,8 +1824,8 @@ class SpotPerpArbitrageRecordingTests(unittest.IsolatedAsyncioTestCase):
             ), patch(
                 "scripts.run_spot_perp_arbitrage.fetch_plan_books",
                 new=AsyncMock(return_value=(
-                    {"bid": 9.99, "ask": 10.01, "ts_ms": 1},
-                    {"bid": 9.9, "ask": 10.1, "ts_ms": 1},
+                    {"bid": 9.99, "ask": 10.01, "ts_ms": 1, "bid_size": 10000, "ask_size": 10000},
+                    {"bid": 9.9, "ask": 10.1, "ts_ms": 1, "bid_size": 10000, "ask_size": 10000},
                 )),
             ):
                 result = await execute_spot_perp_plan(

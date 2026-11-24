@@ -1,3 +1,5 @@
+import { executeNativeOrderRequest, reserveNativeDispatch, saveNativeReceipt, readNativeReceipt } from "./native_orders.js";
+
 const DEBUGGER_VERSION = "1.3";
 const ORDER_AUTOMATION_VERSION = "variational-order-automation-2026-08-17-12";
 const MAX_QUEUE_SIZE = 1000;
@@ -5,6 +7,7 @@ const AUTO_RELOAD_COOLDOWN_MS = 5000;
 const MAX_ORDER_RELOAD_RETRIES = 2;
 
 const DEFAULT_CONFIG = {
+  nativeTradingEnabled: false,
   wsEndpoint: "ws://127.0.0.1:8766",
   restEndpoint: "ws://127.0.0.1:8767",
   commandEndpoint: "ws://127.0.0.1:8768",
@@ -194,7 +197,8 @@ class CommandSocket {
           return;
         }
         this.status = "connected";
-        socket.send(JSON.stringify({ "type": "REGISTER", "role": "extension" }));
+        socket.send(JSON.stringify({ "type": "REGISTER", "role": "extension",
+          nativeProtocol: "variational-native-v1", nativeTradingEnabled: state.config.nativeTradingEnabled === true }));
         notifyStatus();
       };
 
@@ -620,11 +624,70 @@ async function runVariationalPricePreviewInjection(payload) {
   throw lastError;
 }
 
+let nativeCommandBusy = false;
+async function handleNativeOrderCommand(payload) {
+  const mutation = ["submit", "cancel"].includes(payload.action);
+  if (nativeCommandBusy || state.attachedTabId == null || (mutation && state.config.nativeTradingEnabled !== true)) {
+    commandClient.send({ type: "NATIVE_ORDER_RESULT", requestId: payload.requestId, ok: false, error: "native_unavailable_or_disabled" });
+    return;
+  }
+  nativeCommandBusy = true;
+  try {
+    if (payload.action === "recover") {
+      const [identity] = await chrome.scripting.executeScript({
+        target: { tabId: state.attachedTabId }, world: "ISOLATED", func: executeNativeOrderRequest,
+        args: [{ ...payload, action: "identity" }]
+      });
+      if (!identity?.result?.ok) throw new Error("native_identity_unavailable");
+      const stored = await readNativeReceipt(chrome.storage.local, payload.dispatchRequestId);
+      commandClient.send({ type: "NATIVE_RECOVERY_RESULT", requestId: payload.requestId, ok: true,
+        current: identity.result, dispatchRequestId: payload.dispatchRequestId, stored });
+      return;
+    }
+    if (mutation) await reserveNativeDispatch(chrome.storage.local, payload.requestId);
+    const [injection] = await chrome.scripting.executeScript({
+      target: { tabId: state.attachedTabId }, world: "ISOLATED",
+      func: executeNativeOrderRequest, args: [payload]
+    });
+    if (!injection?.result) throw new Error("native_injection_unknown");
+    if (mutation) await saveNativeReceipt(chrome.storage.local, payload, injection.result);
+    commandClient.send({ type: "NATIVE_ORDER_RESULT", requestId: payload.requestId,
+      ok: injection.result.ok === true, receipt: injection.result });
+  } catch {
+    commandClient.send({ type: "NATIVE_ORDER_RESULT", requestId: payload.requestId, ok: false, error: "native_dispatch_unknown" });
+  } finally { nativeCommandBusy = false; }
+}
+
+let commandOwnerBusy = false;
 async function handleCommandMessage(raw) {
+  let payload;
+  try { payload = JSON.parse(raw); } catch { return; }
+  if (!["NATIVE_ORDER_REQUEST", "PLACE_ORDER", "CANCEL_ORDER", "PREPARE_MARKET_ORDER", "PREVIEW_LIMIT_ORDER_PRICE"].includes(payload?.type)) return;
+  if (commandOwnerBusy) {
+    commandClient.send({ type: "COMMAND_BUSY", requestId: payload.requestId, ok: false });
+    return;
+  }
+  commandOwnerBusy = true;
+  try {
+    if (autoReloadInFlight) await autoReloadInFlight;
+    await handleOwnedCommandMessage(raw);
+  }
+  finally { commandOwnerBusy = false; }
+}
+
+async function handleOwnedCommandMessage(raw) {
   let payload;
   try {
     payload = JSON.parse(raw);
   } catch (error) {
+    return;
+  }
+  if (payload?.type === "NATIVE_ORDER_REQUEST") {
+    await handleNativeOrderCommand(payload);
+    return;
+  }
+  if (nativeCommandBusy) {
+    commandClient.send({ type: "COMMAND_BUSY", requestId: payload?.requestId, ok: false });
     return;
   }
   if (payload?.type === "PLACE_ORDER") {
@@ -2723,8 +2786,9 @@ function executeVariationalOrder(command) {
   })();
 }
 
+let autoReloadInFlight = null;
 function autoReloadAttachedTab(reason) {
-  if (!state.active || state.attachedTabId == null) {
+  if (!state.active || state.attachedTabId == null || commandOwnerBusy || autoReloadInFlight) {
     return;
   }
   const now = Date.now();
@@ -2733,15 +2797,10 @@ function autoReloadAttachedTab(reason) {
   }
   state.lastAutoReloadAt = now;
 
-  chrome.tabs.reload(state.attachedTabId, {}, () => {
-    const err = chrome.runtime.lastError;
-    if (err) {
-      state.lastError = `Auto reload failed (${reason}): ${err.message}`;
-    } else {
-      state.lastError = null;
-    }
-    notifyStatus();
-  });
+  autoReloadInFlight = reloadTabAndWaitForComplete(state.attachedTabId)
+    .then(() => { state.lastError = null; })
+    .catch(() => { state.lastError = `Auto reload failed (${reason})`; })
+    .finally(() => { autoReloadInFlight = null; notifyStatus(); });
 }
 
 async function ensureConfigLoaded() {
@@ -2755,6 +2814,7 @@ async function ensureConfigLoaded() {
 
 function sanitizeConfig(incoming = {}) {
   return {
+    nativeTradingEnabled: incoming.nativeTradingEnabled === true,
     wsEndpoint: asStringOrDefault(incoming.wsEndpoint, DEFAULT_CONFIG.wsEndpoint),
     restEndpoint: asStringOrDefault(incoming.restEndpoint, DEFAULT_CONFIG.restEndpoint),
     commandEndpoint: asStringOrDefault(incoming.commandEndpoint, DEFAULT_CONFIG.commandEndpoint),

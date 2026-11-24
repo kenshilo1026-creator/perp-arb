@@ -2,7 +2,7 @@
 (() => {
   'use strict';
   const $ = id => document.getElementById(id);
-  const names = {aster:'Aster',hyperliquid:'Hyperliquid',lighter:'Lighter',variational:'Variational',entropy:'Entropy',arcus:'Arcus',ondo:'Ondo'};
+  const names = {aster:'Aster',hyperliquid:'Hyperliquid',lighter:'Lighter',variational:'Variational',entropy:'Entropy',arcus:'Arcus',ondo:'Ondo',binance_spot:'Binance 現貨'};
   const colors = {entry:'#568dff',exit:'#fb7079',long:'#41d7a0',short:'#43cbe3',reference:'#c4f85b'};
   const timeFormat = new Intl.DateTimeFormat('zh-HK',{timeZone:'Asia/Hong_Kong',hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false});
   const axisFormat = new Intl.DateTimeFormat('zh-HK',{timeZone:'Asia/Hong_Kong',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hour12:false});
@@ -23,8 +23,8 @@
   async function catalog(refresh=false){
     const data=await get('catalog',{refresh});state.catalog=data.venues;
     const options=data.venues.map(v=>[v.id,`${v.name}${v.available?'':' · 暫不可用'}`,!v.available]);
-    setOptions($('long'),options,$('long').value||'aster');setOptions($('short'),options,$('short').value||'hyperliquid');
-    if($('long').value===$('short').value){const other=data.venues.find(v=>v.available&&v.id!==$('long').value);if(other)$('short').value=other.id;}
+    setOptions($('long'),options,$('long').value||'aster');setOptions($('short'),options.filter(v=>v[0]!=='binance_spot'),$('short').value||'hyperliquid');
+    if($('long').value===$('short').value){const other=data.venues.find(v=>v.available&&v.id!=='binance_spot'&&v.id!==$('long').value);if(other)$('short').value=other.id;}
     commonSymbols();
   }
   function commonSymbols(){
@@ -36,6 +36,9 @@
     if(!common.length)notice('這兩個交易所目前沒有可確認的共同市場。','error');
   }
   function caption(){const s=selection();$('pair-caption').textContent=`${(names[s.long]||'—').toUpperCase()} / ${(names[s.short]||'—').toUpperCase()}`;
+    $('contract-kind').textContent=s.long==='binance_spot'?'SPOT / PERP':'PERP / PERP';
+    $('swap').disabled=s.long==='binance_spot';$('swap').title=s.long==='binance_spot'?'現貨配對固定為買入現貨／做空永續':'交換做多與做空方向';
+    $('funding-detail').textContent=s.long==='binance_spot'?'現貨無資金費率 · 顯示永續空方費率':'空方收取 − 多方支付 · 預估';
     $('funding-long-name').textContent=names[s.long];$('funding-short-name').textContent=names[s.short];
     $('entry-basis').textContent=state.mode==='taker'?'可見深度估算':'掛單估算';
     $('quote-tag').textContent=[s.short,s.long].includes('variational')?'含參考報價':'未扣費用';}
@@ -100,14 +103,14 @@
   }
   function renderMetrics(){const s=selection(),data=state.last,sp=data?.spreads?.[state.mode];
     $('entry-value').textContent=pct(sp?.entry);$('exit-value').textContent=pct(sp?.exit);
-    const a=data?.funding?.[s.short],b=data?.funding?.[s.long];$('funding-value').textContent=a&&b?pct(a.hourly_pct-b.hourly_pct):'—';
+    const a=data?.funding?.[s.short],b=data?.funding?.[s.long];$('funding-value').textContent=s.long==='binance_spot'?(a?pct(a.hourly_pct):'—'):(a&&b?pct(a.hourly_pct-b.hourly_pct):'—');
     $('entry-detail').textContent=data?.spreads?.reason||(state.mode==='taker'?`兩腿各 ${state.quantity} ${s.symbol} · 深度加權`:`最佳限價估算 · ${state.quantity} ${s.symbol}`);
     const actual=actualQuoteSpread();if(actual!==null)$('entry-detail').textContent=`策略實際掛單價差 ${pct(actual)}（摘要）`;
     const liveGroups=state.groups.filter(g=>g.mode==='live'),observed=liveGroups.length?liveGroups:state.groups;
     const exposure=observed.reduce((sum,g)=>sum+Math.abs(Number(g.short?.quantity||0)+Number(g.long?.quantity||0)),0);
     $('exposure-value').textContent=observed.length?`${fmt(exposure,4)} ${s.symbol}`:'—';
     $('exposure-detail').textContent=observed.length?`${liveGroups.length?'實盤':'模擬'}殘餘絕對值合計 · ${observed.filter(g=>g.running).length} 組有心跳`:'無此配對的策略紀錄';
-    for(const leg of ['long','short']){const rate=data?.funding?.[s[leg]];$(`funding-${leg}-rate`).textContent=rate?`${pct(rate.raw_pct)} / ${rate.interval_hours}h`:'—';}
+    for(const leg of ['long','short']){const rate=data?.funding?.[s[leg]];$(`funding-${leg}-rate`).textContent=s[leg]==='binance_spot'?'不適用（現貨）':(rate?`${pct(rate.raw_pct)} / ${rate.interval_hours}h`:'—');}
   }
   function actualQuoteSpread(){if(state.mode==='taker'||!state.last)return null;const s=selection(),leg=state.mode==='maker_long'?'long':'short';
     for(const g of state.groups.filter(g=>g.running&&g.mode==='live'))for(const o of g.orders||[]){
@@ -173,15 +176,16 @@
   function makeDemo(){const s=selection(),now=Date.now(),n=Math.min(6000,Math.ceil(state.hours*3600/Number($('interval').value)))+1;state.snapshots=[];state.funding={[s.short]:[],[s.long]:[]};let seed=37;const rand=()=>{seed=(seed*16807)%2147483647;return seed/2147483647;};
     for(let i=0;i<n;i++){const t=now-(n-1-i)*state.hours*3600000/n,mid=2480+Math.sin(i/31)*11+Math.sin(i/9)*3-i*.025,edge=.18+Math.sin(i/19)*.06+(rand()-.5)*.035+(i>280?.065:0);const books={};for(const [v,base] of [[s.long,mid],[s.short,mid*(1+edge/100)]]){const bids=[],asks=[];for(let j=0;j<6;j++){bids.push([base-.2-j*.12,+(2+rand()*18).toFixed(3)]);asks.push([base+.2+j*.12,+(2+rand()*18).toFixed(3)]);}books[v]={venue:v,status:v==='variational'?'indicative':'live',bid:base-.2,ask:base+.2,bids,asks,received_ms:t,source_ms:t-75,age_ms:75,transport_ms:75,spread_pct:.016};}
       const funding={[s.long]:{hourly_pct:.0015+Math.sin(i/28)*.0004,raw_pct:.012,interval_hours:8,ts_ms:t},[s.short]:{hourly_pct:.0045+Math.sin(i/25)*.001,raw_pct:.0045,interval_hours:1,ts_ms:t}};
+      if(s.long==='binance_spot')delete funding[s.long];
       for(const rate of Object.values(funding))rate.raw_pct=rate.hourly_pct*rate.interval_hours;
-      state.snapshots.push({ts_ms:t,books,funding,spreads:{taker:{entry:edge-.016,exit:edge+.016},maker_long:{entry:edge,exit:edge},maker_short:{entry:edge,exit:edge}}});if(i%10===0)for(const v of [s.short,s.long])state.funding[v].push(funding[v]);}
+      state.snapshots.push({ts_ms:t,books,funding,spreads:{taker:{entry:edge-.016,exit:edge+.016},maker_long:{entry:edge,exit:edge},maker_short:{entry:edge,exit:edge}}});if(i%10===0)for(const v of [s.short,s.long])if(funding[v])state.funding[v].push(funding[v]);}
     state.last=state.snapshots.at(-1);state.groups=[];state.reference=state.snapshots.map(r=>({ts_ms:r.ts_ms,reference:r.spreads.taker.entry+.008}));
     notice('示範模式 · 所有價格、費率與深度均為模擬資料，不代表市場機會。','demo');connection('示範資料','waiting');$('demo').textContent='返回即時行情';$('demo').classList.add('selected');
     $('history-note').textContent='示範資料 · 可操作圖表、設定與時間範圍';$('funding-note').textContent='示範費率 · 非歷史收益';renderSnapshot(state.last);renderStrategies();draw();
   }
   function resize(){for(const id of ['spread','funding']){const el=$(`${id}-chart`),chart=state[`${id}Chart`];if(chart&&el.clientWidth)chart.setSize({width:el.clientWidth,height:el.clientHeight-24});}}
-  $('swap').onclick=()=>{const s=$('short').value;$('short').value=$('long').value;$('long').value=s;commonSymbols();restart();};
-  for(const id of ['short','long'])$(id).onchange=()=>{if($('short').value===$('long').value){const other=id==='short'?'long':'short';const replacement=state.catalog.find(v=>v.available&&v.id!==$(id).value);if(replacement)$(other).value=replacement.id;}commonSymbols();restart();};
+  $('swap').onclick=()=>{if($('long').value==='binance_spot')return;const s=$('short').value;$('short').value=$('long').value;$('long').value=s;commonSymbols();restart();};
+  for(const id of ['short','long'])$(id).onchange=()=>{if($('short').value===$('long').value){const other=id==='short'?'long':'short';const replacement=state.catalog.find(v=>v.available&&(other==='long'||v.id!=='binance_spot')&&v.id!==$(id).value);if(replacement)$(other).value=replacement.id;}commonSymbols();restart();};
   $('symbol').onchange=()=>restart();
   $('ranges').onclick=e=>{const b=e.target.closest('[data-hours]');if(!b)return;state.hours=Number(b.dataset.hours);$('ranges').querySelectorAll('button').forEach(x=>x.classList.toggle('selected',x===b));if(state.hours===168&&Number($('interval').value)<300)$('interval').value='300';state.follow=true;state.demo?makeDemo():(loadHistory(),loadAux());};
   $('interval').onchange=()=>state.demo?makeDemo():loadHistory(state.generation,false);$('prices').onchange=()=>draw();
@@ -197,6 +201,6 @@
   const timer=setInterval(()=>{$('clock').textContent=`${time(Date.now())} HKT`;if(!state.demo&&state.lastFrame&&Date.now()-state.lastFrame>3000){connection('資料中斷','error');invalidate();state.lastFrame=0;}},1000);
   let polling=false;const statusTimer=setInterval(async()=>{if(polling||document.hidden||state.demo)return;polling=true;try{await loadStrategies();}finally{polling=false;}},3000);
   window.addEventListener('pagehide',()=>{disconnect();clearInterval(timer);clearInterval(statusTimer);});
-  setOptions($('long'),Object.entries(names),'aster');setOptions($('short'),Object.entries(names),'hyperliquid');renderEmptyBooks();
+  setOptions($('long'),Object.entries(names),'aster');setOptions($('short'),Object.entries(names).filter(v=>v[0]!=='binance_spot'),'hyperliquid');renderEmptyBooks();
   (async()=>{try{await catalog();await restart();}catch{connection('目錄讀取失敗','error');notice('市場目錄無法載入，請按「重新連線」。可使用示範預覽檢視版面。','error');}})();
 })();

@@ -72,6 +72,11 @@ impl Plan {
     }
     /// Public metadata only; no credentials, orders or account reads.
     pub async fn resolve(&self) -> Result<Order> {
+        self.resolve_with_metadata().await.map(|(order, _)| order)
+    }
+    pub async fn resolve_with_metadata(
+        &self,
+    ) -> Result<(Order, perp_arb_market_data::catalog::ResolvedInstrument)> {
         use perp_arb_market_data::{
             catalog::{self, SymbolMappings},
             metadata,
@@ -124,7 +129,7 @@ impl Plan {
             return Err(error.code().into());
         }
         order.validate().map_err(|e| e.to_string())?;
-        Ok(order)
+        Ok((order, resolved))
     }
 }
 #[derive(Debug, PartialEq, Eq)]
@@ -183,13 +188,32 @@ pub fn read_plan(path: &Path) -> Result<Plan> {
     p.validate()?;
     Ok(p)
 }
-/// Shared across all order-test journal paths for this OS user; Python does not honor this lock.
+/// Account locks plus a global lock shared by the manual Python/Rust CLIs.
 pub struct AccountLock {
     _file: File,
 }
 impl AccountLock {
+    pub fn global_execution() -> Result<Self> {
+        let path = std::env::temp_dir().join("perp-arb-live-execution.lock");
+        let mut options = OpenOptions::new();
+        options.read(true).write(true).create(true).truncate(false);
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            options.share_mode(0);
+        }
+        let file = options
+            .open(path)
+            .map_err(|_| "another Python/Rust execution CLI is running")?;
+        file.try_lock()
+            .map_err(|_| "another Python/Rust execution CLI is running")?;
+        Ok(Self { _file: file })
+    }
     pub fn acquire(o: &Order) -> Result<Self> {
-        let bytes = serde_json::to_vec(&(&o.venue, o.network, o.account.to_ascii_lowercase()))
+        Self::for_scope(&o.venue, o.network, &o.account)
+    }
+    pub fn for_scope(venue: &str, network: Network, account: &str) -> Result<Self> {
+        let bytes = serde_json::to_vec(&(venue, network, account.to_ascii_lowercase()))
             .map_err(|_| "lock identity")?;
         let id = Sha256::digest(bytes)
             .iter()

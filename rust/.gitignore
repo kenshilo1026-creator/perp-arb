@@ -1,5 +1,6 @@
 /target/
 /artifacts/
+/runs/
 **/__pycache__/
 *.wal
 

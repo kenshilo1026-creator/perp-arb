@@ -6,6 +6,7 @@ pub mod hub;
 pub mod metadata;
 pub mod recorder;
 pub mod shared;
+pub mod variational;
 
 use perp_arb_core::{
     decimal,

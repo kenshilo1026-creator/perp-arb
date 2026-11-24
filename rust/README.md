@@ -1,5 +1,25 @@
 # perp arb Rust 分批移植
 
+2026-11-23 現貨／永續第四批：`run_spot_perp_arbitrage.py --engine rust --live` 已接通 **Aster／Hyperliquid Maker → Binance Spot 市價對沖**，包含 WS 部分成交、最佳一檔分批、追價撤單、持久化未知送單及相同 run 恢復。兩腿均由 Rust 執行；沒有實際送單驗收，實際延遲及 spread 等待使用者測試。操作、角色限制及未完成項目見 [現貨對沖](crates/spot-perp/README.md)。下列段落保留歷史批次範圍。
+
+2026-11-23 現貨／永續第三小批：新增 `crates/binance-spot` 原生私人傳輸、佣金／累計成交協調與持久化單次送單許可；交易方法完成本機替身故障測試。新增 `--rust-binance-preflight` 唯讀帳戶／WS 入口。**尚未完成雙腿 spot/perp live CLI**；詳見 [Binance 私人元件與限制](crates/binance-spot/README.md)。
+
+2026-11-23 現貨／永續第二小批：同一個唯讀入口加入 Hyperliquid、Lighter 原生公開 WS／商品約束，支援兩邊 Maker 選擇與最佳一檔數量計劃。**此入口仍不能實盤對沖**，Binance 私人執行器及 Variational extension 接線尚未完成。參見 [能力表與命令](crates/spot-perp/README.md)。
+
+2026-11-23 現貨／永續第一批：新增 `crates/spot-perp` 與 `run_spot_perp_arbitrage.py --engine rust`。Binance Spot／Aster 公開商品規格、原生 BBO＋完整部分深度 WS、最佳一檔分單、Maker 選擇及保留／撤回／追價決策已移植。2,000 組 Python 決策回放一致；已連真實公開行情，沒有私人帳戶存取、送單或撤單。**目前只有唯讀預覽，不能用此入口實盤套利。** 詳見 [現貨套利批次與操作](crates/spot-perp/README.md)。
+
+2026-11-19 速度優化批：新增明確選用的 Variational `ws_confirmed` 事件驅動對沖，與 Maker REST 查單分開排程；保留 trade ID 去重、送單前 WAL、未知送單與 gap 隔離。預設仍為 `rest_verified`，先取得真實成交樣本。新增收尾輸出的 monotonic 時間記錄與分析工具，使用方式見 [WS 快速對沖及實測](PAIRED_ORDER.md#ws-快速對沖及實測時間記錄)。本批沒有送出真實委託。
+
+2026-11-19 第七批：已提供 `place_order.py --engine rust --rust-action ...` 雙腿入口，Variational 固定限價 Maker＋Aster／Hyperliquid 原生 IOC 對沖，包含獨立基準比對、兩份 WAL、部分成交、未知送單查證及同目錄恢復。兩組真實帳戶唯讀對帳通過；實際送單僅以 mock／loopback 驗收，尚未執行真實交易。使用方法及限制見 [雙腿下單](PAIRED_ORDER.md)。以下日期段落保留各批完成時的範圍。
+
+2026-11-19 第六批：Variational 全帳戶雙重讀取及私人事件失效屏障已接入，真實唯讀查詢成功；新增 WS trade 與精確 REST 成交交叉驗證、送單前 Maker 帳本、RFQ 綁定及 Aster／Hyperliquid IOC 對沖 transport 接線。實際下單只做本機替身測試；真實即時成交尚無樣本，CLI 仍是唯讀，新增 `--rust-inventory`。詳見 [第六批與剩餘限制](VARIATIONAL.md)。
+
+2026-11-19 第五批：Variational confirmed trade ID 去重已持久化，新增雙帳本 blocking owner，串接精確查詢、Maker 成交、Aster／Hyperliquid 對沖預留及未知送單恢復；涵蓋兩次 WAL 寫入間中斷。這是協調元件與故障測試，尚未接實際雙腿送單，CLI 仍只開放 Variational preflight。詳見 [第五批](VARIATIONAL.md)。
+
+2026-11-19 第四批：Variational 已加入真實 RFQ／成交查詢來源、一次性原生送單／撤單 transport、extension 持久化回覆及未知送單身份恢復；`place_order.py --engine rust --rust-preflight` 可直接啟動 Rust 唯讀驗收，不經 Python broker。真實帳戶歷史委託與成交已讀取比對；送單／撤單只做模擬，尚未開放雙腿實盤。詳見 [接入範圍與實測](VARIATIONAL.md)。
+
+同日下一批：補上 browser Maker 送單／撤單持久化狀態、查單與重啟隔離，以及已驗證累計成交到既有 Aster／Hyperliquid 紙上對沖協調器的交接；修正 `/portfolio` 巢狀 trade 辨識。這是執行核心與協議準備，還沒有開放 Variational 真實送單。
+
 這是獨立的 Rust 重寫目錄，目標是降低行情處理、成交事件協調與對沖送單前的本機延遲。目前包含計算核心、Aster／Hyperliquid 公共行情、商品精度解析，以及兩所私人 WS／事件協調／獨立 REST 查單。原有 Python 程式照常使用；Rust 新增受控單筆下單測試入口。
 
 目前進度（2026-11-12）：4b-2 提供 `order-test`，涵蓋公開商品預覽、單筆限價送單、私人事件觀察、按 client ID 查單、到期撤回剩餘量及重啟恢復。完整委託先同步帳本才送出，未知回覆不自動重送；已成交部分不會自動反向平倉。支援 Aster v3 mainnet 與 Hyperliquid mainnet／testnet，尚未接成兩腿自動套利或移植 Variational。詳見 [操作說明與範例](crates/order-test/README.md)、[驗收結果](VALIDATION.md) 及 [執行協調器範圍](crates/execution/README.md)。
@@ -17,6 +37,7 @@
 - `crates/hyperliquid-private`：地址限定的四 channel 私人 WS（委託、成交、funding、其他帳戶流水）、快照／成交去重、獨立查單、顯式唯讀 probe。
 - `crates/execution`：紙上單筆 Maker／對沖協調、兩腿私人快照橋接、對沖預留量與終態後剩餘量；可選持久化帳本、查證票據與重啟恢復，不含交易網路請求。
 - `crates/order-test`：單筆真實永續限價委託測試；`--live` 才載入金鑰與交易，預覽只讀公開資料。
+- `crates/variational-bridge`：直接接收 extension 三條 WS；原生 RFQ 查詢、一次性送單／撤單傳輸及有界限雙腿 CLI。變更請求需 WAL permit、`--live` 及 extension 顯式 opt-in，預設關閉。UI ACK、持倉變化及未驗證 trade candidate 不授權對沖。
 - `tools/verify_parity.py`：直接呼叫現有 Python 函式，產生 571 個固定／固定種子案例，再與 Rust 結果比較。這是驗證工具，不是 Rust 執行時的 Python 依賴。
 - `tools/inventory.py`、`migration-inventory.json`：逐檔記錄既有功能、來源雜湊與移植批次，避免只搬核心而遺漏 CLI、風控或 UI。
 

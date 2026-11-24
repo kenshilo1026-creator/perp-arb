@@ -1,0 +1,37 @@
+{
+  "run_id": "replace-with-unique-run-id",
+  "extension_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "maker": {
+    "request_id": "replace-with-unique-run-id",
+    "account": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "symbol": "ETH",
+    "side": "BUY",
+    "quantity": "0.01",
+    "limit_price": "3000",
+    "reduce_only": false,
+    "max_notional": "30"
+  },
+  "instrument": {
+    "underlying": "ETH",
+    "instrument_type": "perpetual_future",
+    "settlement_asset": "USDC",
+    "funding_interval_s": 3600
+  },
+  "hedge": {
+    "venue": "aster",
+    "network": "mainnet",
+    "account": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "symbol": "ETHUSDT",
+    "side": "SELL",
+    "quantity": "0.01",
+    "limit_price": "2990",
+    "tif": "ioc",
+    "reduce_only": false,
+    "max_notional_usd": "30",
+    "wait_seconds": 20
+  },
+  "max_entry_gap": "0.0025",
+  "maker_wait_seconds": 30,
+  "recovery_seconds": 60,
+  "maker_fill_mode": "rest_verified"
+}

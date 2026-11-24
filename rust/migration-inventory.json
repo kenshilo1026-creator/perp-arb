@@ -3,7 +3,7 @@
   "files": [
     {
       "path": "browser_extensions/variational/background.js",
-      "sha256": "84dd5c29f7ce8f32037535d9c34f9c74d8c2de2086c08641c7a4668680a9fbbf",
+      "sha256": "05d3b6f1a3a0cd6aef2fadbfd36b19fdbc3c6c1a3af8f9ea988854bc7c09ef12",
       "phase": "7_browser_bridge",
       "status": "planned",
       "ported_scope": null
@@ -16,15 +16,22 @@
       "ported_scope": null
     },
     {
+      "path": "browser_extensions/variational/native_orders.js",
+      "sha256": "aeb28edd57523cc0b8bb14f1031337b7c4c882c97a56442f3750abab75b251cb",
+      "phase": "7_browser_bridge",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
       "path": "browser_extensions/variational/popup.html",
-      "sha256": "7b6cad9ff3bbe649997d8ea7424134d8ca240ad85ee60d4ddfb4d437db861b9f",
+      "sha256": "8b3b4b264e951b49d984f182214a3efa54ac4fdc70730214862d4aba6c0707ee",
       "phase": "7_browser_bridge",
       "status": "planned",
       "ported_scope": null
     },
     {
       "path": "browser_extensions/variational/popup.js",
-      "sha256": "a74d59c4be03e562bdb0b8468b52ff9dc6a7acb5214b5f7d038ac17100d65e14",
+      "sha256": "4a5f625412766bac2192f4537bf153daf6d9ffe69c0c65e8ee58e6329bfcfad8",
       "phase": "7_browser_bridge",
       "status": "planned",
       "ported_scope": null
@@ -227,7 +234,7 @@
     },
     {
       "path": "hydra_basis/config.py",
-      "sha256": "696ea2232ee9550a187732b637a9b09615073ec62f8e2ea0d5576f5bdc3a7ec8",
+      "sha256": "c4946a38a2bc4b832d4827e3d913638bf39aa53cc1525346380b25a659d7bf1a",
       "phase": "7_funding_history_shared_utilities",
       "status": "planned",
       "ported_scope": null
@@ -262,7 +269,7 @@
     },
     {
       "path": "hydra_basis/execution_engine/aster_adapter.py",
-      "sha256": "fd7edbf30ee717a818a13bcb044219a5e79212e79d7816c38d4ea0c93ef8041e",
+      "sha256": "1a82b6c01c7b4648e6c6b63cd9443dd94171c1311f752332d5715c33d841dee4",
       "phase": "3_private_events_then_4_execution_then_5_strategy",
       "status": "partial_verified",
       "ported_scope": "V3 EIP-712 read-request authentication, per-process signer nonce sharing, fixed POST/PUT listenKey and GET order transport with quotas/timeouts/redacted errors; Python auth vectors, loopback WS/HTTP and short live renewal/rotation tests; read-only double-sample positions, wallet balances and open orders with weighted quota and WS revision fencing; explicit single-limit submit/cancel transport and complete-intent manual test runner with loopback validation; no real Aster fill/query acceptance, margin/leverage management or automated strategy wiring"
@@ -275,15 +282,43 @@
       "ported_scope": null
     },
     {
+      "path": "hydra_basis/execution_engine/binance_spot_adapter.py",
+      "sha256": "87ac10fed647bc5480f5405f20297ef229a8b7188ec05f08fa2ba59cd1434b20",
+      "phase": "3_private_events_then_4_execution_then_5_strategy",
+      "status": "partial_verified",
+      "ported_scope": "Native HMAC REST, MARKET/LIMIT_MAKER single-attempt submission with persistent dispatch permit, exact query/cancel, WS signed subscription/executionReport, fee trade-ID dedup and cumulative actor reconciliation. Local HTTP/WS tests and real read-only account/WS preflight passed; no real trading acceptance, auto reconnect owner, complete account identity/locking, full fee pagination/persistence, batch execution or spot position registry parity"
+    },
+    {
+      "path": "hydra_basis/execution_engine/binance_spot_stream.py",
+      "sha256": "bf0f9e16547df4ecd78f6d1497dfde48b9836c979dcec3e2e32b305ba2d8e707",
+      "phase": "3_private_events_then_4_execution_then_5_strategy",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "hydra_basis/execution_engine/depth_sizing.py",
+      "sha256": "6a070695987083e32b0897efdbc4693f76260a9c253ab4d6e2efa168407243a5",
+      "phase": "3_private_events_then_4_execution_then_5_strategy",
+      "status": "partial_verified",
+      "ported_scope": "Rust spot-perp top_level_only sizing, common limit/market lot and min/max notional, tail reservation and optional clip cap; 2000 deterministic decision fixtures. No multi-level VWAP mode or live quantity changes"
+    },
+    {
+      "path": "hydra_basis/execution_engine/execution_trace.py",
+      "sha256": "6c9abdb32664005806bdd0b6f433df0ec28d65d3b3ef9b180bd534b673c447a2",
+      "phase": "3_private_events_then_4_execution_then_5_strategy",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
       "path": "hydra_basis/execution_engine/executor.py",
-      "sha256": "954c552ae8901786371fa1a928e8f54569c1f3a1fd9e8a3580854b4391d7531a",
+      "sha256": "82cf1596be3d0e141fde994fa6ba19013db461530c8c3b84da8bddef3dc3327a",
       "phase": "3_private_events_then_4_execution_then_5_strategy",
       "status": "partial_verified",
       "ported_scope": "Paper single-maker cumulative obligations and hedge reservation, private coordinator watches; optional durable intents/client IDs and restart replay with process-exit/corruption/fault fixtures; separate single-limit test runner has complete intent persistence, submit/cancel and explicit client-ID resume; no automated two-leg real execution, reprice, batching, background recovery or full-account persistence"
     },
     {
       "path": "hydra_basis/execution_engine/hedge_safety.py",
-      "sha256": "95751e3a09cd45bb41220563157361d48e383b4785f3ef5de53f6d4fd9c9b7d2",
+      "sha256": "a4e62f0905a4f32c8d03372f4d6ebd2d2db9b22f850536c0ff9018c038e9e3e1",
       "phase": "3_private_events_then_4_execution_then_5_strategy",
       "status": "partial_verified",
       "ported_scope": "Paper cumulative hedge reservation, terminal-only residual retry parity and signed exposure; single-writer journal for known-maker/hedge intents, sync-before-dispatch permit and unknown-client-ID read-only lookup; no broker, compensation, full cash ledger or live unknown-submission acceptance"
@@ -318,14 +353,14 @@
     },
     {
       "path": "hydra_basis/execution_engine/maker_price_guard.py",
-      "sha256": "263352ea9c07d66858c4b90195b8d74a041ed6245a6023e2a749af18cea1f872",
+      "sha256": "531cf2d73f9971d9e3f9fa3f27ae7308e5fcfddf57812243f9941ab23467c2e7",
       "phase": "1_math_then_4_execution",
       "status": "partial_verified",
       "ported_scope": "adverse_price_gap only; no bounded maker price or guard lifecycle"
     },
     {
       "path": "hydra_basis/execution_engine/market_data.py",
-      "sha256": "39edba76fd40390966b0ede5c745f985c35ede2f3ca6f34aa6949e447cb8ab8f",
+      "sha256": "b9071e1ef27a5c029a52f8fd9dd4c3d41ef350d9acbf3f6fbca6652520c25caf",
       "phase": "3_private_events_then_4_execution_then_5_strategy",
       "status": "planned",
       "ported_scope": null
@@ -374,14 +409,14 @@
     },
     {
       "path": "hydra_basis/execution_engine/order_service.py",
-      "sha256": "ac7fd300db10550b9c2a24d7b46ac90896ecbe14e99375ac1c9134ab658e8b84",
+      "sha256": "83f54696706e9426370485d7f6c96edf84447941236151df38e95ddb3f5cea01",
       "phase": "3_private_events_then_4_execution_then_5_strategy",
       "status": "planned",
       "ported_scope": null
     },
     {
       "path": "hydra_basis/execution_engine/order_stream.py",
-      "sha256": "476ec6b7d0cad7272d7da586bdc99f7c7a2cf14dfc6dbce850bfa2c4bf974279",
+      "sha256": "1ad59e2dd2e4eaa0e007672f68b879ebcb64637d82cb3a62596c5f70e2dbf39a",
       "phase": "3_private_events_then_4_execution_then_5_strategy",
       "status": "partial_verified",
       "ported_scope": "Aster cumulative decoder, per-account coordination, bounded ingress, per-order cursors, WS/REST dedup and gap/query fencing; Aster private transport plus short live authentication/renewal/local socket rotation verified without trading; Hyperliquid separate cumulative orders/trade dedup and independent query recovery; scoped account reconciliation and special-event routing; paper-only maker/hedge watches; single-order journal bridge in manual test runner; no MEXC protobuf or automated two-leg execution"
@@ -408,6 +443,13 @@
       "ported_scope": null
     },
     {
+      "path": "hydra_basis/execution_engine/process_lock.py",
+      "sha256": "1bdc53ada917288ad56e998a4ae47cc3559fb3b13bd88831935f1f38712a1009",
+      "phase": "3_private_events_then_4_execution_then_5_strategy",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
       "path": "hydra_basis/execution_engine/risk.py",
       "sha256": "55dcfaded7a9b734a7b159de96606d33f3abfb6c360672c5d9d35b7bf12481e4",
       "phase": "3_private_events_then_4_execution_then_5_strategy",
@@ -420,6 +462,27 @@
       "phase": "3_private_events_then_4_execution_then_5_strategy",
       "status": "planned",
       "ported_scope": null
+    },
+    {
+      "path": "hydra_basis/execution_engine/rust_place_order.py",
+      "sha256": "2adc380334c9e311ee7418464245d47148c08f701c3337fd9beb41a4e0df431e",
+      "phase": "3_private_events_then_4_execution_then_5_strategy",
+      "status": "partial_verified",
+      "ported_scope": "Argument-list subprocess handoff, no Python fallback, live STOP control and bounded child cleanup; native trading path lives in Rust variational-bridge paired module"
+    },
+    {
+      "path": "hydra_basis/execution_engine/rust_plan_prepare.py",
+      "sha256": "035b4fc352a46548e7bd875be40906cc8bbfdaae6d2693cb2aceed85c4cb307a",
+      "phase": "3_private_events_then_4_execution_then_5_strategy",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "hydra_basis/execution_engine/rust_spot_perp.py",
+      "sha256": "da69e890b5880a51ba68651dfea0edd20573b5b1d1b7fad54e3c02e5e54961be",
+      "phase": "3_private_events_then_4_execution_then_5_strategy",
+      "status": "partial_verified",
+      "ported_scope": "Read-only release-binary handoff for public preview and explicit Binance account/private WS preflight; live rejection, no fallback and readonly child cleanup"
     },
     {
       "path": "hydra_basis/execution_engine/signal_store.py",
@@ -864,7 +927,7 @@
     },
     {
       "path": "scripts/backfill_funding_history.py",
-      "sha256": "5c1a1bc035baf452ffc8ba8c51c2c9d360bd9174c978f1e6fa52d3d8d9f920a5",
+      "sha256": "4df517e8f267fe0827f093a281283da2fa1daf6f4784d984b6435d91f47a429f",
       "phase": "cli_parity_each_batch",
       "status": "planned",
       "ported_scope": null
@@ -905,11 +968,18 @@
       "ported_scope": null
     },
     {
-      "path": "scripts/place_order.py",
-      "sha256": "5534b4e200a5a3b1bd202533b74b667ff2f483b7af3da2123f8774c51212c41d",
+      "path": "scripts/diagnose_spot_perp_gap.py",
+      "sha256": "12f9570bbda71f003516413c8d7cbaea9fec4f023763226bfc44632086e029e7",
       "phase": "cli_parity_each_batch",
       "status": "planned",
       "ported_scope": null
+    },
+    {
+      "path": "scripts/place_order.py",
+      "sha256": "cac5b42fea21ec50a4f9e72f9ae0415c1022261ffafdf0a2fc8a16abddb2452f",
+      "phase": "cli_parity_each_batch",
+      "status": "partial_verified",
+      "ported_scope": "Explicit Rust paired-order plan/preview/audit/submit/inspect/recover handoff; Variational fixed-limit maker and Aster/Hyperliquid IOC, independent reviewed inventory, durable identities and bounded recovery. Offline/loopback runner and real read-only account checks passed; no real trade acceptance, automatic reprice, Python position registry or PnL parity"
     },
     {
       "path": "scripts/record_spread_market.py",
@@ -934,7 +1004,7 @@
     },
     {
       "path": "scripts/run_funding_monitor.py",
-      "sha256": "2a6f9a4978df3f65faa655627f314c0f6420e2f8f722a28d83419dee4914f7c6",
+      "sha256": "f4a95d6ea9862f9bbc2e82ef5c53664a8eb4cf8b4979a4ec4aae7d7ea51736bd",
       "phase": "cli_parity_each_batch",
       "status": "planned",
       "ported_scope": null
@@ -948,17 +1018,17 @@
     },
     {
       "path": "scripts/run_risk_manager.py",
-      "sha256": "a9a028ab707628a66535640530ec0d308e83c86dda450549169052b0e01b22fe",
+      "sha256": "24fd403eafb7ca0d9fc4fe5fb46c8466cd806731b3bf7d41dae060823cb15159",
       "phase": "6_risk_persistence",
       "status": "planned",
       "ported_scope": null
     },
     {
       "path": "scripts/run_spot_perp_arbitrage.py",
-      "sha256": "b0f21493a88090b6f272c449519e5e7b74f1f4d4b478dacfed7589c2d4b37fa4",
+      "sha256": "fd7f5c8f9da5e898c983501bf1f4ecf5a1cf96416a791a1ce0edf228ce6b803b",
       "phase": "cli_parity_each_batch",
-      "status": "planned",
-      "ported_scope": null
+      "status": "partial_verified",
+      "ported_scope": "Explicit native live/recover owner: Aster/Hyperliquid post-only maker to Binance MARKET, WS cumulative partial fills, best-level batching, price-only repricing, cancel races, durable reservations/dispatch fences, fee net-base totals and final local timing. Python handoff retains confirmation and graceful stop; existing exchange leverage. Public preview also supports Lighter/both roles. Offline state-machine/fault tests only; no real trading acceptance, Binance-maker reverse route, Lighter/Variational spot execution, complete account/PnL registry or guaranteed zero dust exposure"
     },
     {
       "path": "scripts/run_spread_dispatcher.py",
@@ -1039,7 +1109,14 @@
     },
     {
       "path": "tests/test_backfill_speedups.py",
-      "sha256": "4a2c74635f68335860818f81d198eaabee0cb67cfdb35938b08ecd33d1d6b0f1",
+      "sha256": "6113a09df0c6b919ffa13e5d04a27ba8f02b9806972a5ce7c59705d877d02c77",
+      "phase": "validation_each_batch",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "tests/test_binance_spot.py",
+      "sha256": "87d8c12fb11f2c82a9805878e3c42fdf68f2882d01ff23acd505b0dfcdb8f59f",
       "phase": "validation_each_batch",
       "status": "planned",
       "ported_scope": null
@@ -1066,6 +1143,13 @@
       "ported_scope": null
     },
     {
+      "path": "tests/test_depth_sizing.py",
+      "sha256": "d8bda2e7da06b5fa601dd57dfdf27a6cd252bdf3294e9d8eae459af9e522ad58",
+      "phase": "validation_each_batch",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
       "path": "tests/test_entropy.py",
       "sha256": "52f58c4c639d4ae6df46ab874160d0386371f8edabb88afc58612ffa8aa5d3dd",
       "phase": "validation_each_batch",
@@ -1080,6 +1164,13 @@
       "ported_scope": null
     },
     {
+      "path": "tests/test_execution_trace.py",
+      "sha256": "6456c624d12cbadc5e99934aed1397483516b391d76fbf7d0483ba4fd58a0252",
+      "phase": "validation_each_batch",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
       "path": "tests/test_funding_analysis.py",
       "sha256": "987c42be54068384b16cd3b9c7b0359f169b017a2adc5130c82c99d00aae58cd",
       "phase": "validation_each_batch",
@@ -1088,7 +1179,7 @@
     },
     {
       "path": "tests/test_funding_monitor.py",
-      "sha256": "dd4846eafee8c215650b0a0c23c8c4fa6f07dda74bea3b3ffb7263c54431b3ae",
+      "sha256": "7072a98ab3d2d51d747d985ada9c55279fa6fad30ee67857ac0e3776e68d1930",
       "phase": "validation_each_batch",
       "status": "planned",
       "ported_scope": null
@@ -1096,6 +1187,13 @@
     {
       "path": "tests/test_funding_window.py",
       "sha256": "20a3768bac39ba69938d9dbd9b003effddee947598708e5785c41ad20a1c5a4c",
+      "phase": "validation_each_batch",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "tests/test_gap_config.py",
+      "sha256": "5254a75cc0fd9b32612c81456ccf72f95f0bfe04dc8baee3d3205aff9ba49c8b",
       "phase": "validation_each_batch",
       "status": "planned",
       "ported_scope": null
@@ -1137,14 +1235,21 @@
     },
     {
       "path": "tests/test_maker_first_hedge.py",
-      "sha256": "2e2a652e1cd549eb5c23bdfe21a215ff0c02dd537d8721eb505ce48408176bfa",
+      "sha256": "6eed3855b002bdbbc60ddab5394129c13352dc68872c6300b36280683d23b5d7",
       "phase": "validation_each_batch",
       "status": "planned",
       "ported_scope": null
     },
     {
       "path": "tests/test_maker_price_guard.py",
-      "sha256": "6eb85dd310275b7f07bfa8ec4258e06a193e50abc040f0b41b8b0e314ddfa948",
+      "sha256": "54cd08ef2d785800c3bcc3e4ed782db1e8dadc8781d67a45512fa2c667dd51a0",
+      "phase": "validation_each_batch",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "tests/test_maker_quote_follow.py",
+      "sha256": "cfdc31fc1acc5024edc46c54e97ff4a96432d414a7a1910632d367aceebd1f18",
       "phase": "validation_each_batch",
       "status": "planned",
       "ported_scope": null
@@ -1186,7 +1291,7 @@
     },
     {
       "path": "tests/test_order_service.py",
-      "sha256": "c3ed49a6c22d9a333b61278b08fc4b77d363f182af7355d675d1ddfe88336db3",
+      "sha256": "e87261518fe6aa1f853cc8d644d6169a653b3328a177d922738ecbd58a549aef",
       "phase": "validation_each_batch",
       "status": "planned",
       "ported_scope": null
@@ -1200,7 +1305,7 @@
     },
     {
       "path": "tests/test_order_web.py",
-      "sha256": "e97455201c415ade46a39b7ef937684f09d2b2149c4531339723d21adef374a7",
+      "sha256": "ecd4c5bfe1bf846d1770994600236aedb934d06eb348e2a1b3bcdd5a71c03ce0",
       "phase": "validation_each_batch",
       "status": "planned",
       "ported_scope": null
@@ -1220,6 +1325,27 @@
       "ported_scope": null
     },
     {
+      "path": "tests/test_rust_place_order.py",
+      "sha256": "2a234756a1d89af4b041add410cbfa51a65241d081c80457890c33b43f881125",
+      "phase": "validation_each_batch",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "tests/test_rust_plan_prepare.py",
+      "sha256": "7ce076852dff2e9c4d3b5b38e272f98350896d3f0374b7774eb663b7eb92e0f5",
+      "phase": "validation_each_batch",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "tests/test_rust_spot_perp.py",
+      "sha256": "74d443341b0f75e8e0491019aec77912ef8a773b19a2c3826ac1cca6488bb6f8",
+      "phase": "validation_each_batch",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
       "path": "tests/test_single_order_script.py",
       "sha256": "b3ca752c8f6c3a0aaa62be7e09a3d4a3594c3ba173b88ad6a3f4c389740bb0ef",
       "phase": "validation_each_batch",
@@ -1227,15 +1353,29 @@
       "ported_scope": null
     },
     {
+      "path": "tests/test_spot_best_level.py",
+      "sha256": "073d12c37d781d97f150450d034e22a6e852ae908a844c12fce3e99c47d63be3",
+      "phase": "validation_each_batch",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
       "path": "tests/test_spot_perp_arbitrage_script.py",
-      "sha256": "088d9153768c77d00979c28581406ea31c03e46c1a45c8f16b816bd675744314",
+      "sha256": "9d65454c5fbb21134072db88aa6ee95dde70ba52244ab8c1546399901e0acb0a",
       "phase": "validation_each_batch",
       "status": "planned",
       "ported_scope": null
     },
     {
       "path": "tests/test_spot_perp_latency.py",
-      "sha256": "61b9c71a256da0861c5170243d5155815903c5324267a357bcfbe6d00066baa9",
+      "sha256": "d36948f9519d96723f59f012c5352bb68aec1013b40ab842d6f73f658d7e4491",
+      "phase": "validation_each_batch",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "tests/test_spot_perp_position_deltas.py",
+      "sha256": "d9c022440017c51960dd7ca81413e1903dd553e977e326377a4d8c712f9624ab",
       "phase": "validation_each_batch",
       "status": "planned",
       "ported_scope": null
@@ -1312,7 +1452,14 @@
     },
     {
       "path": "tests/test_variational_maker_default.py",
-      "sha256": "40c25a7cba92932d1fc10f28738e2b9f1130b10a19956dd2c770c45ad676ebc1",
+      "sha256": "af9ffcce24e08e664a38947f467d5d4b37b2b9dee45b3517c93dbb51df330ba1",
+      "phase": "validation_each_batch",
+      "status": "planned",
+      "ported_scope": null
+    },
+    {
+      "path": "tests/variational_native_orders.test.mjs",
+      "sha256": "2861337682eee2a7cee152d0d42b2ef4493b0d9f667faf3f9ee8b3049636df9f",
       "phase": "validation_each_batch",
       "status": "planned",
       "ported_scope": null
@@ -1326,7 +1473,7 @@
     },
     {
       "path": "web/app.py",
-      "sha256": "6a7b8a1cc72a55d55e7d8bb57c878cb29deaccc379557515c994cb88da6a7ead",
+      "sha256": "6c913ce35c793f83b735465c6aa442cdf1b6d5968e3df0f072208d4398c0508d",
       "phase": "8_web",
       "status": "planned",
       "ported_scope": null
@@ -1347,7 +1494,7 @@
     },
     {
       "path": "web/static/app.js",
-      "sha256": "62f4a6b73da7c2bc677d045440b05baa54c0538256f0ca45ee57eb60cef1a52c",
+      "sha256": "25f3addf7acbc333ccd3746dcaf4a0bf601915339087d41a28c66a0e2ab698e5",
       "phase": "8_web",
       "status": "planned",
       "ported_scope": null
@@ -1368,7 +1515,7 @@
     },
     {
       "path": "web/static/index.html",
-      "sha256": "d2289195436adf3d2e8608b9ba5f43711889b8446cc804fb5d2d19e31607f86b",
+      "sha256": "5b636a34d5a8eba5d004ad84663eb63ae27387ed221e6764b85d531ff617d079",
       "phase": "8_web",
       "status": "planned",
       "ported_scope": null

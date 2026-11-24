@@ -1,6 +1,7 @@
 const $ = (id) => document.getElementById(id);
 
 const inputs = {
+  nativeTradingEnabled: $("nativeTradingEnabled"),
   domainFilter: $("domainFilter"),
   wsEndpoint: $("wsEndpoint"),
   restEndpoint: $("restEndpoint"),
@@ -13,6 +14,7 @@ const statusEl = $("status");
 function toStatusText(status) {
   return [
     `Forwarding: ${status.active ? "ON" : "OFF"}`,
+    `Rust 原生交易: ${status.config.nativeTradingEnabled === true ? "已允許" : "關閉（唯讀）"}`,
     `Attached tab: ${status.attachedTabId ?? "-"}`,
     `Domain filter: ${status.config.domainFilter}`,
     `WS socket (${status.config.wsEndpoint}): ${status.sockets.websocket}`,
@@ -24,6 +26,7 @@ function toStatusText(status) {
 }
 
 function updateFormFromStatus(status) {
+  inputs.nativeTradingEnabled.checked = status.config.nativeTradingEnabled === true;
   inputs.domainFilter.value = status.config.domainFilter || "";
   inputs.wsEndpoint.value = status.config.wsEndpoint || "";
   inputs.restEndpoint.value = status.config.restEndpoint || "";
@@ -53,6 +56,7 @@ function readConfig() {
     .filter((line) => line.length > 0);
 
   return {
+    nativeTradingEnabled: inputs.nativeTradingEnabled.checked === true,
     domainFilter: inputs.domainFilter.value.trim(),
     wsEndpoint: inputs.wsEndpoint.value.trim(),
     restEndpoint: inputs.restEndpoint.value.trim(),

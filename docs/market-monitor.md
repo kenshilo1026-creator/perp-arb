@@ -20,7 +20,8 @@ python -m pip install -r requirements-web.txt
 
 ## 操作
 
-- 預設 ETH，多方 Aster、空方 Hyperliquid。交易所選項包括 Aster、Hyperliquid、Lighter、Variational、Entropy、Arcus、Ondo；以當次公開市場目錄確認兩所共同支援的標的，排除可辨識的數量倍率別名。目錄讀取失敗的交易所暫時停用。
+- 預設 ETH，多方 Aster、空方 Hyperliquid。交易所選項包括 Aster、Hyperliquid、Lighter、Variational、Entropy、Arcus、Ondo，以及 Binance 現貨；以當次公開市場目錄確認兩所共同支援的標的，排除可辨識的數量倍率別名。目錄讀取失敗的交易所暫時停用。
+- Binance 現貨採 USDT 交易對，只可選為多方，搭配永續空方；此時停用交換方向，仍可切換哪一方掛單。即時報價使用公開 WebSocket，無須 API 金鑰。歷史參考自動補抓最多 24 小時的已收盤分鐘 K 線，僅比較兩方都有資料的分鐘，不補零或延用前值；實際開／平倉報價差則由監控開始後累積。與 USDC 計價永續比較時，圖表沒有另外校正 USDT／USDC 匯率。
 - `⇄` 交換方向；「圖表設定」切換多方掛單、空方掛單或雙方吃單，並設定觀察數量。數量單位是標的幣，不是美元。
 - 「疊加兩所價格」顯示各所中間價，使用獨立價格軸。拖曳圖表放大；「即時追蹤」恢復所選時間範圍。
 - 進入頁面預設自動載入「歷史參考」，顯示最近最多 24 小時的分鐘收盤／中間價差；切換配對或時間範圍會重新抓取。按「歷史參考」可切回已錄製的開／平倉報價差。參考資料與本地錄製資料獨立載入，沒有歷史來源的配對保持空白。
@@ -28,6 +29,28 @@ python -m pip install -r requirements-web.txt
 - 「策略狀態」查看目前方向配對的兩腿數量、均價、已實現價差損益、估算費用，以及最近委託／成交。這些是策略帳本，不代表交易所帳戶的全部部位。
 
 ## 計算方式
+
+### 全市場歷史價差振幅掃描
+
+在專案根目錄執行 `python scripts/run_basis_scan.py 1`，掃描最近 1 天、目前仍上市且與 Binance USDT 現貨共用的幣種，按「最大價差減最小價差」排列前十組「幣種＋永續交易所」。同一幣種在不同交易所可分別入榜。這是命令列工具，監控頁不會自動啟動全市場補抓。
+
+```powershell
+python scripts/run_basis_scan.py 7
+python scripts/run_basis_scan.py 1 --venues hyperliquid aster --top 10
+python scripts/run_basis_scan.py 1 --venues hyperliquid --symbols SAGA
+```
+
+天數支援 1–30 天；預設沿用 `hydra_basis/config.py` 的 `VENUE_CONFIG.enabled`，`--venues` 可指定本次掃描交易所。現貨固定為 Binance；不使用帳戶金鑰、不送單、不發 Telegram。支援 Aster、Hyperliquid、Entropy、Trade.xyz 的公開 K 線；Arcus 使用既有分鐘 K 線介面。Lighter、Variational、Ondo 使用 `data/spread_strategies/minute_mids.json.gz` 的既有本地中間價紀錄，沒有紀錄便列為 `no_recorded_history`，不宣稱公開補抓失敗。
+
+預設名單直接取全部 `VENUE_CONFIG.enabled=true` 項目，不與另一份白名單取交集；啟動時會印出本次名單。MEXC 若重新啟用亦使用既有分鐘 K 線來源。日後加入尚未接入歷史介面的交易所，會明確列出 `history_adapter_not_supported`，不會悄悄忽略或阻止其他交易所完成。終端會分交易所列出跳過原因，詳細配對保存在 JSON。
+
+所有市場以同一個已收盤 UTC 時間窗比較。1–3 天使用 1 分鐘、4–15 天使用 5 分鐘、16–30 天使用 15 分鐘；較粗採樣會漏掉期間內短暫極值。[Hyperliquid 歷史 K 線只提供最近 5,000 根](https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/info-endpoint#candle-snapshot)，因此長區間不能當作逐分鐘完整搜尋。只對齊兩所都有有效價格的時間點，不向前補值；預設共同資料覆蓋率至少 70% 才排名，可用 `--min-coverage` 調整。覆蓋率的分母仍為整個搜尋時間窗。最高／最低時間是 K 線開啟時間，數值採該根收盤價。
+
+掃描價差為 `(永續價格 − 現貨價格) / 現貨價格 × 100%`，永續溢價顯示正值，與 SELL Maker 日誌的「不利價差」符號及分母不同。最大 1%、最小 −0.5% 的振幅為 **1.5 個百分點**；這不是保證利潤，也不是扣費回測。另列「先高後低」最大收斂幅度；若最低點在最高點之前，這個數字可能小於振幅。JSON 另附該收斂區間以固定幣數、開倉現貨名義本金計算的毛回報，價格本金變動時未必等於兩個百分比之差，亦不代表最大可實現損益。
+
+結果未校正穩定幣匯率，未計開平倉手續費、資金費率、滑點、深度和延遲。K 線異常尖峰、缺值及當前上市篩選都會影響排名。單所失敗不阻止其他配對完成；不足十組時只列有效組數。完整結果及跳過原因存於 `data/market_monitor/basis_scan_latest.json`，可用 `--output` 指定另一檔案。
+
+掃描使用分頁、同主機共用節流與 429 退避控制；成功頁面存於 `basis_scan_cache.sqlite3`，再次執行可重用。含缺值或空頁的快取 5 分鐘後重查；網路失敗不寫入成功快取，舊資料保留約 31 天。全市場初次下載可能需要數分鐘以上；限制只適用此程序，不與另一個監控或交易程序共用 IP 額度。
 
 開倉價差為 `(空方賣出價 − 多方買入價) / 多方買入價 × 100%`；平倉價差為 `(空方買回價 − 多方賣出價) / 多方賣出價 × 100%`。兩者未扣手續費、滑點及資金費率，平倉價差不等於實際損益。
 
@@ -40,6 +63,8 @@ Hyperliquid 的正式 `l2Book` WebSocket 訂閱採 `fast: true`，涵蓋監控�
 ## 資金費率與 Variational
 
 兩所費率統一換算成 `% / 小時`，摘要差值為空方費率減去多方費率。原始每期費率與結算週期仍顯示在副圖上方；缺資料不補零。即時費率每 30 秒更新，失敗時移除該次結果；歷史曲線來自既有本地費率紀錄。
+
+Binance 現貨顯示「不適用（現貨）」，不繪製虛構的零費率曲線；現貨／永續配對的費率摘要採永續空方費率。
 
 Aster 即時費率匹配買賣盤實際使用的合約，避免 USDT、USDC 與逆向 USD 合約的週期混用。
 
@@ -70,7 +95,7 @@ Variational 請求失敗時共用 30 秒起、最高 300 秒的指數退避；HT
 ## 驗證
 
 ```powershell
-python -m pytest tests/test_monitor_cache.py tests/test_market_monitor.py tests/test_order_web.py tests/test_spread_strategy.py tests/test_spread_dispatcher.py tests/test_spread_execution_events.py tests/test_spread_quote_freshness.py tests/test_spread_hedge_coordinator.py tests/test_spread_history.py -q
+python -m pytest tests/test_monitor_binance_spot.py tests/test_monitor_cache.py tests/test_market_monitor.py tests/test_order_web.py tests/test_spread_strategy.py tests/test_spread_dispatcher.py tests/test_spread_execution_events.py tests/test_spread_quote_freshness.py tests/test_spread_hedge_coordinator.py tests/test_spread_history.py -q
 node --check web/static/monitor.js
 ```
 

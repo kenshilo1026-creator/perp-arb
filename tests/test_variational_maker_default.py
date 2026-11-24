@@ -55,7 +55,7 @@ class VariationalMakerDefaultTests(unittest.TestCase):
                     plan = build_spot_perp_plan(symbol="BTC", mode=mode, short_venue="VARIATIONAL",
                                                quantity=Decimal("3"), clip_usd=None,
                                                spot_book=spot_book, perp_book=perp_book)
-                    self.assertEqual((plan.maker_venue, plan.taker_venue), ("variational", "mexc_spot"))
+                    self.assertEqual((plan.maker_venue, plan.taker_venue), ("variational", "binance_spot"))
                     self.assertEqual((plan.maker_side, plan.taker_side), (maker_side, taker_side))
                     self.assertEqual(plan.maker_orderbook, perp_book)
                     self.assertEqual(plan.taker_orderbook, spot_book)

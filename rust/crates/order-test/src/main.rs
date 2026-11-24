@@ -21,6 +21,11 @@ async fn run() -> Result<bool> {
         println!("{HELP}");
         return Ok(true);
     };
+    let _process_lock = if matches!(&command, Command::Submit { .. } | Command::Recover { .. }) {
+        Some(AccountLock::global_execution()?)
+    } else {
+        None
+    };
     match command {
         Command::Preview { plan } => {
             let p = read_plan(&plan)?;

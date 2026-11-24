@@ -39,8 +39,9 @@ impl Request {
             return Err(Error::InvalidInput);
         }
         match (&*self.scope.venue, &self.selector) {
-            ("aster" | "hyperliquid", Selector::OrderId(s)) if s.parse::<u64>().is_ok() => (),
-            ("aster", Selector::ClientId(s))
+            ("aster" | "hyperliquid" | "binance_spot", Selector::OrderId(s))
+                if s.parse::<u64>().is_ok() => {}
+            ("aster" | "binance_spot", Selector::ClientId(s))
                 if !s.is_empty()
                     && s.len() <= 36
                     && s.bytes()

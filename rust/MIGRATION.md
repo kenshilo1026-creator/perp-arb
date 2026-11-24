@@ -1,5 +1,27 @@
 # perp arb Rust 移植計劃與驗收
 
+2026-11-23 spot/perp 第四批：原生雙腿 live/recover owner 已接入 Aster／Hyperliquid Post-only Maker 與 Binance Spot MARKET hedge。新增 hashed run WAL、對沖數量預留、雙重 dispatch 紀錄、私人累計量觸發、取消競態／未知回覆查證、佣金淨 base delta 持久化與最終時間摘要。Python 保留預設，Rust 實盤需明確 `--live` 及確認文字；不得宣稱真實成交延遲或 spread 已改善。Binance Maker 反向路徑、Lighter／Variational spot hedge、槓桿管理、全帳戶資產／PnL、細碎成交自動消除未完成。以下是各批歷史範圍。
+
+2026-11-23 spot/perp 第三小批：Binance Spot HMAC REST、私人 WS 簽名訂閱、LIMIT_MAKER／MARKET 傳輸、精確查單、一次送單持久化、佣金去重與 shared cumulative actor 接線已完成元件實作。替身測試涵蓋未知送單、重啟、取消成交競態及 WS 新成交／REST 舊回覆。新增明確唯讀 preflight；尚未完成現貨雙腿 owner、淨庫存持久化及實盤交易驗收。原 one-way perp durable engine 保持拒絕 spot maker，避免錯用庫存模型。
+
+2026-11-23 spot/perp 第二小批：加入 Hyperliquid BBO／l2Book 及 Lighter ticker、原生商品精度與名義值約束，統一最低不利價差優先的選腿、開平倉方向與舊單維持決策。6,000 個 Python 共同決策函式回放（每所 2,000）零差異；不是歷史損益回測，也不表示 Python 舊入口的 HL／Lighter 以 spread 優先選腿已逐字移植。Binance 私人傳輸與雙腿實盤、Lighter 下單、Variational extension 此入口接線仍未完成；不得視為實盤對沖驗收。以下保留先前各批交付範圍。
+
+2026-11-23 spot/perp 第一小批：新增 Binance Spot／Aster 原生公開行情及同一檔深度計劃，接上 `run_spot_perp_arbitrage.py --engine rust` **唯讀預覽**；不是 live 執行器。2,000 個 replay 案例比對選腿、數量、價格、價差與 resting action；公開 ETH 行情短測通過。待完成 Binance 私人事件、送單／撤單／精確查單、費用與庫存處理、雙腿 WAL 與重啟恢復、撤單成交競態及其餘永續交易所，才可宣告腳本功能等價。參見 [spot-perp](crates/spot-perp/README.md)。
+
+2026-11-19 第七小批：正式接上 bounded paired-order CLI 及 Python `--engine rust` handoff；Variational 固定限價 Maker＋Aster／HL 原生 IOC、獨立基準對帳、私人事件接收、持久化與同 run 恢復。兩組真實唯讀對帳成功，送單仍只完成替身驗收。自動重掛、零成交取消終態、WS-only 快速對沖及策略／盈虧帳本未完成。操作與範例見 [PAIRED_ORDER.md](PAIRED_ORDER.md)；以下段落保留先前各批範圍。
+
+2026-11-19 第六小批：全帳戶持倉／抵押金／pending RFQ 雙讀及私人事件屏障完成；真實空持倉帳戶來源驗收成功，獨立預期庫存仍須由操作端提供。WS trade 逐筆對照精確 REST 的路徑已實作、故障測試通過，但本次沒有實際新成交可驗證。library 已接 native Maker submit/cancel 與 Aster／HL IOC hedge transport，保存完整 wire order 再送出；尚無正式雙腿 live CLI／重掛排程。詳見 [第六批驗收](VARIATIONAL.md)。
+
+2026-11-19 第五小批：完成 confirmed trade ID 與累計量的原子持久化，以及專用 blocking worker 的雙帳本協調，補上分頁去重、重啟與未知對沖恢復。兩所對沖流程均有故障測試；實盤 transport 排程、真實 Variational 全帳戶對帳及取消終態尚未接妥，CLI 未開放雙腿交易。詳見 [第五批驗收](VARIATIONAL.md)。
+
+2026-11-19 第四小批：已從真實登入 session 驗證 `/me`、`/orders/v2`、`/trades`，按 `rfq_id`／`source_rfq`／trade `id` 精確關聯，拒絕同商品替代。新增 browser-session 原生 limit／cancel 傳輸、extension 重複 dispatch 屏障、持久化 submit receipt 與重啟身份恢復；變更傳輸僅模擬驗收，預設關閉。`place_order.py --engine rust --rust-preflight` 已真實唯讀驗收；雙腿 live owner、帳戶完整對帳及取消終態仍待接線，不得把這個 CLI 選項當作交易引擎已完成。詳見 [第四批驗收](VARIATIONAL.md)。
+
+2026-11-19 Variational 第一小批：v2 公開參考行情／共用 HTTP 快取與限流已接入，行情 crate 91 個離線／loopback 測試通過。詳見 [VARIATIONAL.md](VARIATIONAL.md)。後續保留 browser extension，接 Rust 私人成交協調與其他交易所對沖；此批尚無 Variational 下單或雙腿實盤能力。
+
+2026-11-19 第二小批：`variational-bridge` 已直接接收現有 extension（不經 Python broker），完成三條 WS 連線、180 秒持倉錄製、唯讀掛單查詢與重連觀察。ACK／UI 掛單列／未驗證 trade candidate 不轉成成交。`place_order.py` 開平倉移植仍待送單持久化、精確成交歸屬、撤單終態與雙腿執行器接線；不能把本批唯讀橋接當成已支援 Variational 實盤。
+
+2026-11-19 第三小批：`execution::durable::browser` 已補完整限價 Maker 意圖、單次送單許可、撤單待確認、累計成交、版本限定查證、持久化與重啟恢復；已驗證的訂單快照可交給原有 `DurableEngine` 產生 Aster／HL 對沖預留量。原始 extension 訊息尚未具備已驗收的帳戶／訂單身份與查單來源；本批以合成證據做故障測試，沒有開放實盤傳輸或把 `place_order.py` 切換為 Rust。
+
 基準為 Python commit `2f0dbdc803e0723887a7efb061548b4e592bd168`。所有重寫內容放在 `rust/`。私人事件進行至 3c-1 的庫存對帳，4b-2 加入 Aster／Hyperliquid 單筆限價交易測試入口，尚未接成自動兩腿套利。兩所短期唯讀結果與仍待核對的特殊事件分開記錄。其他階段逐批進行。原本未提交的 `data/position_registry.json` 與未追蹤 `variational-v1/` 保留原狀。
 
 ## 功能對照

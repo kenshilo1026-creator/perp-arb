@@ -991,6 +991,24 @@ async def run_close_execution_once(*, cli_ticker: str | None = None) -> None:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Place a perpetual arb order")
+    parser.add_argument("--engine", choices=("python", "rust"), default="python")
+    parser.add_argument("--rust-preflight", action="store_true", help="Rust 唯讀帳戶／RFQ／成交來源驗收，不送單")
+    parser.add_argument("--rust-inventory", action="store_true", help="全帳戶持倉／抵押金／待成交單雙重讀取；需要 --rust-account")
+    parser.add_argument("--extension-id", default=None, help="Chrome extension ID for native Rust bridge")
+    parser.add_argument("--rust-account", default=None, help="expected Variational wallet address")
+    parser.add_argument("--rust-order-id", default=None, help="exact Variational rfq_id; requires --rust-account")
+    parser.add_argument("--rust-output", default=None, help="new private JSONL recording path; never overwrite")
+    parser.add_argument("--rust-action", choices=("prepare", "preview", "audit", "submit", "inspect", "recover"), help="omit to prepare a plan from funding signals; preparation never sends orders")
+    parser.add_argument("--rust-plan", help="Rust paired-order plan JSON")
+    parser.add_argument("--rust-baseline", help="independently reviewed inventory JSON")
+    parser.add_argument("--rust-baseline-output", help="new audit inventory output JSON")
+    parser.add_argument("--rust-run-dir", help="durable paired execution directory")
+    parser.add_argument("--rust-settings", help="private extension/account settings JSON for prepare")
+    parser.add_argument("--rust-quantity", help="one paired order quantity; prompts when omitted during prepare")
+    parser.add_argument("--rust-maker-price", help="選填：手動指定 Variational Maker 限價；省略時由 Rust 呼叫 extension 按 Limit／Mid 自動讀價")
+    parser.add_argument("--rust-hedge-price", help="native hedge IOC limit for prepare")
+    parser.add_argument("--rust-fill-mode", choices=("rest_verified", "ws_confirmed"), help="new prepared plan only; defaults to private settings")
+    parser.add_argument("--live", action="store_true", help="explicit Rust submit/recover opt-in")
     parser.add_argument(
         "--mode",
         choices=("open", "close"),
@@ -1006,6 +1024,23 @@ def parse_args() -> argparse.Namespace:
 
 
 async def run_place_order(args: argparse.Namespace) -> None:
+    if getattr(args, "engine", "python") == "rust":
+        if not getattr(args, "rust_preflight", False) and getattr(args, "rust_action", None) in (None, "prepare"):
+            from pathlib import Path
+            from hydra_basis.execution_engine.rust_plan_prepare import prepare_signal_plan
+            await prepare_signal_plan(args, project_root=Path(__file__).resolve().parents[1])
+            return
+        from hydra_basis.execution_engine.rust_place_order import run_native_preflight
+        await run_native_preflight(args)
+        return
+    from hydra_basis.execution_engine.process_lock import execution_process_lock
+    with execution_process_lock():
+        await run_python_place_order(args)
+
+
+async def run_python_place_order(args: argparse.Namespace) -> None:
+    if any(getattr(args, name, None) for name in ("rust_preflight", "rust_inventory", "extension_id", "rust_account", "rust_order_id", "rust_output", "rust_action", "rust_plan", "rust_baseline", "rust_baseline_output", "rust_run_dir", "rust_settings", "rust_quantity", "rust_maker_price", "rust_hedge_price", "rust_fill_mode", "live")):
+        raise RuntimeError("Rust options require --engine rust; no Python order was sent")
     mode_value = getattr(args, "mode", None) or prompt_text("mode [open/close/開倉/平倉]")
     mode = normalize_execution_mode(mode_value)
     if mode == "open":
@@ -1027,7 +1062,10 @@ def main() -> None:
     except KeyboardInterrupt:
         # asyncio.run() already cancelled the running task and gave it a chance
         # to run cleanup_active_makers (shielded). Print a clean exit message.
-        print("\n[place_order] interrupted — open orders were cancelled if possible", flush=True)
+        if args.engine == "rust":
+            print("\n[place_order] 已要求 Rust 停止；請用 inspect 檢查帳本，未完成則以同一 run-dir recover。", flush=True)
+        else:
+            print("\n[place_order] interrupted — open orders were cancelled if possible", flush=True)
     except PromptInputUnavailableError as exc:
         raise SystemExit(
             f"[place_order] {exc}. Example: python scripts/place_order.py --mode close --ticker IMX"

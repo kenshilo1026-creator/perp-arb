@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import html
+import math
 
 import aiohttp
 
@@ -47,7 +48,6 @@ from hydra_basis.history_store import (
     trim_points_to_analysis_days,
     trim_points_to_lookback_ms,
 )
-from hydra_basis.monitor_errors import should_raise_immediately
 from hydra_basis.notifications.telegram import send_telegram
 from hydra_basis.runtime import configure_windows_event_loop_policy
 from hydra_basis.funding_engine.analysis import now_ms
@@ -83,6 +83,7 @@ SPREAD_REFRESH_DELAY_BY_VENUE_SECONDS = {
     "variational": 0.5,
 }
 SPREAD_ERROR_ALERT_MAX_ITEMS = 10
+LISTING_TIMEOUT_SECONDS = 20
 
 
 async def capture_spread_snapshot_with_venue_delay(
@@ -182,15 +183,24 @@ async def run_backfill(*, skip_spread_refresh: bool = False, symbols_filter: set
             spreads=all_spreads,
         )
     current_now_ms = now_ms()
+    deferred_errors: list[dict[str, str]] = []
 
     async with aiohttp.ClientSession(headers={"User-Agent": "funding-arb-backfill/0.1"}) as session:
         enabled_venues = [venue for venue, config in VENUE_CONFIG.items() if config.enabled]
+        print(f"backfill enabled venues: {', '.join(enabled_venues)}")
         venue_symbols: dict[str, set[str]] = {}
 
         for venue in enabled_venues:
             if venue not in SYMBOL_DISCOVERERS:
                 continue
-            symbols = await SYMBOL_DISCOVERERS[venue](session)
+            try:
+                symbols = await asyncio.wait_for(SYMBOL_DISCOVERERS[venue](session), timeout=LISTING_TIMEOUT_SECONDS)
+                if not isinstance(symbols, set) or not symbols or any(not isinstance(s, str) or not s for s in symbols):
+                    raise ValueError("empty or invalid symbol listing")
+            except Exception as exc:
+                print(f"backfill listing unavailable venue={venue}: {exc!r}; skipping venue, keeping history")
+                deferred_errors.append({"venue": venue, "symbol": "[listing]", "error": repr(exc)[:300]})
+                continue
             venue_symbols[venue] = symbols
             print(f"backfill discovered {venue}: {len(symbols)} symbols")
 
@@ -260,14 +270,12 @@ async def run_backfill(*, skip_spread_refresh: bool = False, symbols_filter: set
                 spreads=all_spreads,
             )
         )
-        # Rate limits and timeouts no longer abort the run: they are collected and reported once
+        # Fetch errors no longer abort the run: they are collected and reported once
         # it has finished, and the affected keys are retried by the next run.
-        deferred_errors: list[dict[str, str]] = []
 
         def merge_result(key: tuple[str, str], result) -> None:
             if isinstance(result, Exception):
-                if should_raise_immediately(result):
-                    deferred_errors.append({"venue": key[0], "symbol": key[1], "error": repr(result)[:300]})
+                deferred_errors.append({"venue": key[0], "symbol": key[1], "error": repr(result)[:300]})
                 coverage = summarize_history_coverage(
                     trim_points_to_analysis_days(
                         merge_points_by_interval_bucket(all_points.get(key, [])),
@@ -397,15 +405,26 @@ async def refresh_spreads(*, session, keys: list[tuple[str, str]], spreads, spre
             wanted.setdefault(venue, set()).add(symbol)
     covered: set[tuple[str, str]] = set()
     if wanted:
-        quotes, stream_errors = await collect_top_of_book(session, wanted)
+        try:
+            quotes, stream_errors = await collect_top_of_book(session, wanted)
+        except Exception as exc:
+            # The bulk collector can fail before individual venue tasks are started.
+            print(f"backfill spread bulk unavailable: {exc!r}; using per-symbol fallback")
+            quotes, stream_errors = {}, {}
         for key, quote in quotes.items():
-            spreads[key] = {
-                "bid": quote["bid"],
-                "ask": quote["ask"],
-                "spread_pct": compute_spread_pct(quote),
-                "ts_ms": quote["ts_ms"],
-            }
-        covered = set(quotes)
+            try:
+                bid, ask = float(quote["bid"]), float(quote["ask"])
+                if not math.isfinite(bid) or not math.isfinite(ask) or not 0 < bid <= ask:
+                    raise ValueError("invalid bid/ask")
+                spreads[key] = {
+                    "bid": bid, "ask": ask,
+                    "spread_pct": compute_spread_pct({"bid": bid, "ask": ask}),
+                    "ts_ms": int(quote["ts_ms"]),
+                }
+            except (KeyError, TypeError, ValueError, OverflowError) as exc:
+                print(f"backfill spread bulk invalid {key}: {exc}; using per-symbol fallback")
+                continue
+            covered.add(key)
         for venue, error in stream_errors.items():
             print(f"backfill spread stream failed venue={venue}: {error}")
         print(
@@ -475,16 +494,16 @@ async def refresh_spreads(*, session, keys: list[tuple[str, str]], spreads, spre
 
 
 async def report_deferred_errors(errors: list[dict[str, str]]) -> None:
-    """One summary, after the run, of the keys skipped for rate limits or timeouts."""
+    """One summary after the run; discovery/data errors do not hide successful keys."""
     if not errors:
         return
     by_venue: dict[str, list[dict[str, str]]] = {}
     for item in errors:
         by_venue.setdefault(item["venue"], []).append(item)
     summary = " ".join(f"{venue}={len(items)}" for venue, items in sorted(by_venue.items()))
-    print(f"backfill finished with rate-limited/timed-out keys (retried next run): {summary}")
+    print(f"backfill finished with unavailable keys (retried next run): {summary}")
     lines = [
-        "<b>Backfill 完成：部分 symbol 遇到限流/逾時</b>",
+        "<b>Backfill 完成：部分交易所／商品資料抓取失敗</b>",
         f"受影響: {html.escape(summary)}",
         "處理: 已跳過並繼續，下次 backfill 會補回。",
     ]

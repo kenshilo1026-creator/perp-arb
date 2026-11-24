@@ -31,7 +31,7 @@ class MonitorArgumentsTests(unittest.TestCase):
 
 
 class MonitorFilterTests(unittest.IsolatedAsyncioTestCase):
-    async def run_monitor(self, required=None, aster_history=True, *, history=None, listings=None, config=None, days=7, entry_books=None):
+    async def run_monitor(self, required=None, aster_history=True, *, history=None, listings=None, config=None, days=7, entry_books=None, quote_error=None, telegram_error=None):
         config = config or CONFIG
         if history is None:
             history = {(venue, "BTC"): [venue] for venue in CONFIG if venue != "aster" or aster_history}
@@ -53,7 +53,7 @@ class MonitorFilterTests(unittest.IsolatedAsyncioTestCase):
             stack.enter_context(patch.object(monitor, "SYMBOL_DISCOVERERS", discoverers))
             history_store = stack.enter_context(patch.object(monitor, "FundingHistoryStore"))
             history_store.return_value.load.return_value = history
-            stack.enter_context(patch.object(monitor, "fetch_monitor_entry_books", new_callable=AsyncMock, return_value=entry_books or {}))
+            stack.enter_context(patch.object(monitor, "fetch_monitor_entry_books", new_callable=AsyncMock, return_value=entry_books or {}, side_effect=quote_error))
             stack.enter_context(patch.object(monitor, "merge_points_by_interval_bucket", side_effect=lambda points: points))
             stack.enter_context(patch.object(monitor, "trim_points_to_analysis_days", side_effect=lambda points, **kw: points))
             stack.enter_context(patch.object(monitor, "funding_history_is_complete", side_effect=lambda points, **kw: bool(points)))
@@ -61,7 +61,7 @@ class MonitorFilterTests(unittest.IsolatedAsyncioTestCase):
             stack.enter_context(patch.object(monitor, "explain_spread_skip", return_value="missing_points"))
             stack.enter_context(patch.object(monitor, "analyze_positive_funding", side_effect=stats))
             save = stack.enter_context(patch.object(monitor, "save_monitor_signals"))
-            send = stack.enter_context(patch.object(monitor, "send_telegram", new_callable=AsyncMock))
+            send = stack.enter_context(patch.object(monitor, "send_telegram", new_callable=AsyncMock, side_effect=telegram_error))
             stack.enter_context(redirect_stdout(stdout))
             await monitor.run_once(analysis_days=days, required_venue=required)
         return save.call_args.kwargs["cross_exchange_signals"], send, stdout.getvalue(), analyze
@@ -89,6 +89,29 @@ class MonitorFilterTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(("hyperliquid", "lighter"), {(s["short_venue"], s["long_venue"]) for s in signals})
         self.assertEqual(analyze.call_count, 8)
         self.assertIn("SPOT-PERP hyperliquid", output)
+        send.assert_awaited_once()
+
+    async def test_quote_service_and_telegram_failure_still_save_and_display_opportunities(self):
+        signals, send, output, _ = await self.run_monitor(
+            quote_error=RuntimeError("quote service failed"), telegram_error=TimeoutError("telegram timeout"),
+        )
+        self.assertEqual(len(signals), 8)
+        send.assert_awaited_once()
+        self.assertIn("套利訊號總表", output)
+        self.assertIn("入場價差未確認", output)
+        self.assertIn("entry_quotes_unavailable", output)
+        self.assertIn("telegram_unavailable", output)
+
+    async def test_disabled_arcus_history_is_not_used_but_healthy_pairs_are_displayed(self):
+        config = {**CONFIG, "arcus": FundingConfig("arcus", enabled=False)}
+        history = {(v, "BTC"): [v] for v in config}
+        signals, send, output, _ = await self.run_monitor(
+            config=config, history=history, listings={**{v: {"BTC"} for v in CONFIG}, "arcus": RuntimeError("must not fetch")},
+        )
+        self.assertEqual(len(signals), 6)
+        self.assertTrue(all("arcus" not in (s['short_venue'], s['long_venue']) for s in signals))
+        self.assertNotIn("listing_unavailable venue=arcus", output)
+        self.assertIn("套利訊號總表", output)
         send.assert_awaited_once()
 
     async def test_requested_days_reach_both_cross_and_spot_analysis(self):

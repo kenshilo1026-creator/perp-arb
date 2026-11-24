@@ -155,8 +155,9 @@ class MonitorSession:
         if kind == 'candleSnapshot':
             req = body.get('req') or {}
             count = 5000
-            if req.get('interval') == '1m':
-                count = min(5000, max(1, math.ceil((req.get('endTime', 0) - req.get('startTime', 0)) / MINUTE)))
+            interval_minutes = {'1m': 1, '3m': 3, '5m': 5, '15m': 15}.get(req.get('interval'))
+            if interval_minutes is not None:
+                count = min(5000, max(1, math.ceil((req.get('endTime', 0) - req.get('startTime', 0)) / (MINUTE*interval_minutes))))
             weight += math.ceil(count / 60)
         elif kind in {'fundingHistory', 'userFills', 'userFillsByTime'}:
             weight += 25  # Reserve for the documented maximum history page.

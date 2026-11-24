@@ -45,6 +45,22 @@ impl Monitor {
     }
 }
 impl LiveVenue {
+    pub async fn audit(
+        &self,
+        c: &Coordinator,
+        expected: Option<perp_arb_private_events::account::Inventory>,
+    ) -> Result<perp_arb_private_events::account::Report> {
+        match self {
+            Self::Aster(client) => client
+                .audit_account(c, expected)
+                .await
+                .map_err(|e| e.to_string()),
+            Self::Hyperliquid { read, .. } => read
+                .audit_account(c, &[String::new()], false, expected)
+                .await
+                .map_err(|e| e.to_string()),
+        }
+    }
     pub async fn connect(order: &Order) -> Result<Self> {
         order.validate().map_err(|e| e.to_string())?;
         match order.venue.as_str() {

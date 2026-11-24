@@ -24,7 +24,7 @@ from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
 from hydra_basis.adapters.base import fetch_json
 from hydra_basis.execution_engine.apy_service import load_points
 from hydra_basis.execution_engine.market_data import parse_variational_quote, variational_quote_source_ms
-from hydra_basis.spread_strategy.core import Config, now_ms, spread_bps
+from hydra_basis.spread_strategy.core import now_ms, spread_bps
 from hydra_basis.spread_strategy.feeds import MarketFeed, vwap
 from hydra_basis.spread_strategy.history import MinuteRecorder, fetch_minute_closes
 from hydra_basis.spread_strategy.instruments import fetch_instrument, aster_contract
@@ -32,12 +32,33 @@ from hydra_basis.symbol_mapping import canonicalize_symbol
 from web.monitor_cache import ReferenceCache, MonitorSession, retry_seconds
 
 VENUES = {'aster': 'Aster', 'hyperliquid': 'Hyperliquid', 'lighter': 'Lighter',
-          'variational': 'Variational', 'entropy': 'Entropy', 'arcus': 'Arcus', 'ondo': 'Ondo'}
+          'variational': 'Variational', 'entropy': 'Entropy', 'arcus': 'Arcus', 'ondo': 'Ondo',
+          'binance_spot': 'Binance 現貨'}
 DATA_DIR = Path('data/spread_strategies')
 DB_PATH = Path('data/market_monitor/history.sqlite3')
 SAMPLE_MS = 5000
 MAX_ROWS = 150_000
 VARIATIONAL_STATS = 'https://omni-client-api.prod.ap-northeast-1.variational.io/metadata/v2/stats'
+
+
+@dataclass(frozen=True)
+class MonitorConfig:
+    """Read-only feed settings; does not expand the trading strategy allowlist."""
+    symbol: str
+    short_venue: str
+    long_venue: str
+    clip_quantity: Decimal
+    market_freshness_seconds: float = 1.0
+    max_transport_lag_seconds: float = .5
+    future_tolerance_seconds: float = .25
+    variational_poll_seconds: float = 2.0
+
+    @property
+    def venues(self):
+        return self.short_venue, self.long_venue
+
+    def identity(self):
+        return hashlib.sha256(f'{self.symbol}:{self.short_venue}:{self.long_venue}'.encode()).hexdigest()[:16]
 
 
 @dataclass(frozen=True)
@@ -53,7 +74,9 @@ class Selection:
         if not symbol or len(symbol) > 40 or not all(c.isalnum() or c in '-_' for c in symbol):
             raise ValueError('請選擇有效的交易對')
         if short not in VENUES or long not in VENUES or short == long:
-            raise ValueError('請選擇兩個不同的永續 DEX')
+            raise ValueError('請選擇兩個不同的市場')
+        if short == 'binance_spot':
+            raise ValueError('Binance 現貨請選為多方；此監控不支援借幣做空現貨')
         try:
             qty = Decimal(str(quantity))
             valid = qty.is_finite() and Decimal('0.000000001') <= qty <= Decimal('1000000000')
@@ -68,10 +91,7 @@ class Selection:
         return hashlib.sha256(f'{self.symbol}:{self.short}:{self.long}:{self.quantity}'.encode()).hexdigest()[:24]
 
     def config(self):
-        return Config(symbol=self.symbol, short_venue=self.short, long_venue=self.long,
-                      total_quantity=self.quantity, clip_quantity=self.quantity,
-                      execution_method='taker_taker', entry_bps=Decimal(40), take_profit_bps=Decimal(10),
-                      fees={v: {'maker': Decimal(0), 'taker': Decimal(0)} for v in (self.short, self.long)})
+        return MonitorConfig(self.symbol, self.short, self.long, self.quantity)
 
 
 def rate_payload(rate, interval, ts_ms):
@@ -88,6 +108,8 @@ def variational_perps(data):
 
 
 async def current_funding(session, venue, symbol, *, variational_data=None):
+    if venue == 'binance_spot':
+        return None
     if venue == 'aster':
         # A base can have USDT, USDC and inverse USD contracts with different
         # intervals. Match the exact contract used by MarketFeed, not the last
@@ -247,6 +269,10 @@ class MonitorFeed(MarketFeed):
         source = self.sources.get(venue)
         return source.feed.fresh(venue) if source else super().fresh(venue)
 
+    async def _binance_spot(self, session):
+        from web.binance_market import stream
+        await stream(self, session)
+
     async def _variational(self, session):
         while True:
             data = await self.hub.variational_stats()
@@ -278,9 +304,15 @@ class MarketSubscription:
     async def metadata(self):
         venue, symbol = self.venue, self.feed.config.symbol
         try:
-            self.instrument = await fetch_instrument(self.hub.session, venue, symbol)
+            if venue == 'binance_spot':
+                from web.binance_market import instrument
+                self.instrument = await instrument(self.hub.session, symbol)
+            else:
+                self.instrument = await fetch_instrument(self.hub.session, venue, symbol)
         except Exception:
             pass
+        if venue == 'binance_spot':
+            return  # Spot has no funding rate, not a missing/zero-rate series.
         while True:
             try:
                 data = await self.hub.variational_stats() if venue == 'variational' else None
@@ -430,6 +462,9 @@ class MonitorHub:
                                    and r.get('quoteAsset') in {'USDT', 'USDC', 'USD'}}
                     elif venue == 'variational':
                         symbols = set(variational_perps(await self.variational_stats()))
+                    elif venue == 'binance_spot':
+                        from web.binance_market import BASE, markets
+                        symbols = set(markets(await fetch_json(self.session, 'GET', BASE + '/api/v3/exchangeInfo')))
                     else:
                         module = importlib.import_module(f'hydra_basis.adapters.{venue}')
                         symbols = await module.list_symbols(self.session)
@@ -474,6 +509,9 @@ class MonitorHub:
         result = {}
         for venue in (selection.short, selection.long):
             rows = []
+            if venue == 'binance_spot':
+                result[venue] = []
+                continue
             for point in self.funding_cache.get((venue, selection.symbol), []):
                 if cutoff <= point.ts_ms <= now_ms():
                     try:

@@ -26,13 +26,16 @@ fn key(symbol: &str, id: &str) -> OrderKey {
     }
 }
 async fn setup() -> (Temp, DurableEngine, Plan) {
+    setup_venues("aster", "hyperliquid").await
+}
+async fn setup_venues(maker_venue: &str, hedge_venue: &str) -> (Temp, DurableEngine, Plan) {
     let temp = Temp::new();
     let scope = |venue: &str| Scope {
         venue: venue.into(),
         account: "fixture".into(),
     };
-    let (m, mw) = actor::channel(scope("aster"), 32, 8).unwrap();
-    let (h, hw) = actor::channel(scope("hyperliquid"), 32, 8).unwrap();
+    let (m, mw) = actor::channel(scope(maker_venue), 32, 8).unwrap();
+    let (h, hw) = actor::channel(scope(hedge_venue), 32, 8).unwrap();
     let mt = mw.spawn();
     let ht = hw.spawn();
     for c in [&m, &h] {
@@ -91,6 +94,100 @@ async fn setup() -> (Temp, DurableEngine, Plan) {
     mt.await.unwrap();
     ht.await.unwrap();
     (temp, e, p)
+}
+
+#[tokio::test]
+async fn browser_partial_cancel_race_reserves_only_new_hedge_on_both_native_venues() {
+    // Synthetic verified account/order evidence only, no browser or exchange.
+    for venue in ["aster", "hyperliquid"] {
+        let (path, mut engine, p) = setup_venues("variational", venue).await;
+        let maker_path = Temp::new();
+        let command = browser::Command {
+            request_id: "browser-request".into(),
+            account: p.maker.scope.account.clone(),
+            symbol: p.maker.symbol.clone(),
+            side: "SELL".into(),
+            quantity: "10".into(),
+            limit_price: "100".into(),
+            max_notional: "1000".into(),
+            reduce_only: false,
+        };
+        let mut maker_ledger = browser::Ledger::create(&maker_path.0, command.clone()).unwrap();
+        maker_ledger.dispatch().unwrap();
+        maker_ledger
+            .bind_verified(browser::Identity {
+                request_id: command.request_id,
+                account: command.account,
+                symbol: command.symbol,
+                side: command.side,
+                quantity: command.quantity,
+                reduce_only: false,
+                order_id: p.maker_order.order_id.clone(),
+            })
+            .unwrap();
+        maker_ledger.observe_verified(&maker(&p, "2", 10)).unwrap();
+        engine.observe_browser_maker(&maker_ledger).unwrap();
+        let first = engine.reserve_hedge().unwrap().unwrap();
+        assert_eq!(first.quantity, d("2"));
+        let permit = engine.prepare_dispatch(&first.id).unwrap();
+        assert_eq!(permit.scope().venue, venue);
+        assert!(permit
+            .client_id()
+            .starts_with(if venue == "aster" { "pa" } else { "0x" }));
+        engine.observe_browser_maker(&maker_ledger).unwrap();
+        assert!(engine.reserve_hedge().unwrap().is_none());
+        maker_ledger.cancel_started().unwrap();
+        maker_ledger.unresolved().unwrap();
+        maker_ledger.observe_verified(&maker(&p, "3", 11)).unwrap();
+        engine.observe_browser_maker(&maker_ledger).unwrap();
+        let second = engine.reserve_hedge().unwrap().unwrap();
+        assert_eq!(second.quantity, d("1"));
+        assert!(!engine.state.engine.maker_terminal_confirmed());
+        // Restart: maker lookup can only clear maker recovery. Unknown hedge
+        // remains reserved and blocks another submission until independently found.
+        let old_engine_ticket = engine.begin_browser_reconciliation().unwrap();
+        drop(engine);
+        drop(maker_ledger);
+        let mut engine = DurableEngine::open(&path.0, &p).unwrap();
+        let mut maker_ledger = browser::Ledger::open(&maker_path.0).unwrap();
+        assert!(engine
+            .reconcile_browser_maker(old_engine_ticket, &maker_ledger)
+            .is_err());
+        let engine_ticket = engine.begin_browser_reconciliation().unwrap();
+        assert!(engine
+            .reconcile_browser_maker(engine_ticket, &maker_ledger)
+            .is_err());
+        let engine_ticket = engine.begin_browser_reconciliation().unwrap();
+        let ticket = maker_ledger.lookup_ticket().unwrap();
+        let mut terminal = maker(&p, "3", 12);
+        terminal.status = Status::Canceled;
+        maker_ledger
+            .apply_verified_lookup(ticket, &terminal)
+            .unwrap();
+        // A gap on the paired owner after the lookup began invalidates it too.
+        engine.require_reconciliation(Target::Maker).unwrap();
+        assert!(engine
+            .reconcile_browser_maker(engine_ticket, &maker_ledger)
+            .is_err());
+        let engine_ticket = engine.begin_browser_reconciliation().unwrap();
+        assert!(engine
+            .reconcile_browser_maker(engine_ticket, &maker_ledger)
+            .is_err());
+        let engine_ticket = engine.begin_browser_reconciliation().unwrap();
+        let ticket = maker_ledger.lookup_ticket().unwrap();
+        let mut terminal = maker(&p, "3", 13);
+        terminal.status = Status::Canceled;
+        maker_ledger
+            .apply_verified_lookup(ticket, &terminal)
+            .unwrap();
+        engine
+            .reconcile_browser_maker(engine_ticket, &maker_ledger)
+            .unwrap();
+        assert!(!engine.recovery_pending().contains(&Target::Maker));
+        assert!(engine.recovery_pending().contains(&Target::Hedge(first.id)));
+        assert!(engine.reserve_hedge().is_err());
+        assert_eq!(engine.in_flight().unwrap(), d("3"));
+    }
 }
 fn maker(p: &Plan, q: &str, ms: u64) -> OrderSnapshot {
     let now = Instant::now();

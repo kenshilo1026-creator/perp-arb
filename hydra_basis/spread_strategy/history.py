@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import gzip
 import json
+import math
 import statistics
 import time
 from dataclasses import dataclass
@@ -50,6 +51,24 @@ async def _json(session, method: str, url: str, **kwargs):
 async def fetch_minute_closes(session, venue: str, symbol: str, start_ms: int, end_ms: int) -> dict[int, float] | None:
     """Minute open-time (ms) -> close price; None when the venue has no public candles."""
     symbol = symbol.upper()
+    if venue == 'binance_spot':
+        if not symbol.isascii() or not symbol.isalnum():
+            raise ValueError('invalid Binance spot symbol')
+        # Binance limits each page to 1,000 candles. Half-open UTC windows
+        # avoid duplicate boundary minutes and omit the still-open candle.
+        end_ms = min(end_ms, int(time.time() * 1000) // MINUTE_MS * MINUTE_MS)
+        prices = {}
+        cursor = start_ms
+        while cursor < end_ms:
+            stop = min(end_ms, cursor + 1000 * MINUTE_MS)
+            rows = await _json(session, 'GET', 'https://api.binance.com/api/v3/klines', params={
+                'symbol': symbol + 'USDT', 'interval': '1m', 'startTime': cursor, 'endTime': stop-1, 'limit': 1000})
+            for row in rows:
+                stamp, close = int(row[0]), float(row[4])
+                if cursor <= stamp < stop and int(row[6]) < end_ms and math.isfinite(close) and close > 0:
+                    prices[stamp] = close
+            cursor = stop
+        return prices
     if venue in ("hyperliquid", "entropy"):
         if venue == "entropy":
             coin = f"io:{symbol}"

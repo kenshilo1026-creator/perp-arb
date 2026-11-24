@@ -381,17 +381,22 @@ def format_spot_perp_execution_summary(
             lines.append(f"對沖成交確認來源: {timing['hedge_confirmation_source']}")
     trace = result.get("execution_trace")
     if isinstance(trace, dict):
+        labels = {"maker.cancel_with_retries.end": "Maker 撤單及重試",
+                  "order.terminal_reconciliation.end": "終態查證",
+                  "aster.order_query.end": "Aster 查單",
+                  "binance_spot.order_query.end": "Binance 查單",
+                  "aster.http.POST.end": "Aster HTTP POST 至回傳（含連線等待）",
+                  "binance_spot.request.end": "Binance 請求準備至回傳（含簽名／連線等待）",
+                  "pair.position_confirmation.end": "雙腿持倉確認"}
+        # Keep only the last occurrence per stage for display; retain the trace.
+        latest_events = {}
         for event in trace["events"]:
             stage = event["stage"]
-            labels = {"maker.cancel_with_retries.end": "Maker 撤單及重試",
-                      "order.terminal_reconciliation.end": "終態查證",
-                      "aster.order_query.end": "Aster 查單",
-                      "binance_spot.order_query.end": "Binance 查單",
-                      "aster.http.POST.end": "Aster HTTP POST 至回傳（含連線等待）",
-                      "binance_spot.request.end": "Binance 請求準備至回傳（含簽名／連線等待）",
-                      "pair.position_confirmation.end": "雙腿持倉確認"}
             if stage in labels:
-                lines.append(f"時間記錄 {labels[stage]}: {event['duration_ms']:.2f} ms [{event['status']}]")
+                latest_events.pop(stage, None)
+                latest_events[stage] = event
+        for stage, event in latest_events.items():
+            lines.append(f"時間記錄 {labels[stage]}: {event['duration_ms']:.2f} ms [{event['status']}]")
     return lines
 
 
@@ -756,6 +761,11 @@ async def execute_depth_sized_batches(*, symbol, mode, total_size, leverage):
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run one Binance spot vs perp arbitrage clip.")
+    parser.add_argument("--engine", choices=("python", "rust"), default="python", help="Rust: Aster/Hyperliquid maker -> Binance Spot market hedge; Lighter preview only")
+    parser.add_argument("--rust-run-dir", default=None, help="New native run directory (auto-generated for live); use original directory for recovery")
+    parser.add_argument("--rust-recover", action="store_true", help="Cancel/reconcile/hedge a saved native run; requires --live")
+    parser.add_argument("--rust-watch-seconds", type=int, default=None, help="Rust public WS observation duration (0: first qualifying plan; maximum 3600)")
+    parser.add_argument("--rust-binance-preflight", action="store_true", help="Explicit Rust Binance account/private WS read-only check; no orders (watch 1..300 seconds)")
     parser.add_argument("--mode", default=None, choices=sorted(SUPPORTED_MODES))
     parser.add_argument("--symbol", default=None)
     parser.add_argument("--short-venue", default=None, choices=sorted(SUPPORTED_SHORT_VENUES))
@@ -771,10 +781,31 @@ def parse_args() -> argparse.Namespace:
 
 async def run_spot_perp_arbitrage() -> None:
     args = parse_args()
+    engine = getattr(args, "engine", "python")
+    if getattr(args, "rust_recover", False):
+        if engine != "rust":
+            raise RuntimeError("--rust-recover requires --engine rust")
+        from hydra_basis.execution_engine.rust_spot_perp import run_recover
+        await run_recover(args, root=Path(__file__).resolve().parents[1])
+        return
+    if getattr(args, "rust_binance_preflight", False):
+        if engine != "rust":
+            raise RuntimeError("--rust-binance-preflight requires --engine rust")
+        from hydra_basis.execution_engine.rust_spot_perp import run_preflight
+        await run_preflight(args, root=Path(__file__).resolve().parents[1])
+        return
+    if engine == "python" and getattr(args, "rust_watch_seconds", None) is not None:
+        raise RuntimeError("--rust-watch-seconds requires --engine rust")
     mode = normalize_mode(args.mode or prompt_text("mode [open/close]"))
     symbol = (args.symbol or prompt_text("ticker")).strip().upper()
     short_venue = normalize_short_venue(args.short_venue or prompt_text("short_venue"))
     total_size = Decimal(args.total_size) if args.total_size is not None else prompt_decimal("total_size_token")
+    if engine == "rust":
+        from hydra_basis.execution_engine.rust_spot_perp import run_preview, run_live
+        native_run = run_live if args.live else run_preview
+        await native_run(args, root=Path(__file__).resolve().parents[1], mode=mode, symbol=symbol,
+                          venue=short_venue, total=total_size, max_gap=MAKER_TAKER_MAX_GAP)
+        return
     auto_size = args.clip_size is None
     clip_size = Decimal(args.clip_size) if not auto_size else total_size
     if not total_size.is_finite() or not clip_size.is_finite() or total_size <= 0 or clip_size <= 0:
@@ -945,7 +976,14 @@ async def run_spot_perp_arbitrage() -> None:
 
 def main() -> None:
     try:
-        asyncio.run(run_spot_perp_arbitrage())
+        # Native live child owns the same global lock itself. Holding it here
+        # would deadlock the handoff; the Python trading path retains its lock.
+        if parse_args().engine == "rust":
+            asyncio.run(run_spot_perp_arbitrage())
+            return
+        from hydra_basis.execution_engine.process_lock import execution_process_lock
+        with execution_process_lock():
+            asyncio.run(run_spot_perp_arbitrage())
     except MakerGapTimeout as exc:
         print(f"[gap-timeout] {exc}", flush=True)
         raise SystemExit(1) from None

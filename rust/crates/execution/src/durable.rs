@@ -1,5 +1,6 @@
 //! Synchronous single-owner execution journal. Run on a dedicated blocking worker,
 //! never the socket reader. No method submits, cancels, or silently repairs a log.
+pub mod browser;
 pub mod single;
 use super::*;
 use perp_arb_private_events::{
@@ -113,6 +114,18 @@ impl OrderEvidence {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", deny_unknown_fields)]
 enum Event {
+    HedgeWirePrepared {
+        id: String,
+        order: perp_arb_private_events::orders::Order,
+        max_notional: String,
+    },
+    BrowserMakerBound {
+        request_id: String,
+        order_id: String,
+    },
+    BrowserOrder {
+        payload: Value,
+    },
     SingleOrder {
         payload: Value,
     },
@@ -357,11 +370,68 @@ struct State {
     watermarks: BTreeMap<Target, u64>,
     maker_baseline: Value,
     hedge_baseline: Value,
+    wire_orders: BTreeMap<String, perp_arb_private_events::orders::Order>,
 }
 impl State {
     fn apply(&mut self, event: &Event, sequence: u64) -> JResult<()> {
         match event {
-            Event::Created { .. } | Event::SingleOrder { .. } => return Err(JournalError::Corrupt),
+            Event::HedgeWirePrepared {
+                id,
+                order,
+                max_notional,
+            } => {
+                order
+                    .validate()
+                    .map_err(|_| JournalError::InvalidEvidence)?;
+                let intent = &self
+                    .engine
+                    .hedges
+                    .get(id)
+                    .ok_or(JournalError::Identity)?
+                    .intent;
+                let leg = &self.engine.plan.hedge;
+                let cap = qty(max_notional)?;
+                if self.dispatched.contains_key(id)
+                    || self.wire_orders.contains_key(id)
+                    || order.venue != leg.scope.venue
+                    || order.account != leg.scope.account
+                    || order.symbol != leg.symbol
+                    || order.side != side_text(intent.side)
+                    || qty(&order.quantity)? != intent.quantity
+                    || order.client_id != self.client_id(id)?
+                    || cap <= Decimal::ZERO
+                    || perp_arb_core::instruments::ExactAmount::product(
+                        qty(&order.quantity)?,
+                        qty(&order.limit_price)?,
+                    )
+                    .and_then(|a| a.compare(cap))
+                    .map_err(|_| JournalError::InvalidEvidence)?
+                    .is_gt()
+                {
+                    return Err(JournalError::Identity);
+                }
+                self.wire_orders.insert(id.clone(), order.clone());
+            }
+            Event::BrowserMakerBound {
+                request_id,
+                order_id,
+            } => {
+                let p = &mut self.engine.plan;
+                if p.maker.scope.venue != "variational"
+                    || p.maker_order.order_id != format!("intent:{request_id}")
+                    || order_id.is_empty()
+                    || order_id.len() > 128
+                    || order_id.starts_with("intent:")
+                    || self.engine.maker != Decimal::ZERO
+                    || !self.engine.hedges.is_empty()
+                {
+                    return Err(JournalError::Identity);
+                }
+                p.maker_order.order_id = order_id.clone();
+            }
+            Event::Created { .. } | Event::SingleOrder { .. } | Event::BrowserOrder { .. } => {
+                return Err(JournalError::Corrupt)
+            }
             Event::Reserved { id, quantity } => {
                 let i = self.engine.reserve_hedge()?.ok_or(JournalError::Corrupt)?;
                 if i.id != *id || i.quantity != qty(quantity)? {
@@ -450,6 +520,11 @@ pub struct LookupTicket {
     request: Request,
     started_at: Instant,
 }
+pub struct BrowserLookupTicket {
+    instance: [u8; 16],
+    sequence: u64,
+    started_at: Instant,
+}
 impl LookupTicket {
     pub fn request(&self) -> &Request {
         &self.request
@@ -462,8 +537,12 @@ pub struct DispatchPermit {
     client_id: String,
     scope: Scope,
     symbol: String,
+    wire_order: Option<perp_arb_private_events::orders::Order>,
 }
 impl DispatchPermit {
+    pub fn wire_order(&self) -> Option<&perp_arb_private_events::orders::Order> {
+        self.wire_order.as_ref()
+    }
     pub fn intent(&self) -> &Intent {
         &self.intent
     }
@@ -499,6 +578,67 @@ fn random() -> JResult<[u8; 16]> {
     Ok(value)
 }
 impl DurableEngine {
+    /// Local intent key used ONLY before submission. It is never sent as a venue
+    /// ID and can only be replaced by the exact persisted browser receipt.
+    pub fn pending_browser_order(command: &browser::Command) -> JResult<OrderKey> {
+        let id = format!("intent:{}", command.request_id);
+        if id.len() > 128 {
+            return Err(JournalError::Identity);
+        }
+        Ok(OrderKey {
+            symbol: command.symbol.clone(),
+            order_id: id,
+        })
+    }
+    pub fn validate_new_browser_risk(
+        &self,
+        maker: (&Report, &Health),
+        hedge: (&Report, &Health),
+        price_ok: bool,
+        max_age: Duration,
+    ) -> JResult<()> {
+        if !self
+            .state
+            .engine
+            .plan
+            .maker_order
+            .order_id
+            .starts_with("intent:")
+            || !self.recovery_pending.is_empty()
+            || self.faulted()
+        {
+            return Err(JournalError::RecoveryRequired);
+        }
+        Engine::arm(
+            self.state.engine.plan.clone(),
+            maker,
+            hedge,
+            price_ok,
+            max_age,
+        )?;
+        Ok(())
+    }
+    pub fn bind_browser_maker(&mut self, maker: &browser::Ledger) -> JResult<()> {
+        self.validate_browser_binding(maker)?;
+        let view = maker.view();
+        let Some(id) = view.order_id else {
+            return Err(JournalError::RecoveryRequired);
+        };
+        if self
+            .state
+            .engine
+            .plan
+            .maker_order
+            .order_id
+            .starts_with("intent:")
+        {
+            self.commit(Event::BrowserMakerBound {
+                request_id: view.command.request_id,
+                order_id: id,
+            })?;
+        }
+        Ok(())
+    }
     pub fn create(
         path: &Path,
         plan: Plan,
@@ -508,21 +648,41 @@ impl DurableEngine {
         max_age: Duration,
     ) -> JResult<Self> {
         let engine = Engine::arm(plan, maker, hedge, price_ok, max_age)?;
+        // Spot now has its own exact lookup adapter, but this journal still
+        // accounts for one-way perpetual quantities, not net spot commissions.
+        if engine.plan.maker.scope.venue == "binance_spot" {
+            return Err(JournalError::Identity);
+        }
         if !matches!(
             engine.plan.hedge.scope.venue.as_str(),
             "aster" | "hyperliquid"
         ) {
             return Err(JournalError::Identity);
         }
-        Request {
+        let maker_request = Request {
             scope: engine.plan.maker.scope.clone(),
             symbol: engine.plan.maker.symbol.clone(),
             side: side_text(engine.plan.maker.side).into(),
             original: engine.plan.quantity,
             selector: Selector::OrderId(engine.plan.maker_order.order_id.clone()),
+        };
+        if maker_request.scope.venue == "variational" {
+            // Browser order IDs need not be numeric. They are only reconciled
+            // through the dedicated exact browser-evidence path below.
+            Update {
+                key: engine.plan.maker_order.clone(),
+                original: engine.plan.quantity,
+                cumulative: Decimal::ZERO,
+                status: Status::Pending,
+                event_ms: None,
+            }
+            .validate()
+            .map_err(|_| JournalError::Identity)?;
+        } else {
+            maker_request
+                .validate()
+                .map_err(|_| JournalError::Identity)?;
         }
-        .validate()
-        .map_err(|_| JournalError::Identity)?;
         // This ledger is one-way perp only; hedge-mode/spot require explicit unit/position-side accounting.
         for (leg, report) in [(&engine.plan.maker, maker.0), (&engine.plan.hedge, hedge.0)] {
             if leg.symbol.starts_with('@')
@@ -560,6 +720,7 @@ impl DurableEngine {
                 watermarks: BTreeMap::new(),
                 maker_baseline: mb,
                 hedge_baseline: hb,
+                wire_orders: BTreeMap::new(),
             },
             instance,
             recovery_pending: Default::default(),
@@ -592,6 +753,7 @@ impl DurableEngine {
             watermarks: BTreeMap::new(),
             maker_baseline: mb.clone(),
             hedge_baseline: hb.clone(),
+            wire_orders: BTreeMap::new(),
         };
         for (i, event) in events.iter().enumerate().skip(1) {
             if let Err(e) = state.apply(event, i as u64 + 1) {
@@ -688,6 +850,45 @@ impl DurableEngine {
         }
         Ok(intent)
     }
+    // A missing maker terminal is not permission to ignore already confirmed
+    // fills. Keep the maker fence visible, but permit only the known obligation.
+    // Any unknown hedge still blocks another dispatch and keeps its reservation.
+    fn with_browser_obligation<T>(
+        &mut self,
+        maker: &browser::Ledger,
+        f: impl FnOnce(&mut Self) -> JResult<T>,
+    ) -> JResult<T> {
+        self.validate_browser_binding(maker)?;
+        let view = maker.view();
+        if view.poisoned
+            || view.trade_conflict
+            || view.order_id.is_none()
+            || view.confirmed_trade_count == 0
+        {
+            return Err(JournalError::RecoveryRequired);
+        }
+        let fenced = self.recovery_pending.remove(&Target::Maker);
+        let result = f(self);
+        if fenced {
+            self.recovery_pending.insert(Target::Maker);
+        }
+        result
+    }
+    pub fn reserve_browser_obligation(
+        &mut self,
+        maker: &browser::Ledger,
+    ) -> JResult<Option<Intent>> {
+        self.with_browser_obligation(maker, |s| s.reserve_hedge())
+    }
+    pub fn dispatch_browser_obligation(
+        &mut self,
+        maker: &browser::Ledger,
+        id: &str,
+        order: perp_arb_private_events::orders::Order,
+        cap: Decimal,
+    ) -> JResult<DispatchPermit> {
+        self.with_browser_obligation(maker, |s| s.prepare_wire_dispatch(id, order, cap))
+    }
     pub fn prepare_dispatch(&mut self, id: &str) -> JResult<DispatchPermit> {
         if self.poisoned {
             return Err(JournalError::Poisoned);
@@ -719,7 +920,43 @@ impl DurableEngine {
             client_id,
             scope: self.state.engine.plan.hedge.scope.clone(),
             symbol: self.state.engine.plan.hedge.symbol.clone(),
+            wire_order: self.state.wire_orders.get(id).cloned(),
         })
+    }
+    /// Persist exact native wire parameters before acquiring dispatch permission.
+    /// A crash after this write can resume only with the identical saved order.
+    pub fn prepare_wire_dispatch(
+        &mut self,
+        id: &str,
+        mut order: perp_arb_private_events::orders::Order,
+        max_notional: Decimal,
+    ) -> JResult<DispatchPermit> {
+        if self.faulted() || !self.recovery_pending.is_empty() || max_notional <= Decimal::ZERO {
+            return Err(JournalError::RecoveryRequired);
+        }
+        if perp_arb_core::instruments::ExactAmount::product(
+            qty(&order.quantity)?,
+            qty(&order.limit_price)?,
+        )
+        .and_then(|a| a.compare(max_notional))
+        .map_err(|_| JournalError::InvalidEvidence)?
+        .is_gt()
+        {
+            return Err(JournalError::InvalidEvidence);
+        }
+        order.client_id = self.state.client_id(id)?;
+        if let Some(old) = self.state.wire_orders.get(id) {
+            if old != &order {
+                return Err(JournalError::Identity);
+            }
+        } else {
+            self.commit(Event::HedgeWirePrepared {
+                id: id.into(),
+                order,
+                max_notional: max_notional.to_string(),
+            })?;
+        }
+        self.prepare_dispatch(id)
     }
     pub fn acknowledge(&mut self, id: &str, key: OrderKey) -> JResult<()> {
         self.commit(Event::Acknowledged {
@@ -787,6 +1024,85 @@ impl DurableEngine {
             order.gap = true;
         }
         self.commit(Event::Observed { target, order })
+    }
+    /// Bridge a bound browser maker's durable cumulative into the existing hedge
+    /// coordinator. The account reports used to arm this engine remain required.
+    /// reduce-only routing of hedge submissions belongs to the execution owner.
+    pub fn observe_browser_maker(&mut self, maker: &browser::Ledger) -> JResult<()> {
+        self.validate_browser_binding(maker)?;
+        self.observe(Target::Maker, &maker.maker_snapshot()?)
+    }
+    /// Verify the two durable files belong to the same bound maker even before
+    /// the first fill snapshot is available. Does not relax the account gate.
+    pub fn validate_browser_binding(&self, maker: &browser::Ledger) -> JResult<()> {
+        let view = maker.view();
+        let plan = &self.state.engine.plan;
+        if plan.maker.scope.venue != "variational"
+            || view.command.side != side_text(plan.maker.side)
+            || view.command.account != plan.maker.scope.account
+            || view.command.symbol != plan.maker.symbol
+            || (plan.maker_order.order_id != format!("intent:{}", view.command.request_id)
+                && view.order_id.as_ref() != Some(&plan.maker_order.order_id))
+            || qty(&view.command.quantity)? != plan.quantity
+            || (!view.dispatched && !plan.maker_order.order_id.starts_with("intent:"))
+        {
+            return Err(JournalError::Identity);
+        }
+        Ok(())
+    }
+    /// Only a fresh exact lookup in the browser ledger clears its recovery
+    /// fence. Unknown hedge reservations remain independently fenced.
+    pub fn begin_browser_reconciliation(&self) -> JResult<BrowserLookupTicket> {
+        if self.poisoned {
+            return Err(JournalError::Poisoned);
+        }
+        if self.state.engine.plan.maker.scope.venue != "variational" {
+            return Err(JournalError::Identity);
+        }
+        Ok(BrowserLookupTicket {
+            instance: self.instance,
+            sequence: self.journal.sequence,
+            started_at: Instant::now(),
+        })
+    }
+    pub fn reconcile_browser_maker(
+        &mut self,
+        ticket: BrowserLookupTicket,
+        maker: &browser::Ledger,
+    ) -> JResult<()> {
+        if ticket.instance != self.instance {
+            return Err(JournalError::Identity);
+        }
+        if ticket.sequence != self.journal.sequence
+            || ticket.started_at.elapsed() > Duration::from_secs(5)
+        {
+            return Err(JournalError::RecoveryRequired);
+        }
+        let s = maker.reconciliation_snapshot_after(ticket.started_at)?;
+        let p = &self.state.engine.plan;
+        if p.maker.scope.venue != "variational"
+            || maker.view().command.side != side_text(p.maker.side)
+            || s.scope != p.maker.scope
+            || s.key != p.maker_order
+            || s.original != p.quantity
+        {
+            return Err(JournalError::Identity);
+        }
+        if s.cumulative < self.state.engine.maker
+            || self
+                .state
+                .watermarks
+                .get(&Target::Maker)
+                .is_some_and(|last| s.event_ms.is_none_or(|ms| ms < *last))
+        {
+            return Err(JournalError::RecoveryRequired);
+        }
+        self.commit(Event::Observed {
+            target: Target::Maker,
+            order: OrderEvidence::from_snapshot(&s),
+        })?;
+        self.recovery_pending.remove(&Target::Maker);
+        Ok(())
     }
     pub fn lookup_ticket(&self, target: Target) -> JResult<LookupTicket> {
         if self.poisoned {

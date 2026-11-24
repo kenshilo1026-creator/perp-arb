@@ -1,5 +1,11 @@
 # 執行協調器：4a／4b-1 紙上批次
 
+第五批：browser WAL 新增 confirmed trade ID／數量／價格的持久化聯集與衝突屏障；舊匿名累計只作下限，不與 ID 集合相加。`variational_bridge::owner::Owner` 已在 blocking worker 協調 Maker 與 paired WAL，串起精確查詢、對沖預留／許可及恢復，並於重啟補交兩次寫入間的已知成交。仍未接實際雙腿網路送單；詳見 [第五批](../../VARIATIONAL.md)。
+
+後續來源接線：`variational-bridge::native` 已提供精確 RFQ 查詢快照、原生 submit receipt 綁定及 extension 持久化 receipt 恢復。它要求帳戶、商品類型、數量、方向、限價、reduce-only 相符，且不把取消 ACK／查無列轉成零成交終態。這些 library 方法尚未由雙腿 live owner 呼叫；本 crate 仍不直接交易。
+
+2026-11-19：新增 `durable::browser::Ledger`，保存 Variational browser Maker 的限價意圖、reduce-only、單次送單／撤單待確認與累計成交，沿用本 crate 的 WAL。`observe_browser_maker` 及 `begin_browser_reconciliation`／`reconcile_browser_maker` 接入既有對沖預留與恢復流程；合成案例已覆蓋 Variational → Aster／Hyperliquid 的部分成交、撤單競態與未知對沖重啟。詳見 [Variational 第三批](../../VARIATIONAL.md)。此處的 `verified` 方法要求呼叫端已獨立證明帳戶與訂單歸屬，並未替 extension 自動建立該證明，也沒有新增真實 browser 交易 transport。
+
 `Engine` 接收 Aster／Hyperliquid 共用 `Coordinator` 的 `OrderSnapshot`，產生對沖意圖 `Intent`。此 library 不執行網路交易；4b-2 的獨立 [order-test](../order-test/README.md) 已可測試真實單筆限價委託。原 Python 執行器仍負責既有完整套利流程。
 
 4b-2 新增 `durable::single::Ledger`，沿用鎖、雜湊與同步寫入格式，保存完整網路／帳戶／商品／方向／價格／數量／TIF／reduce-only／client ID／asset ID／名義金額上限。`dispatch` 只能取得一次；ACK 的明確成交數量立即保存但不當成終態證明。每次重啟需要重新查證，`NotFound` 不允許重送。`order-test` 以獨立 blocking worker 擁有此帳本，再接兩所送單／撤單接口；它不會使用舊紙上 `Engine` 自動對沖，也不是完整現金帳本。
@@ -41,3 +47,11 @@
 測試涵蓋實際子程序直接退出、重開／鎖、未知查證、錯身份、事件競態、REST／WS 時間語意、殘缺／損壞、寫入／同步不明故障和終態後矛盾成交。網路使用 loopback 替身；未以真實下單測試這個帳本。
 
 尚未完成：新 Maker 未知送單、真實交易 adapter、Maker 撤回／重掛排程、最低名義值／reduce-only／合約單位與價格保護接線、完整資金帳本、持續策略與停機交接。帳戶快照不能代替持續風控，也不是兩所原子成交保證。
+
+## Variational 第六批增量（2026-11-19）
+
+`pending_browser_order()` 讓 paired WAL 在 Maker POST 前建立，原始 plan 的本機 `intent:request_id` 不會送到交易所。`validate_new_browser_risk()` 再檢查兩腿獨立帳戶報告與新風險價格條件；只有持久化 native receipt 才能 `bind_browser_maker()` 綁定 RFQ。重開時傳入原始 pending plan，owner 先恢復 receipt 綁定再交接累計成交，不以 symbol／數量猜單。
+
+`prepare_wire_dispatch()` 先保存 hedge 的 network、asset、數量、限價、TIF、reduce-only、WAL 衍生 client ID 及名義值上限，再保存單次 dispatch 標記。相同意圖不得替換 wire 參數或重送。已保存參數不代表可自動重放；未知結果仍需精確查證，恢復 transport 必須使用原 network／account。這是明確送單資料，並非自動重試 outbox。
+
+`variational-bridge::execution_io` 將上述 permit 交給 extension 及既有 Aster／Hyperliquid `Venue` transport，涵蓋 submit、cancel、exact lookup、部分成交及未知回覆。caller 仍負責帳戶鎖、行情／商品規格、監控與 gap 轉交、重啟排程；沒有正式雙腿 live CLI，沒有真實送單驗收。完整限制及測試見 [VARIATIONAL.md](../../VARIATIONAL.md)。

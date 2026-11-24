@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/core", "crates/replay", "crates/market-data", "crates/private-events", "crates/aster-private", "crates/hyperliquid-private", "crates/execution", "crates/order-test"]
+members = ["crates/core", "crates/replay", "crates/market-data", "crates/private-events", "crates/aster-private", "crates/hyperliquid-private", "crates/execution", "crates/order-test", "crates/variational-bridge", "crates/spot-perp", "crates/binance-spot"]
 resolver = "2"
 
 [workspace.package]

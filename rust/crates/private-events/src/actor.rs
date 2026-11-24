@@ -458,6 +458,13 @@ impl Worker {
 }
 
 impl Coordinator {
+    /// Verified transport notification (funding/balance/position/config change)
+    /// invalidates outstanding account queries, including non-order events.
+    pub async fn account_changed(&self, session: Session) -> Result<()> {
+        self.call(Command::AccountChanged(session))
+            .await
+            .map(|_| ())
+    }
     pub async fn begin_account_query(&self) -> Result<account::Ticket> {
         match self.call(Command::AccountBegin).await? {
             Reply::AccountTicket(t) => Ok(t),

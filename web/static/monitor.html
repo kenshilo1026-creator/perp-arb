@@ -4,7 +4,7 @@
   <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
   <title>perp-arb · 跨所套利監控</title>
   <link rel="stylesheet" href="/vendor/uPlot.min.css"><link rel="stylesheet" href="/monitor.css?v=2">
-  <script defer src="/vendor/uPlot.iife.min.js"></script><script defer src="/monitor.js?v=3"></script>
+  <script defer src="/vendor/uPlot.iife.min.js"></script><script defer src="/monitor.js?v=4"></script>
 </head>
 <body>
   <header class="topbar">
@@ -14,7 +14,7 @@
   </header>
   <main>
     <section class="market-toolbar" aria-label="配對選擇">
-      <div class="symbol-wrap"><span class="coin-icon">◈</span><label>永續交易對<select id="symbol" aria-label="永續交易對"><option>ETH</option></select></label><span class="contract">PERP</span></div>
+      <div class="symbol-wrap"><span class="coin-icon">◈</span><label>交易標的<select id="symbol" aria-label="交易標的"><option>ETH</option></select></label><span class="contract" id="contract-kind">PERP / PERP</span></div>
       <div class="pair-picker"><label><span class="side long">做多</span><select id="long" aria-label="做多交易所"></select></label><button id="swap" class="icon-button" title="交換做多與做空方向" aria-label="交換方向">⇄</button><label><span class="side short">做空</span><select id="short" aria-label="做空交易所"></select></label></div>
       <div class="market-tools"><button id="demo" class="quiet">示範預覽</button><button id="settings-open" class="quiet">⚙ 圖表設定</button><button id="reconnect" class="accent-outline">重新連線 ↗</button></div>
     </section>
@@ -22,7 +22,7 @@
     <section class="metrics" aria-label="配對摘要">
       <article><span><i class="dot blue"></i>開倉價差 <small id="entry-basis">掛單估算</small></span><strong id="entry-value" class="blue-text">—<small>%</small></strong><div id="entry-detail">等待有效報價</div></article>
       <article><span><i class="dot red"></i>平倉價差</span><strong id="exit-value" class="red-text">—<small>%</small></strong><div>價差越低，平倉成本通常越有利</div></article>
-      <article><span><i class="dot lime"></i>每小時資金費率差</span><strong id="funding-value">—</strong><div>空方收取 − 多方支付 · 預估</div></article>
+      <article><span><i class="dot lime"></i>每小時資金費率差</span><strong id="funding-value">—</strong><div id="funding-detail">空方收取 − 多方支付 · 預估</div></article>
       <article><span><i class="dot amber"></i>策略未對沖數量</span><strong id="exposure-value">—</strong><div id="exposure-detail">尚未載入策略紀錄</div></article>
     </section>
     <section class="workspace" id="charts-section">

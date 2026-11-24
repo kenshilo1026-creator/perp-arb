@@ -100,6 +100,47 @@ class RunBackfillTests(unittest.IsolatedAsyncioTestCase):
         await runner.run_backfill(skip_spread_refresh=True)
         self.telegram.assert_not_awaited()
 
+    async def test_listing_failure_preserves_history_and_continues_healthy_venues(self):
+        cached = self.point("aster", "BTC")
+        self.history.load.return_value = {("aster", "BTC"): cached}
+        self.loris.side_effect = self.returning("variational")
+        failed = AsyncMock(side_effect=RuntimeError("broken listing"))
+        with patch.dict(runner.SYMBOL_DISCOVERERS, {"aster": failed}):
+            await runner.run_backfill(skip_spread_refresh=True)
+        self.direct.assert_not_awaited()
+        self.assertEqual(self.loris.await_count, 2)
+        saved = self.history.save.call_args.args[0]
+        self.assertEqual(saved[("aster", "BTC")], cached)
+        self.assertIn(("variational", "ETH"), saved)
+        self.assertIn("[listing]", self.telegram.await_args.args[0])
+
+    async def test_disabled_venue_is_never_discovered_or_fetched_and_history_is_retained(self):
+        cached = self.point("aster", "BTC")
+        self.history.load.return_value = {("aster", "BTC"): cached}
+        self.loris.side_effect = self.returning("variational")
+        discover = AsyncMock(side_effect=AssertionError("disabled venue fetched"))
+        with patch.dict(runner.VENUE_CONFIG, {"aster": FundingConfig("aster", enabled=False)}), \
+                patch.dict(runner.SYMBOL_DISCOVERERS, {"aster": discover}):
+            await runner.run_backfill(skip_spread_refresh=True)
+        discover.assert_not_awaited()
+        self.direct.assert_not_awaited()
+        self.assertEqual(self.history.save.call_args.args[0][("aster", "BTC")], cached)
+
+    async def test_listing_timeout_is_bounded_and_other_venues_finish(self):
+        cancelled = asyncio.Event()
+        async def stuck(session):
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cancelled.set()
+        self.loris.side_effect = self.returning("variational")
+        with patch.dict(runner.SYMBOL_DISCOVERERS, {"aster": stuck}), \
+                patch.object(runner, "LISTING_TIMEOUT_SECONDS", 0.01):
+            await runner.run_backfill(skip_spread_refresh=True)
+        self.assertTrue(cancelled.is_set())
+        self.direct.assert_not_awaited()
+        self.assertEqual(self.loris.await_count, 2)
+
     async def test_loris_runs_while_direct_fetches_are_still_in_flight(self):
         loris_started = asyncio.Event()
 
@@ -136,6 +177,31 @@ class RunBackfillTests(unittest.IsolatedAsyncioTestCase):
 
 
 class SpreadRefreshTests(unittest.IsolatedAsyncioTestCase):
+    async def test_bulk_failure_falls_back_without_dropping_all_spreads(self):
+        rest = AsyncMock(return_value={"stored": True, "error": None})
+        with patch.object(runner, "collect_top_of_book", AsyncMock(side_effect=RuntimeError("bulk failed"))), \
+                patch.object(runner, "capture_spread_snapshot_with_venue_delay", rest), \
+                patch.object(runner, "send_spread_error_alert", AsyncMock()):
+            await runner.refresh_spreads(session=None, keys=[("arcus", "BTC"), ("aster", "BTC")],
+                                         spreads={}, spread_store=Mock())
+        self.assertEqual({call.kwargs['venue'] for call in rest.await_args_list}, {'arcus', 'aster'})
+
+    async def test_invalid_bulk_quote_does_not_discard_healthy_quote_or_cached_data(self):
+        old = {"bid": 99, "ask": 100, "ts_ms": 1}
+        spreads = {("arcus", "BTC"): old.copy()}
+        bulk = AsyncMock(return_value=({("arcus", "BTC"): {"bid": "bad"},
+                                       ("aster", "BTC"): {"bid": 100, "ask": 101, "ts_ms": 2}}, {}))
+        rest = AsyncMock(return_value={"stored": False, "error": "no quote", "error_type": "transient"})
+        with patch.object(runner, "collect_top_of_book", bulk), \
+                patch.object(runner, "capture_spread_snapshot_with_venue_delay", rest), \
+                patch.object(runner, "send_spread_error_alert", AsyncMock()):
+            await runner.refresh_spreads(session=None, keys=[("arcus", "BTC"), ("aster", "BTC")],
+                                         spreads=spreads, spread_store=Mock())
+        self.assertEqual(spreads[("arcus", "BTC")], old)
+        self.assertEqual(spreads[("aster", "BTC")]['ts_ms'], 2)
+        rest.assert_awaited_once()
+        self.assertEqual(rest.await_args.kwargs['venue'], 'arcus')
+
     async def test_bulk_quotes_first_rest_only_for_the_rest(self):
         spreads = {("aster", "BAD"): {"status": "invalid_symbol"}}
         store = Mock()

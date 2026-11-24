@@ -138,6 +138,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "chrono"
+version = "0.4.45"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1aa79e62e7697b8e29b513a68abacf485adcd1fe8284a4316c5ae868e6633327"
+dependencies = [
+ "num-traits",
+]
+
+[[package]]
 name = "const-oid"
 version = "0.9.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -828,6 +837,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "perp-arb-binance-spot"
+version = "0.1.0"
+dependencies = [
+ "futures-util",
+ "hex",
+ "hmac",
+ "perp-arb-core",
+ "perp-arb-private-events",
+ "reqwest",
+ "rustls",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tokio",
+ "tokio-tungstenite",
+ "zeroize",
+]
+
+[[package]]
 name = "perp-arb-core"
 version = "0.1.0"
 dependencies = [
@@ -872,6 +900,7 @@ dependencies = [
 name = "perp-arb-market-data"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "futures-util",
  "httpdate",
  "perp-arb-core",
@@ -908,6 +937,44 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+]
+
+[[package]]
+name = "perp-arb-spot-perp"
+version = "0.1.0"
+dependencies = [
+ "futures-util",
+ "perp-arb-binance-spot",
+ "perp-arb-core",
+ "perp-arb-execution",
+ "perp-arb-market-data",
+ "perp-arb-order-test",
+ "perp-arb-private-events",
+ "reqwest",
+ "rustls",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tokio",
+ "tokio-tungstenite",
+]
+
+[[package]]
+name = "perp-arb-variational-bridge"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "futures-util",
+ "getrandom 0.3.4",
+ "perp-arb-core",
+ "perp-arb-execution",
+ "perp-arb-market-data",
+ "perp-arb-order-test",
+ "perp-arb-private-events",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-tungstenite",
 ]
 
 [[package]]

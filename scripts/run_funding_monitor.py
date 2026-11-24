@@ -201,7 +201,16 @@ async def run_once(analysis_days: int = 7, required_venue: str | None = None) ->
                     {"symbol": symbol, "short_venue": short_venue, "long_venue": long_venue, "stats": stats}
                 )
 
-    entry_books = await fetch_monitor_entry_books(opportunities)
+    # Funding results are useful even when the independent entry-quote service fails.
+    save_monitor_signals(
+        path=MONITOR_SIGNALS_PATH,
+        cross_exchange_signals=opportunities,
+    )
+    try:
+        entry_books = await fetch_monitor_entry_books(opportunities)
+    except Exception as exc:
+        print(f"entry_quotes_unavailable error={type(exc).__name__}: {exc}; retaining funding opportunities with unconfirmed entry gap")
+        entry_books = {}
     best_alerts = select_best_alerts_by_symbol(
         opportunities,
         min_annualized_avg=0.4,
@@ -212,16 +221,18 @@ async def run_once(analysis_days: int = 7, required_venue: str | None = None) ->
     unconfirmed = sum(row["entry_estimate"]["status"] != "estimated" for row in best_alerts)
     print(f"alert_summary funding_candidates={funding_candidates} cross_after_gap_filter_and_ranking={len(best_alerts)} "
           f"entry_unconfirmed={unconfirmed} spot_perp={len(best_spot_perp_alerts)} maker_taker_gap_limit=0.30%")
-    save_monitor_signals(
-        path=MONITOR_SIGNALS_PATH,
-        cross_exchange_signals=opportunities,
-    )
     digest = build_ranked_alert_digest(
         cross_exchange_alerts=best_alerts,
         spot_perp_alerts=best_spot_perp_alerts,
     )
     if digest:
-        await send_telegram(digest)
+        print(digest)
+        try:
+            await send_telegram(digest)
+        except Exception as exc:
+            print(f"telegram_unavailable error={type(exc).__name__}: {exc}; funding summary displayed above and signals saved")
+    else:
+        print("本次沒有符合條件的資費機會；資料不可用的交易所／商品已於上方列出。")
 
 
 if __name__ == "__main__":

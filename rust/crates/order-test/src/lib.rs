@@ -47,11 +47,13 @@ impl Plan {
         {
             return Err("order exceeds max_notional_usd".into());
         }
-        self.order(if self.venue == "hyperliquid" {
-            Some(0)
-        } else {
-            None
-        })?
+        self.order(
+            if matches!(self.venue.as_str(), "hyperliquid" | "lighter") {
+                Some(0)
+            } else {
+                None
+            },
+        )?
         .validate()
         .map_err(|e| e.to_string())
     }
@@ -84,6 +86,7 @@ impl Plan {
         self.validate()?;
         let maps = SymbolMappings::default();
         let resolved = match self.venue.as_str() {
+            "lighter" => perp_arb_market_data::lighter::resolve(&self.symbol).await,
             "aster" => {
                 let http = metadata::PublicHttp::new(metadata::HttpPolicy::default())
                     .map_err(|e| e.to_string())?;
@@ -110,16 +113,23 @@ impl Plan {
                 .transpose()
                 .map_err(|_| "asset ID overflow")?,
         )?;
-        if resolved
-            .limit
-            .price_error(order.price().map_err(|e| e.to_string())?)
-            .map_err(|e| e.to_string())?
-            .is_some()
+        let limits = if order.tif == TimeInForce::Market {
+            resolved
+                .market
+                .as_ref()
+                .ok_or("market instrument constraints unavailable")?
+        } else {
+            &resolved.limit
+        };
+        if order.tif != TimeInForce::Market
+            && limits
+                .price_error(order.price().map_err(|e| e.to_string())?)
+                .map_err(|e| e.to_string())?
+                .is_some()
         {
             return Err("price does not match instrument tick/precision".into());
         }
-        if let Some(error) = resolved
-            .limit
+        if let Some(error) = limits
             .size_error(
                 order.quantity().map_err(|e| e.to_string())?,
                 Some(order.price().map_err(|e| e.to_string())?),

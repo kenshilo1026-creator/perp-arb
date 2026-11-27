@@ -1,4 +1,5 @@
-//! Explicit single-order wire contract. No market/trigger/transfer actions.
+//! Explicit single-order wire contract. Aster market orders retain a valuation
+//! reference in limit_price, but never send it as an exchange limit.
 use crate::{
     lookup::{Request, Selector},
     Error, Result, Scope,
@@ -16,6 +17,7 @@ pub enum Network {
 pub enum TimeInForce {
     PostOnly,
     Ioc,
+    Market,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -56,16 +58,28 @@ impl Order {
     pub fn validate(&self) -> Result<()> {
         self.request()?;
         if self.price()? <= Decimal::ZERO
-            || self.account.len() != 42
-            || !self.account.starts_with("0x")
-            || !self.account[2..].bytes().all(|b| b.is_ascii_hexdigit())
+            || if self.venue == "lighter" {
+                !self
+                    .account
+                    .parse::<u64>()
+                    .is_ok_and(|n| n < (1 << 48) && n.to_string() == self.account)
+            } else {
+                self.account.len() != 42
+                    || !self.account.starts_with("0x")
+                    || !self.account[2..].bytes().all(|b| b.is_ascii_hexdigit())
+            }
             || self.symbol.contains([':', '/', '@'])
         {
             return Err(Error::InvalidInput);
         }
         match self.venue.as_str() {
+            "lighter"
+                if self.network == Network::Mainnet
+                    && self.asset.is_some_and(|a| a < 65536)
+                    && self.tif != TimeInForce::Market => {}
             "aster" if self.network == Network::Mainnet && self.asset.is_none() => (),
-            "hyperliquid" if self.asset.is_some_and(|a| a < 10000) => (),
+            "hyperliquid"
+                if self.asset.is_some_and(|a| a < 10000) && self.tif != TimeInForce::Market => {}
             _ => return Err(Error::InvalidInput),
         }
         Ok(())

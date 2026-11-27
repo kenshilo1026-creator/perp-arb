@@ -62,7 +62,12 @@ impl perp_arb_order_test::venue::Venue for FastVenue {
 }
 #[tokio::test]
 async fn ws_fast_lane_sends_without_rest_and_deduplicates_rest_and_restart() {
-    for venue in ["aster", "hyperliquid"] {
+    for (venue, market) in [
+        ("aster", false),
+        ("hyperliquid", false),
+        ("lighter", false),
+        ("aster", true),
+    ] {
         let files = Files::new();
         let owner = start(&files, venue).await;
         let mut validator = crate::ws_validation::Validator::default();
@@ -73,17 +78,16 @@ async fn ws_fast_lane_sends_without_rest_and_deduplicates_rest_and_restart() {
         let mock = FastVenue(std::sync::atomic::AtomicUsize::new(0));
         let lane = tokio::sync::Mutex::new(());
         let mut seen = BTreeSet::new();
+        let mut r = crate::paired::tests::resolved(venue);
+        let mut p = crate::paired::tests::plan(venue);
+        if market {
+            r.order.tif = perp_arb_private_events::orders::TimeInForce::Market;
+            r.metadata.market = Some(r.metadata.limit.clone());
+            p.hedge.tif = perp_arb_private_events::orders::TimeInForce::Market;
+        }
         for _ in 0..2 {
             crate::paired::fast::process(
-                &owner,
-                &mock,
-                &crate::paired::tests::resolved(venue),
-                &crate::paired::tests::plan(venue),
-                &validator,
-                epoch,
-                &lane,
-                &trace,
-                &mut seen,
+                &owner, &mock, &r, &p, &validator, epoch, &lane, &trace, &mut seen,
             )
             .await
             .unwrap();
@@ -262,7 +266,13 @@ async fn paired_runner_hedges_partial_fills_residuals_and_stops_without_duplicat
         connect_async,
         tungstenite::{client::IntoClientRequest, Message},
     };
-    for (venue, unknown) in [("aster", false), ("hyperliquid", false), ("aster", true)] {
+    for (venue, unknown) in [
+        ("aster", false),
+        ("hyperliquid", false),
+        ("lighter", false),
+        ("aster", true),
+        ("lighter", true),
+    ] {
         let files = Files::new();
         let owner = start(&files, venue).await;
         let (bridge, _events) = crate::Bridge::bind(crate::Config {
@@ -284,7 +294,7 @@ async fn paired_runner_hedges_partial_fills_residuals_and_stops_without_duplicat
                 .unwrap(),
         );
         let (mut socket, _) = connect_async(req).await.unwrap();
-        socket.send(Message::Text(json!({"type":"REGISTER","role":"extension","nativeProtocol":PROTOCOL,"nativeTradingEnabled":true}).to_string().into())).await.unwrap();
+        socket.send(Message::Text(json!({"type":"REGISTER","role":"extension","nativeProtocol":PROTOCOL,"nativeMutationTransport":"ui","nativeTradingEnabled":true}).to_string().into())).await.unwrap();
         let mut health = bridge.health();
         while !health.borrow().command_connected {
             health.changed().await.unwrap();
@@ -421,7 +431,12 @@ fn plan(venue: &str) -> Plan {
         hedge: Leg {
             scope: Scope {
                 venue: venue.into(),
-                account: "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+                account: if venue == "lighter" {
+                    "100"
+                } else {
+                    "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                }
+                .into(),
             },
             symbol: if venue == "aster" { "ETHUSDT" } else { "ETH" }.into(),
             side: Side::Sell,
@@ -553,7 +568,7 @@ async fn apply(owner: &Owner, trades: &[(&str, &str)], terminal: bool) -> Progre
 }
 #[tokio::test]
 async fn both_native_venues_reserve_only_new_fills_during_cancel_and_restart() {
-    for venue in ["aster", "hyperliquid"] {
+    for venue in ["aster", "hyperliquid", "lighter"] {
         let files = Files::new();
         let owner = start(&files, venue).await;
         let p = apply(&owner, &[("a", "1")], false).await;
@@ -970,7 +985,7 @@ fn hedge_order(venue: &str) -> perp_arb_private_events::orders::Order {
         tif: TimeInForce::Ioc,
         reduce_only: true,
         client_id: "assigned-by-wal".into(),
-        asset: if venue == "hyperliquid" {
+        asset: if matches!(venue, "hyperliquid" | "lighter") {
             Some(1)
         } else {
             None
@@ -1043,7 +1058,12 @@ fn limits() -> perp_arb_core::instruments::Instrument {
 }
 #[tokio::test]
 async fn native_wire_dispatch_both_venues_preserves_close_intent_and_terminal_residual() {
-    for venue in ["aster", "hyperliquid"] {
+    for (venue, market) in [
+        ("aster", false),
+        ("hyperliquid", false),
+        ("lighter", false),
+        ("aster", true),
+    ] {
         let files = Files::new();
         let owner = start(&files, venue).await;
         apply(&owner, &[("a", "1")], false).await;
@@ -1053,11 +1073,16 @@ async fn native_wire_dispatch_both_venues_preserves_close_intent_and_terminal_re
             unknown: false,
             filled: "0.4",
         };
+        let mut order = hedge_order(venue);
+        if market {
+            order.tif = perp_arb_private_events::orders::TimeInForce::Market;
+            order.limit_price = "99.01".into(); // Valuation need not be a limit-price tick.
+        }
         let p = crate::execution_io::dispatch_hedge(
             &owner,
             &mock,
             i.id.clone(),
-            hedge_order(venue),
+            order,
             &limits(),
             decimal("100").unwrap(),
         )
@@ -1072,6 +1097,10 @@ async fn native_wire_dispatch_both_venues_preserves_close_intent_and_terminal_re
         let sent = mock.sent.lock().unwrap().clone();
         assert_eq!(sent.len(), 1);
         assert!(sent[0].reduce_only);
+        assert_eq!(
+            sent[0].tif == perp_arb_private_events::orders::TimeInForce::Market,
+            market
+        );
         assert_ne!(sent[0].client_id, "assigned-by-wal");
         assert!(owner
             .prepare_wire_hedge(i.id, hedge_order(venue), decimal("100").unwrap())
@@ -1085,42 +1114,49 @@ async fn native_wire_dispatch_both_venues_preserves_close_intent_and_terminal_re
 }
 #[tokio::test]
 async fn lost_native_ack_and_not_found_never_resend() {
-    let files = Files::new();
-    let owner = start(&files, "aster").await;
-    apply(&owner, &[("a", "1")], false).await;
-    let i = owner.reserve_hedge().await.unwrap().unwrap();
-    let mock = MockVenue {
-        sent: Default::default(),
-        unknown: true,
-        filled: "0",
-    };
-    assert!(crate::execution_io::dispatch_hedge(
-        &owner,
-        &mock,
-        i.id.clone(),
-        hedge_order("aster"),
-        &limits(),
-        decimal("100").unwrap()
-    )
-    .await
-    .is_err());
-    crate::execution_io::reconcile_hedge(&owner, &mock, i.id.clone())
+    for tif in [
+        perp_arb_private_events::orders::TimeInForce::Ioc,
+        perp_arb_private_events::orders::TimeInForce::Market,
+    ] {
+        let mut order = hedge_order("aster");
+        order.tif = tif;
+        let files = Files::new();
+        let owner = start(&files, "aster").await;
+        apply(&owner, &[("a", "1")], false).await;
+        let i = owner.reserve_hedge().await.unwrap().unwrap();
+        let mock = MockVenue {
+            sent: Default::default(),
+            unknown: true,
+            filled: "0",
+        };
+        assert!(crate::execution_io::dispatch_hedge(
+            &owner,
+            &mock,
+            i.id.clone(),
+            order.clone(),
+            &limits(),
+            decimal("100").unwrap()
+        )
         .await
-        .unwrap();
-    assert!(owner.reserve_hedge().await.is_err());
-    assert!(crate::execution_io::dispatch_hedge(
-        &owner,
-        &mock,
-        i.id,
-        hedge_order("aster"),
-        &limits(),
-        decimal("100").unwrap()
-    )
-    .await
-    .is_err());
-    assert_eq!(mock.sent.lock().unwrap().len(), 1);
-    assert_eq!(owner.progress().await.unwrap().in_flight, "1");
-    owner.shutdown().await.unwrap();
+        .is_err());
+        crate::execution_io::reconcile_hedge(&owner, &mock, i.id.clone())
+            .await
+            .unwrap();
+        assert!(owner.reserve_hedge().await.is_err());
+        assert!(crate::execution_io::dispatch_hedge(
+            &owner,
+            &mock,
+            i.id,
+            order,
+            &limits(),
+            decimal("100").unwrap()
+        )
+        .await
+        .is_err());
+        assert_eq!(mock.sent.lock().unwrap().len(), 1);
+        assert_eq!(owner.progress().await.unwrap().in_flight, "1");
+        owner.shutdown().await.unwrap();
+    }
 }
 #[tokio::test]
 async fn wrong_reduce_only_cap_or_precision_cannot_send_hedge() {
@@ -1190,7 +1226,7 @@ async fn pending_maker_is_armed_before_rfq_ack_and_recovered_across_restart() {
         sockets.push(connect_async(req).await.unwrap().0);
     }
     let mut command_socket = sockets.pop().unwrap();
-    command_socket.send(Message::Text(json!({"type":"REGISTER","role":"extension","nativeProtocol":PROTOCOL,"nativeTradingEnabled":true}).to_string().into())).await.unwrap();
+    command_socket.send(Message::Text(json!({"type":"REGISTER","role":"extension","nativeProtocol":PROTOCOL,"nativeMutationTransport":"ui","nativeTradingEnabled":true}).to_string().into())).await.unwrap();
     let mut health = bridge.health();
     while !health.borrow().native_trading_enabled {
         health.changed().await.unwrap();

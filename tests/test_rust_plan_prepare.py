@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from unittest.mock import AsyncMock, patch
 
-from hydra_basis.execution_engine.rust_plan_prepare import build_plan, prepare_signal_plan, preview_mid_price, select_signal
+from hydra_basis.execution_engine.rust_plan_prepare import build_plan, prepare_signal_plan, preview_mid_price, lighter_ioc_price, prepare_leverage
 from hydra_basis.execution_engine.rust_place_order import build_native_command
 
 
@@ -19,33 +19,54 @@ def row(short="variational", long="aster", annualized="0.5", signal=True):
     return dict(symbol="ETH", short_venue=short, long_venue=long, annualized_avg=annualized, signal=signal)
 
 
-class SelectionTests(unittest.TestCase):
-    def select(self, rows, *, updated=NOW, **kwargs):
-        with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / "signals.json"
-            path.write_text(json.dumps({"updated_at": updated.isoformat(), "cross_exchange_signals": rows}), encoding="utf-8")
-            return select_signal(path, "eth", now=NOW, **kwargs)
-
-    def test_ranks_supported_qualified_pairs_and_keeps_direction(self):
-        best = self.select([row("aster", "hyperliquid", "9"), row(annualized="8", signal=False),
-                            row(annualized="NaN"), row(), row("hyperliquid", "variational", "0.8")])
-        self.assertEqual((best['short_venue'], best['long_venue']), ("hyperliquid", "variational"))
-
-    def test_optional_venue_constraints(self):
-        rows = [row(), row("hyperliquid", "variational", "0.8")]
-        self.assertEqual(self.select(rows, short="VARIATIONAL")["long_venue"], "aster")
-        with self.assertRaisesRegex(RuntimeError, "no eligible"):
-            self.select(rows, short="aster")
-
-    def test_stale_future_naive_and_missing_signals_do_not_fallback(self):
-        for timestamp in (NOW - dt.timedelta(hours=25), NOW + dt.timedelta(seconds=1), NOW.replace(tzinfo=None)):
-            with self.subTest(timestamp=timestamp), self.assertRaisesRegex(RuntimeError, "timestamp"):
-                self.select([row()], updated=timestamp)
-        with self.assertRaisesRegex(RuntimeError, "no eligible"):
-            self.select([row(signal=False)])
-
-
 class PlanTests(unittest.TestCase):
+    def test_leverage_input_validation_and_close_never_prompts(self):
+        with patch('hydra_basis.execution_engine.rust_plan_prepare.prompt', return_value='5') as prompt:
+            self.assertEqual(prepare_leverage(argparse.Namespace(), 'open'), 5)
+            prompt.assert_called_once_with('leverage_x')
+            prompt.reset_mock()
+            self.assertEqual(prepare_leverage(argparse.Namespace(rust_leverage=3), 'open'), 3)
+            self.assertIsNone(prepare_leverage(argparse.Namespace(), 'close'))
+            prompt.assert_not_called()
+        for bad in ('0', '126', '1.5', 'NaN', '-1'):
+            with patch('hydra_basis.execution_engine.rust_plan_prepare.prompt', return_value=bad), self.assertRaises(RuntimeError):
+                prepare_leverage(argparse.Namespace(), 'open')
+        for bad in (0, 126, True, 1.5):
+            with self.assertRaises(RuntimeError):
+                self.plan(leverage=bad)
+
+    def test_leverage_is_native_hedge_policy_not_quantity_or_browser_command(self):
+        for venue in ('aster', 'hyperliquid', 'lighter'):
+            settings = {**SETTINGS, 'accounts': {**SETTINGS['accounts'], 'lighter': '100'}}
+            for mode in ('open', 'close'):
+                p = self.plan(signal=row('variational', venue), settings=settings, mode=mode, leverage=5)
+                self.assertEqual(p['hedge_leverage'], 5 if mode == 'open' else None)
+                self.assertEqual(p['maker']['quantity'], '0.0123')
+                self.assertEqual(p['hedge']['quantity'], '0.0123')
+                self.assertNotIn('leverage', p['maker'])
+
+    def test_lighter_variational_pair_uses_numeric_account_and_ioc(self):
+        settings={**SETTINGS,'accounts':{**SETTINGS['accounts'],'lighter':'100'}}
+        for mode in ('open','close'):
+            for signal in (row('lighter','variational'),row('variational','lighter')):
+                p=self.plan(signal=signal,settings=settings,mode=mode,native_symbol='ETH')
+                self.assertEqual(p['hedge']['venue'],'lighter')
+                self.assertEqual(p['hedge']['account'],'100')
+                self.assertEqual(p['hedge']['tif'],'ioc')
+                self.assertEqual(p['maker']['reduce_only'],mode=='close')
+                self.assertNotEqual(p['maker']['side'],p['hedge']['side'])
+    def test_aster_market_only_in_supported_variational_pair_and_preserves_sides(self):
+        for mode in ('open', 'close'):
+            for signal in (row(), row('aster', 'variational')):
+                p = self.plan(signal=signal, mode=mode, hedge_price=None)
+                self.assertEqual(p['hedge']['tif'], 'market')
+                self.assertEqual(p['hedge']['limit_price'], p['maker']['limit_price'])
+                self.assertEqual(p['hedge']['reduce_only'], mode == 'close')
+                self.assertNotEqual(p['hedge']['side'], p['maker']['side'])
+        with self.assertRaisesRegex(RuntimeError, 'unsupported paired venues'):
+            self.plan(signal=row('aster', 'hyperliquid'), hedge_price=None)
+        self.assertEqual(self.plan()['hedge']['tif'], 'ioc')  # Explicit old limit remains explicit.
+
     def plan(self, **kwargs):
         options = dict(signal=row(), settings=SETTINGS, mode="open", quantity="0.0123", maker_price="3123.45",
                        hedge_price="3130.5", native_symbol="ETHUSDT", funding_interval_s=3600)
@@ -83,9 +104,39 @@ class PlanTests(unittest.TestCase):
 
 
 class PreparationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_lighter_ioc_uses_taker_side_tolerance_and_tick(self):
+        metadata={'order_book_details':[{'symbol':'ETH','market_type':'perp','status':'active','supported_price_decimals':2}]}
+        with patch('hydra_basis.execution_engine.rust_plan_prepare.fetch_json',new=AsyncMock(return_value=metadata)):
+            self.assertEqual(await lighter_ioc_price('ETH','BUY','2000.01'),'2010.02')
+            self.assertEqual(await lighter_ioc_price('ETH','SELL','2000.01'),'1990.00')
+            self.assertEqual(await lighter_ioc_price('ETH','BUY','2000.01','0'),'2000.01')
+        with self.assertRaises(RuntimeError):
+            await lighter_ioc_price('ETH','BUY','2000','1001')
+
+    def setUp(self):
+        # These tests own plan construction. Native selection has separate CLI
+        # differential and integration tests in test_rust_selection.py.
+        async def pair(args, *, symbol, project_root):
+            return {**row(getattr(args, 'short_venue', None) or 'aster',
+                          getattr(args, 'long_venue', None) or 'variational'),
+                    'symbol': symbol, 'updated_at': 'fixture'}
+        async def legs(args, *, signal, quantity, project_root):
+            taker = next(v for v in (signal['short_venue'], signal['long_venue']) if v != 'variational')
+            buy = (signal['long_venue'] == 'variational') != (getattr(args, 'mode', 'open') == 'close')
+            return {'signal': signal, 'selection': {
+                'maker_venue': 'variational', 'taker_venue': taker,
+                'maker_side': 'BUY' if buy else 'SELL', 'taker_side': 'SELL' if buy else 'BUY',
+                'paired_execution_supported': True, 'reason': 'variational_maker',
+                'spread_by_venue': {}, 'requires_spread_confirmation': False,
+                'maker_price': None, 'taker_reference_price': '3000'}}
+        for target, fn in (('select_pair_for_args', pair), ('select_legs_for_pair', legs)):
+            p = patch('hydra_basis.execution_engine.rust_plan_prepare.' + target, new=fn)
+            p.start()
+            self.addCleanup(p.stop)
+
     def args(self, root, **overrides):
         options = dict(rust_action='prepare', ticker='ETH', mode='open', rust_quantity='0.01',
-                       rust_maker_price='3000', rust_hedge_price='2990', rust_plan=str(root/'plan.json'))
+                       rust_maker_price='3000', rust_hedge_price='2990', rust_leverage=3, rust_plan=str(root/'plan.json'))
         options.update(overrides)
         return argparse.Namespace(**options)
 
@@ -111,11 +162,37 @@ class PreparationTests(unittest.IsolatedAsyncioTestCase):
                 plan = json.loads(path.read_text())
                 self.assertEqual(plan['maker']['side'], 'BUY')
                 self.assertEqual(plan['maker_fill_mode'], 'ws_confirmed')
+                self.assertEqual(plan['hedge_leverage'], 3)
                 before = path.read_bytes()
                 with self.assertRaises(FileExistsError):
                     await prepare_signal_plan(self.args(root), project_root=root)
                 self.assertEqual(path.read_bytes(), before)
                 self.assertEqual(runner.await_count, 1)
+
+    async def test_missing_leverage_prompts_and_persists_before_readonly_preview(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.setup_files(root)
+            with patch('hydra_basis.execution_engine.rust_plan_prepare.instrument_metadata', new=AsyncMock(return_value=('ETHUSDT', 3600))), \
+                 patch('hydra_basis.execution_engine.rust_plan_prepare.prompt', return_value='7') as prompt, \
+                 patch('hydra_basis.execution_engine.rust_place_order.run_native_preflight', new=AsyncMock()) as runner:
+                path = await prepare_signal_plan(self.args(root, rust_leverage=None), project_root=root)
+            prompt.assert_called_once_with('leverage_x')
+            self.assertEqual(json.loads(path.read_text())['hedge_leverage'], 7)
+            self.assertEqual(runner.call_args.args[0].rust_action, 'preview')
+
+    async def test_native_route_receives_prompted_leverage(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.setup_files(root)
+            report = {'selection': {'maker_venue': 'aster', 'taker_venue': 'hyperliquid', 'paired_execution_supported': True}}
+            with patch('hydra_basis.execution_engine.rust_plan_prepare.select_legs_for_pair', new=AsyncMock(return_value=report)), \
+                 patch('hydra_basis.execution_engine.rust_plan_prepare.print_selection'), \
+                 patch('hydra_basis.execution_engine.rust_plan_prepare.prompt', return_value='4') as prompt, \
+                 patch('hydra_basis.execution_engine.rust_native_pair_prepare.prepare_native_pair', new=AsyncMock()) as native:
+                await prepare_signal_plan(self.args(root, rust_leverage=None), project_root=root)
+            prompt.assert_called_once_with('leverage_x')
+            self.assertEqual(native.call_args.args[0].rust_leverage, 4)
 
     async def test_default_maker_uses_native_mid_without_prompt_or_trade(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -125,11 +202,12 @@ class PreparationTests(unittest.IsolatedAsyncioTestCase):
                  patch('hydra_basis.execution_engine.rust_plan_prepare.preview_mid_price', new=AsyncMock(return_value='3001.25')) as mid, \
                  patch('hydra_basis.execution_engine.rust_plan_prepare.prompt', side_effect=AssertionError('must not prompt')), \
                  patch('hydra_basis.execution_engine.rust_place_order.run_native_preflight', new=AsyncMock()) as runner:
-                path = await prepare_signal_plan(self.args(root, rust_maker_price=None), project_root=root)
+                path = await prepare_signal_plan(self.args(root, rust_maker_price=None, rust_hedge_price=None), project_root=root)
             mid.assert_awaited_once_with(project_root=root, symbol='ETH', extension_id=SETTINGS['extension_id'])
             plan = json.loads(path.read_text())
             self.assertEqual(plan['maker']['limit_price'], '3001.25')
             self.assertEqual(plan['maker']['max_notional'], '30.0125')
+            self.assertEqual(plan['hedge']['tif'], 'market')
             self.assertEqual(runner.call_args.args[0].rust_action, 'preview')
 
     async def test_mid_failure_creates_no_plan_or_fallback(self):
@@ -197,12 +275,15 @@ class PreparationTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(plan['maker']['side'], 'BUY')
             self.assertTrue(plan['hedge']['reduce_only'])
 
-    async def test_cli_default_rust_route_prepares_without_python_execution(self):
+    async def test_cli_routes_default_interactive_and_explicit_readonly_without_python_execution(self):
         from scripts.place_order import run_place_order
         with patch('hydra_basis.execution_engine.rust_plan_prepare.prepare_signal_plan', new=AsyncMock()) as prepare, \
+             patch('hydra_basis.execution_engine.rust_interactive_order.run_interactive_order', new=AsyncMock()) as interactive, \
              patch('scripts.place_order.run_python_place_order', new=AsyncMock()) as python_execution:
-            await run_place_order(argparse.Namespace(engine='rust'))
-            prepare.assert_awaited_once()
+            for action in (None, 'prepare', 'select'):
+                await run_place_order(argparse.Namespace(engine='rust', rust_action=action))
+            self.assertEqual(prepare.await_count, 2)
+            interactive.assert_awaited_once()
             python_execution.assert_not_awaited()
 
 

@@ -2,6 +2,7 @@
 //! A reserved intent is an unknown submission until cumulative private evidence arrives.
 #![forbid(unsafe_code)]
 pub mod durable;
+pub mod selection;
 use perp_arb_core::Decimal;
 use perp_arb_private_events::{
     account::Report, actor::Coordinator, Health, OrderKey, OrderSnapshot, Scope, Update,
@@ -106,7 +107,10 @@ fn valid_id(s: &str) -> bool {
 }
 fn gate(leg: &Leg, r: &Report, h: &Health, now: Instant, age: Duration) -> bool {
     r.usable(&leg.scope, h, now, age)
-        && r.inventory().includes_wallets
+        && match &r.position_only {
+            Some(symbol) => symbol == &leg.symbol,
+            None => r.inventory().includes_wallets,
+        }
         && r.inventory().covers(&leg.symbol)
         && r.inventory().open_orders.is_empty()
 }

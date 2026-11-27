@@ -9,6 +9,19 @@ use std::{
     time::{Duration, Instant},
 };
 const USER: &str = "0x0000000000000000000000000000000000000001";
+#[test]
+fn hyperliquid_selected_position_ignores_wallet_and_other_position_values() {
+    let mut state = json!({"assetPositions":[{"position":{"coin":"ETH","szi":"-2"}},{"position":{"coin":"BTC","szi":"unrelated"}}]});
+    let i = account::hyperliquid_position(&state, "ETH").unwrap();
+    assert_eq!(
+        i.positions.values().copied().collect::<Vec<_>>(),
+        vec![decimal("-2").unwrap()]
+    );
+    assert!(i.wallets.is_empty());
+    state["assetPositions"][0]["position"]["szi"] = json!("invalid");
+    assert!(account::hyperliquid_position(&state, "ETH").is_err());
+    assert!(account::hyperliquid_position(&json!({}), "ETH").is_err());
+}
 #[tokio::test]
 async fn beginning_a_new_audit_immediately_revokes_the_old_report() {
     let (c, w) = actor::channel(scope("aster"), 8, 8).unwrap();

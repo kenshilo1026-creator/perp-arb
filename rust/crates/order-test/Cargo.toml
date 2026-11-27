@@ -14,6 +14,7 @@ perp-arb-private-events = { path = "../private-events" }
 perp-arb-execution = { path = "../execution" }
 perp-arb-aster-private = { path = "../aster-private" }
 perp-arb-hyperliquid-private = { path = "../hyperliquid-private" }
+perp-arb-lighter-private = { path = "../lighter-private" }
 perp-arb-market-data = { path = "../market-data" }
 serde.workspace = true
 serde_json.workspace = true

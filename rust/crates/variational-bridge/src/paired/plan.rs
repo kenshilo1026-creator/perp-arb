@@ -31,6 +31,9 @@ pub struct Plan {
     /// Shadow remains the default until real WS trade semantics are accepted.
     #[serde(default)]
     pub maker_fill_mode: FillMode,
+    /// Native hedge only. Legacy plans remain readable for recovery.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hedge_leverage: Option<u32>,
 }
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -44,10 +47,30 @@ pub struct Resolved {
     pub order: Order,
     pub metadata: ResolvedInstrument,
 }
+impl Resolved {
+    pub fn hedge_limits(&self) -> Result<&perp_arb_core::instruments::Instrument> {
+        if self.order.tif == TimeInForce::Market {
+            self.metadata
+                .market
+                .as_ref()
+                .ok_or_else(|| "market instrument constraints unavailable".into())
+        } else {
+            Ok(&self.metadata.limit)
+        }
+    }
+}
 fn d(v: &str) -> Result<Decimal> {
     decimal(v).map_err(|e| e.to_string())
 }
 impl Plan {
+    pub fn leverage_for_submit(&self) -> Result<Option<u32>> {
+        self.validate()?;
+        if self.maker.reduce_only {
+            return Ok(None);
+        }
+        self.hedge_leverage.map(Some).ok_or_else(||
+            "opening plan has no hedge_leverage; prepare a new plan with leverage_x before submit".into())
+    }
     pub fn read(path: &Path) -> Result<Self> {
         let bytes = std::fs::read(path).map_err(|_| "cannot read paired plan")?;
         if bytes.len() > 65536 {
@@ -58,6 +81,9 @@ impl Plan {
         Ok(p)
     }
     pub fn validate(&self) -> Result<()> {
+        if self.hedge_leverage.is_some_and(|x| !(1..=125).contains(&x)) {
+            return Err("hedge_leverage must be in 1..125".into());
+        }
         if self.run_id.is_empty()
             || self.run_id.len() > 64
             || !self
@@ -75,7 +101,8 @@ impl Plan {
         }
         self.instrument.validate(&self.maker.symbol)?;
         if native::account(&self.maker.account)? != self.maker.account
-            || native::account(&self.hedge.account)? != self.hedge.account
+            || (self.hedge.venue != "lighter"
+                && native::account(&self.hedge.account)? != self.hedge.account)
         {
             return Err("use canonical lowercase account addresses".into());
         }
@@ -97,7 +124,8 @@ impl Plan {
                 ("BUY", "SELL") | ("SELL", "BUY")
             )
             || self.hedge.network != Network::Mainnet
-            || self.hedge.tif != TimeInForce::Ioc
+            || !(self.hedge.tif == TimeInForce::Ioc
+                || (self.hedge.venue == "aster" && self.hedge.tif == TimeInForce::Market))
             || d(&self.max_entry_gap)? < Decimal::ZERO
             || d(&self.max_entry_gap)? > d("0.1")?
             || !(1..=60).contains(&self.maker_wait_seconds)
@@ -121,15 +149,16 @@ impl Plan {
         Ok(Resolved { order, metadata })
     }
     pub fn execution_plan(&self, r: &Resolved) -> Result<ExecutionPlan> {
-        let mut minimum = r.metadata.limit.min_size().max(r.metadata.limit.lot());
-        if let Some(notional) = r.metadata.limit.min_notional() {
+        let limits = r.hedge_limits()?;
+        let mut minimum = limits.min_size().max(limits.lot());
+        if let Some(notional) = limits.min_notional() {
             let price = d(&self.hedge.limit_price)?;
             let raw = notional
                 .checked_div(price)
                 .ok_or("minimum notional overflow")?;
             let rounded = perp_arb_core::pricing::round_step(
                 raw,
-                Some(r.metadata.limit.lot()),
+                Some(limits.lot()),
                 perp_arb_core::pricing::Direction::Up,
             )
             .map_err(|e| e.to_string())?;
@@ -140,11 +169,11 @@ impl Plan {
                 .is_lt()
             {
                 minimum = minimum
-                    .checked_add(r.metadata.limit.lot())
+                    .checked_add(limits.lot())
                     .ok_or("minimum size overflow")?;
             }
         }
-        self.execution_plan_with_policy(r.metadata.limit.lot(), minimum)
+        self.execution_plan_with_policy(limits.lot(), minimum)
     }
     pub(crate) fn execution_plan_with_policy(
         &self,
@@ -216,7 +245,9 @@ impl Plan {
                 .map_err(|e| e.to_string())?;
         Ok(
             !allowed.compare(adverse).map_err(|e| e.to_string())?.is_lt()
-                && if self.hedge.side == "BUY" {
+                && if self.hedge.tif == TimeInForce::Market {
+                    true
+                } else if self.hedge.side == "BUY" {
                     worst <= d(&self.hedge.limit_price)?
                 } else {
                     worst >= d(&self.hedge.limit_price)?

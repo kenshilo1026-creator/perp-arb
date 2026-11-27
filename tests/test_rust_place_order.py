@@ -68,6 +68,8 @@ class NativePlaceOrderTests(unittest.TestCase):
             self.assertIn("a plan.json", command)
             self.assertIn("--live", command)
             self.assertIn("--parent-control", command)
+            options.rust_baseline = None
+            self.assertNotIn('--baseline', build_native_command(options, project_root=root))
             options.live = False
             with self.assertRaisesRegex(RuntimeError, "require --live"):
                 build_native_command(options, project_root=root)
@@ -76,7 +78,7 @@ class NativePlaceOrderTests(unittest.TestCase):
         for overrides in (
             dict(rust_action="recover", live=True, rust_run_dir="old", rust_plan="replacement.json"),
             dict(rust_action="audit", live=True, rust_plan="p.json", rust_baseline_output="b.json"),
-            dict(rust_action="submit", live=True, rust_plan="p.json", rust_run_dir="new"),
+            dict(rust_action="submit", live=True, rust_plan="p.json"),
             dict(rust_action="submit", live=True, rust_plan="p.json", rust_baseline="b.json", rust_run_dir="new", mode="open"),
         ):
             options = self.options(rust_preflight=False, extension_id=None, rust_output=None, **overrides)
@@ -89,6 +91,45 @@ class NativePlaceOrderTests(unittest.TestCase):
 
 
 class NativeProcessLifecycleTests(unittest.IsolatedAsyncioTestCase):
+    async def test_quiet_success_hides_json_but_errors_show_full_diagnostic(self):
+        import io
+        import sys
+        from contextlib import redirect_stdout
+        from hydra_basis.execution_engine.rust_place_order import run_native_preflight
+        for code in (0, 2):
+            output = io.StringIO()
+            command = [sys.executable, '-c',
+                       f'import sys; print("private preview JSON"); print("diagnostic detail",file=sys.stderr); sys.exit({code})']
+            with patch('hydra_basis.execution_engine.rust_place_order.build_native_command', return_value=command), redirect_stdout(output):
+                if code:
+                    with self.assertRaisesRegex(RuntimeError, 'exit 2'):
+                        await run_native_preflight(argparse.Namespace(rust_quiet=True))
+                else:
+                    await run_native_preflight(argparse.Namespace(rust_quiet=True))
+            if code:
+                self.assertIn('diagnostic detail', output.getvalue())
+                self.assertIn('private preview JSON', output.getvalue())
+            else:
+                self.assertEqual(output.getvalue(), '')
+
+    async def test_quiet_live_pipe_is_drained_and_stdin_remains_open_until_stop(self):
+        import sys
+        from hydra_basis.execution_engine.rust_place_order import run_native_preflight
+        with tempfile.TemporaryDirectory() as directory:
+            marker = Path(directory) / 'received.txt'
+            command = [sys.executable, '-u', '-c',
+                       'import sys,pathlib; print("x"*200000,flush=True); '
+                       'line=sys.stdin.readline(); pathlib.Path(sys.argv[1]).write_text(line)', str(marker)]
+            with patch('hydra_basis.execution_engine.rust_place_order.build_native_command', return_value=command):
+                task = asyncio.create_task(run_native_preflight(argparse.Namespace(live=True, rust_quiet=True)))
+                await asyncio.sleep(0.3)
+                self.assertFalse(task.done())
+                self.assertFalse(marker.exists())
+                task.cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await asyncio.wait_for(task, timeout=5)
+            self.assertEqual(marker.read_text(), 'STOP\n')
+
     async def test_live_cancellation_requests_cleanup_and_never_terminates_child(self):
         from hydra_basis.execution_engine.rust_place_order import run_native_preflight
         started, stopped = asyncio.Event(), asyncio.Event()

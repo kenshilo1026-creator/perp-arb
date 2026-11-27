@@ -17,17 +17,31 @@ pub struct Feed {
     portfolio: Option<(Vec<Position>, Option<String>)>,
     last_capture: Option<i64>,
     awaiting_valid: bool,
+    check_wallets: bool,
+    symbol: Option<String>,
 }
 impl Feed {
     pub fn start(account: &str) -> Result<Self> {
-        let (coordinator, worker) = actor::channel(
-            Scope {
-                venue: "variational".into(),
-                account: crate::native::account(account)?,
-            },
-            1024,
-            1024,
-        )
+        Self::with_wallet_checks(account, true)
+    }
+    pub fn start_positions_only(account: &str) -> Result<Self> {
+        Self::with_wallet_checks(account, false)
+    }
+    fn with_wallet_checks(account: &str, check_wallets: bool) -> Result<Self> {
+        Self::with_scope(account, check_wallets, None)
+    }
+    pub fn start_symbol(account: &str, symbol: &str) -> Result<Self> {
+        Self::with_scope(account, false, Some(symbol.into()))
+    }
+    fn with_scope(account: &str, check_wallets: bool, symbol: Option<String>) -> Result<Self> {
+        let scope = Scope {
+            venue: "variational".into(),
+            account: crate::native::account(account)?,
+        };
+        let (coordinator, worker) = match &symbol {
+            Some(s) => actor::position_channel(scope, s, 1024, 1024),
+            None => actor::channel(scope, 1024, 1024),
+        }
         .map_err(|e| e.to_string())?;
         let lease = coordinator.acquire_transport().map_err(|e| e.to_string())?;
         Ok(Self {
@@ -39,6 +53,8 @@ impl Feed {
             portfolio: None,
             last_capture: None,
             awaiting_valid: false,
+            check_wallets,
+            symbol,
         })
     }
     pub fn coordinator(&self) -> Coordinator {
@@ -115,7 +131,18 @@ impl Feed {
                 positions,
                 wallet_balance,
             } => {
-                let next = (positions.clone(), wallet_balance.clone());
+                let next = (
+                    positions
+                        .iter()
+                        .filter(|p| self.symbol.as_ref().is_none_or(|s| s == &p.symbol))
+                        .cloned()
+                        .collect(),
+                    if self.check_wallets {
+                        wallet_balance.clone()
+                    } else {
+                        None
+                    },
+                );
                 let changed = self.portfolio.as_ref() != Some(&next);
                 self.portfolio = Some(next);
                 changed

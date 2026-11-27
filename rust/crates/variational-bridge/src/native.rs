@@ -61,6 +61,12 @@ pub struct Page {
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Receipt {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transport: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub price: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prepare_id: Option<String>,
     pub protocol: String,
     pub started_ms: i64,
     pub finished_ms: i64,
@@ -88,7 +94,12 @@ impl Receipt {
             || expected.is_some_and(|e| e != r.account)
             || r.started_ms < 1000
             || r.finished_ms < r.started_ms
-            || i128::from(r.finished_ms) - i128::from(r.started_ms) > 20000
+            || i128::from(r.finished_ms) - i128::from(r.started_ms)
+                > if value["transport"] == "ui" {
+                    65000
+                } else {
+                    20000
+                }
             || !(-1000..=5000).contains(&(i128::from(now) - i128::from(r.finished_ms)))
         {
             return Err("native receipt stale, failed or account changed".into());

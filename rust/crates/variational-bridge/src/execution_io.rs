@@ -33,12 +33,26 @@ pub async fn submit_maker(
         return Err("native maker transport not explicitly enabled and healthy".into());
     }
     let permit = owner.prepare_maker(check).await?;
+    eprintln!(
+        "[maker-submit] variational {} {} quantity={} price={}",
+        view.command.side, view.command.symbol, view.command.quantity, view.command.limit_price
+    );
     match bridge.submit_native(permit, instrument).await {
-        Ok(submission) => owner.record_maker_submission(submission).await,
+        Ok(submission) => {
+            let p = owner.record_maker_submission(submission).await?;
+            eprintln!(
+                "[maker-ack] order_id={}",
+                p.maker
+                    .order_id
+                    .as_deref()
+                    .unwrap_or("pending exact lookup")
+            );
+            Ok(p)
+        }
         Err(error) => {
             owner.gap(Target::Maker).await?;
             Err(format!(
-                "maker submit UNKNOWN; recover persisted receipt before any new order: {error}"
+                "maker submission not confirmed; no automatic re-click; inspect/recover persisted receipt: {error}"
             ))
         }
     }
@@ -113,7 +127,9 @@ pub(crate) async fn apply_maker_with_ws(
 }
 pub async fn cancel_maker(owner: &Owner, bridge: &Bridge) -> Result<()> {
     let permit = owner.prepare_cancel().await?;
+    eprintln!("[cancel] Variational 撤回未成交掛單");
     bridge.cancel_native(permit).await?;
+    eprintln!("[cancel-ack] 撤單已回覆；查證最終成交量中");
     // Already persisted CancelStarted. ACK does not release remaining size and
     // does not prevent the owner hedging subsequently confirmed maker fills.
     Ok(())
@@ -128,7 +144,7 @@ pub async fn reconcile_hedge<V: Venue>(owner: &Owner, venue: &V, id: String) -> 
         }
     }
 }
-/// One IOC hedge attempt. The exact network/asset/price/reduce-only/client ID is
+/// One IOC or Aster MARKET hedge attempt. The exact network/asset/price/reduce-only/client ID is
 /// persisted before POST. Incomplete/unknown outcomes remain reserved; a caller
 /// may reserve only a proven terminal residual for a subsequent attempt.
 pub async fn dispatch_hedge<V: Venue>(
@@ -158,12 +174,13 @@ pub async fn dispatch_hedge_traced<V: Venue>(
             t.mark(stage, &id, data);
         }
     };
-    if order.tif != TimeInForce::Ioc {
-        return Err("hedge requires IOC".into());
+    let market = order.venue == "aster" && order.tif == TimeInForce::Market;
+    if order.tif != TimeInForce::Ioc && !market {
+        return Err("hedge requires IOC or Aster MARKET".into());
     }
     let q = order.quantity().map_err(|e| e.to_string())?;
     let p = order.price().map_err(|e| e.to_string())?;
-    if limits.price_error(p).map_err(|e| e.to_string())?.is_some()
+    if (!market && limits.price_error(p).map_err(|e| e.to_string())?.is_some())
         || limits
             .size_error(q, Some(p))
             .map_err(|e| e.to_string())?
@@ -198,6 +215,11 @@ pub async fn dispatch_hedge_traced<V: Venue>(
         }
     };
     mark("hedge_ack", serde_json::json!({}));
+    // Print only after transport returns, never ahead of the latency-critical send.
+    eprintln!(
+        "[hedge-ack] {} {} {} quantity={} order_id={}",
+        order.venue, order.side, order.symbol, order.quantity, accepted.order_id
+    );
     let key = OrderKey {
         symbol: order.symbol.clone(),
         order_id: accepted.order_id,

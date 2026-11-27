@@ -9,3 +9,4 @@ data/variational_loris_invalid_symbols.json
 !.env.example
 data/market_monitor/
 *.heartbeat.json
+rust/vendor/lighter/*.dll

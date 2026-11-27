@@ -998,15 +998,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--rust-account", default=None, help="expected Variational wallet address")
     parser.add_argument("--rust-order-id", default=None, help="exact Variational rfq_id; requires --rust-account")
     parser.add_argument("--rust-output", default=None, help="new private JSONL recording path; never overwrite")
-    parser.add_argument("--rust-action", choices=("prepare", "preview", "audit", "submit", "inspect", "recover"), help="omit to prepare a plan from funding signals; preparation never sends orders")
+    parser.add_argument("--rust-action", choices=("select", "prepare", "preview", "audit", "submit", "inspect", "recover"), help="省略：互動準備、對帳、確認後實盤送單；prepare/select：只準備／選擇，不送單")
     parser.add_argument("--rust-plan", help="Rust paired-order plan JSON")
     parser.add_argument("--rust-baseline", help="independently reviewed inventory JSON")
     parser.add_argument("--rust-baseline-output", help="new audit inventory output JSON")
     parser.add_argument("--rust-run-dir", help="durable paired execution directory")
     parser.add_argument("--rust-settings", help="private extension/account settings JSON for prepare")
-    parser.add_argument("--rust-quantity", help="one paired order quantity; prompts when omitted during prepare")
+    parser.add_argument("--rust-quantity", help="兩腿總目標數量；原生配對可用 --rust-clip-quantity 分批；prepare 省略時詢問")
+    parser.add_argument("--rust-clip-quantity", help="原生 Aster/Hyperliquid 配對每批數量；省略則每批以剩餘總量掛單")
+    parser.add_argument("--rust-leverage", type=int, help="Rust 開倉逐倉槓桿；未指定則詢問 leverage_x；Variational 配對只設定另一腿，平倉不改槓桿")
     parser.add_argument("--rust-maker-price", help="選填：手動指定 Variational Maker 限價；省略時由 Rust 呼叫 extension 按 Limit／Mid 自動讀價")
-    parser.add_argument("--rust-hedge-price", help="native hedge IOC limit for prepare")
+    parser.add_argument("--rust-hedge-price", help="選填：指定對沖 IOC 限價；Variational＋Aster 配對省略時使用 Aster MARKET 市價對沖，不詢問限價")
     parser.add_argument("--rust-fill-mode", choices=("rest_verified", "ws_confirmed"), help="new prepared plan only; defaults to private settings")
     parser.add_argument("--live", action="store_true", help="explicit Rust submit/recover opt-in")
     parser.add_argument(
@@ -1025,7 +1027,12 @@ def parse_args() -> argparse.Namespace:
 
 async def run_place_order(args: argparse.Namespace) -> None:
     if getattr(args, "engine", "python") == "rust":
-        if not getattr(args, "rust_preflight", False) and getattr(args, "rust_action", None) in (None, "prepare"):
+        if not getattr(args, "rust_preflight", False) and getattr(args, "rust_action", None) is None:
+            from pathlib import Path
+            from hydra_basis.execution_engine.rust_interactive_order import run_interactive_order
+            await run_interactive_order(args, project_root=Path(__file__).resolve().parents[1])
+            return
+        if not getattr(args, "rust_preflight", False) and getattr(args, "rust_action", None) in ("prepare", "select"):
             from pathlib import Path
             from hydra_basis.execution_engine.rust_plan_prepare import prepare_signal_plan
             await prepare_signal_plan(args, project_root=Path(__file__).resolve().parents[1])
@@ -1039,7 +1046,7 @@ async def run_place_order(args: argparse.Namespace) -> None:
 
 
 async def run_python_place_order(args: argparse.Namespace) -> None:
-    if any(getattr(args, name, None) for name in ("rust_preflight", "rust_inventory", "extension_id", "rust_account", "rust_order_id", "rust_output", "rust_action", "rust_plan", "rust_baseline", "rust_baseline_output", "rust_run_dir", "rust_settings", "rust_quantity", "rust_maker_price", "rust_hedge_price", "rust_fill_mode", "live")):
+    if any(getattr(args, name, None) is not None and getattr(args, name) is not False for name in ("rust_preflight", "rust_inventory", "extension_id", "rust_account", "rust_order_id", "rust_output", "rust_action", "rust_plan", "rust_baseline", "rust_baseline_output", "rust_run_dir", "rust_settings", "rust_quantity", "rust_clip_quantity", "rust_leverage", "rust_maker_price", "rust_hedge_price", "rust_fill_mode", "live")):
         raise RuntimeError("Rust options require --engine rust; no Python order was sent")
     mode_value = getattr(args, "mode", None) or prompt_text("mode [open/close/開倉/平倉]")
     mode = normalize_execution_mode(mode_value)

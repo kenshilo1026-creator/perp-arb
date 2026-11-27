@@ -126,25 +126,35 @@ fn amount(s: &str) -> Result<Decimal> {
     decimal(s).map_err(|_| "invalid exact inventory amount".into())
 }
 impl Round {
-    fn inventory(&self) -> Result<Inventory> {
-        let balance = amount(
-            self.portfolio
-                .balance
-                .as_deref()
-                .ok_or("portfolio balance missing")?,
-        )?;
-        let cross = amount(
-            self.portfolio
-                .cross_balance
-                .as_deref()
-                .ok_or("cross balance missing")?,
-        )?;
+    fn inventory_with_wallets(&self, check_wallets: bool) -> Result<Inventory> {
+        let balance = if check_wallets {
+            Some(amount(
+                self.portfolio
+                    .balance
+                    .as_deref()
+                    .ok_or("portfolio balance missing")?,
+            )?)
+        } else {
+            None
+        };
+        let cross = if check_wallets {
+            amount(
+                self.portfolio
+                    .cross_balance
+                    .as_deref()
+                    .ok_or("cross balance missing")?,
+            )?
+        } else {
+            Decimal::ZERO
+        };
         let mut inv = Inventory {
             perp_dexes: BTreeSet::from([String::new()]),
-            includes_wallets: true,
+            includes_wallets: check_wallets,
             ..Inventory::default()
         };
-        inv.wallets.insert("USDC".into(), cross);
+        if check_wallets {
+            inv.wallets.insert("USDC".into(), cross);
+        }
         let mut total = cross;
         for iso in self
             .portfolio
@@ -164,6 +174,9 @@ impl Round {
             {
                 return Err("unsupported isolated position allocation".into());
             }
+            if !check_wallets {
+                continue;
+            }
             let b = amount(&iso.balance)?;
             let next = total
                 .checked_add(b)
@@ -178,7 +191,7 @@ impl Round {
                 return Err("duplicate isolated collateral".into());
             }
         }
-        if balance != total {
+        if balance.is_some_and(|balance| balance != total) {
             return Err("total collateral differs from cross plus isolated".into());
         }
         let mut positions = BTreeSet::new();
@@ -283,13 +296,55 @@ impl Query {
             .await
             .map_err(|e| e.to_string())
     }
+    /// Execution policy: reconcile positions/orders, excluding wallet valuation.
+    /// Keep the full-wallet snapshot path available for standalone diagnostics.
+    pub async fn reconcile_positions(
+        self,
+        coordinator: &perp_arb_private_events::actor::Coordinator,
+        ticket: perp_arb_private_events::account::Ticket,
+        expected: Option<Inventory>,
+    ) -> Result<perp_arb_private_events::account::Report> {
+        let expected = expected.map(|mut inv| {
+            inv.includes_wallets = false;
+            inv.wallets.clear();
+            inv
+        });
+        coordinator
+            .apply_account_snapshot(ticket, self.snapshot_with_wallets(false)?, expected)
+            .await
+            .map_err(|e| e.to_string())
+    }
     pub fn snapshot(&self) -> Result<Snapshot> {
+        self.snapshot_with_wallets(true)
+    }
+    pub async fn reconcile_symbol(
+        mut self,
+        coordinator: &perp_arb_private_events::actor::Coordinator,
+        ticket: perp_arb_private_events::account::Ticket,
+        symbol: &str,
+    ) -> Result<perp_arb_private_events::account::Report> {
+        let capture = self.receipt.inventory.as_mut().ok_or("inventory missing")?;
+        for round in &mut capture.rounds {
+            round
+                .positions
+                .retain(|p| p.instrument.underlying == symbol);
+            // Neither other positions, wallet valuations nor account-wide orders
+            // are part of the selected-position check. Own orders use exact IDs.
+            round.portfolio.isolated = Some(vec![]);
+            round.orders.rows.clear();
+        }
+        coordinator
+            .apply_position_snapshot(ticket, self.snapshot_with_wallets(false)?, symbol)
+            .await
+            .map_err(|e| e.to_string())
+    }
+    fn snapshot_with_wallets(&self, check_wallets: bool) -> Result<Snapshot> {
         if self.completed.elapsed() > Duration::from_secs(5) {
             return Err("inventory observation stale".into());
         }
         let c = self.receipt.inventory.as_ref().ok_or("inventory missing")?;
-        let a = c.rounds[0].inventory()?;
-        let b = c.rounds[1].inventory()?;
+        let a = c.rounds[0].inventory_with_wallets(check_wallets)?;
+        let b = c.rounds[1].inventory_with_wallets(check_wallets)?;
         if a != b {
             return Err("inventory changed during bounded reads".into());
         }

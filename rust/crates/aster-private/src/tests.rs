@@ -26,6 +26,71 @@ use tokio_tungstenite::{accept_async, tungstenite::Message};
 
 const KEY: &str = "0000000000000000000000000000000000000000000000000000000000000001";
 const USER: &str = "0x0000000000000000000000000000000000000001";
+#[tokio::test]
+async fn trade_position_reads_only_requested_symbol_without_wallet_or_orders() {
+    let server=HttpMock::new(|r,_|{
+        assert_eq!(r.method,"GET");
+        assert_eq!(r.path(),"/fapi/v3/positionRisk");
+        assert_eq!(r.param("symbol").as_deref(),Some("ETHUSDT"));
+        assert!(r.param("signature").is_some());
+        Response::ok(r#"[{"symbol":"ETHUSDT","positionSide":"BOTH","positionAmt":"2"},{"symbol":"BTCUSDT","positionAmt":"invalid unrelated value"}]"#)
+    }).await;
+    let client = server.client("ws://localhost", http_policy());
+    let (c, w) = actor::position_channel(client.scope(), "ETHUSDT", 8, 8).unwrap();
+    let task = w.spawn();
+    c.connected().await.unwrap();
+    let report = client.check_position(&c, "ETHUSDT").await.unwrap();
+    assert_eq!(report.inventory().positions.len(), 1);
+    assert!(report.inventory().wallets.is_empty());
+    assert!(report.usable(
+        c.scope(),
+        &c.health(),
+        std::time::Instant::now(),
+        Duration::from_secs(30)
+    ));
+    assert_eq!(server.requests.lock().unwrap().len(), 1);
+    c.shutdown().await.unwrap();
+    task.await.unwrap();
+}
+#[tokio::test]
+async fn isolated_configuration_checks_scope_and_accepts_already_isolated_only() {
+    for code in [200, -4046, -4000] {
+        let server = HttpMock::new(move |r, index| {
+            assert_eq!(r.method, "POST");
+            assert!(r.signed().contains("signature="));
+            let u = reqwest::Url::parse(&format!("http://localhost/?{}", r.body)).unwrap();
+            let p: std::collections::HashMap<_, _> = u.query_pairs().into_owned().collect();
+            assert_eq!(p["symbol"], "ETHUSDT");
+            if index == 0 {
+                assert_eq!(r.path(), "/fapi/v3/marginType");
+                assert_eq!(p["marginType"], "ISOLATED");
+                Response {
+                    status: if code == 200 { 200 } else { 400 },
+                    ..Response::ok(json!({"code":code}).to_string())
+                }
+            } else {
+                assert_eq!(r.path(), "/fapi/v3/leverage");
+                assert_eq!(p["leverage"], "3");
+                Response::ok(r#"{"symbol":"ETHUSDT","leverage":3}"#)
+            }
+        })
+        .await;
+        let client = server.client("ws://localhost", http_policy());
+        let mut o = trade_order();
+        o.account = format!("0x{:040x}", 2);
+        assert!(client.configure_isolated(&o, 3).await.is_err());
+        o.account = USER.into();
+        assert!(client.configure_isolated(&o, 0).await.is_err());
+        assert_eq!(
+            client.configure_isolated(&o, 3).await.is_ok(),
+            code != -4000
+        );
+        assert_eq!(
+            server.requests.lock().unwrap().len(),
+            if code == -4000 { 1 } else { 2 }
+        );
+    }
+}
 fn trade_order() -> perp_arb_private_events::orders::Order {
     use perp_arb_private_events::orders::*;
     Order {
@@ -40,6 +105,38 @@ fn trade_order() -> perp_arb_private_events::orders::Order {
         reduce_only: true,
         client_id: "pa123".into(),
         asset: None,
+    }
+}
+#[tokio::test]
+async fn market_hedge_omits_price_and_tif_for_both_sides_and_reduce_only_modes() {
+    for (side, reduce) in [
+        ("BUY", false),
+        ("SELL", false),
+        ("BUY", true),
+        ("SELL", true),
+    ] {
+        let server = HttpMock::new(move |r, _| {
+            assert_eq!(r.method, "POST");
+            assert_eq!(r.path(), "/fapi/v3/order");
+            let url = reqwest::Url::parse(&format!("http://localhost/?{}", r.body)).unwrap();
+            let p: std::collections::HashMap<_, _> = url.query_pairs().into_owned().collect();
+            assert_eq!(p["type"], "MARKET");
+            assert_eq!(p["side"], side);
+            assert_eq!(p["quantity"], "0.01");
+            assert_eq!(p["reduceOnly"], reduce.to_string());
+            assert_eq!(p["newClientOrderId"], "pa123");
+            assert!(!p.contains_key("price") && !p.contains_key("timeInForce"));
+            Response::ok(r#"{"orderId":7,"symbol":"ETHUSDT","clientOrderId":"pa123"}"#)
+        })
+        .await;
+        let c = server.client("ws://localhost", http_policy());
+        let mut order = trade_order();
+        order.tif = perp_arb_private_events::orders::TimeInForce::Market;
+        order.side = side.into();
+        order.reduce_only = reduce;
+        assert!(c.submit_limit(&order).await.is_err());
+        assert_eq!(c.submit_market(&order).await.unwrap().order_id, "7");
+        assert_eq!(server.requests.lock().unwrap().len(), 1);
     }
 }
 #[tokio::test]

@@ -64,9 +64,85 @@ impl ListenKey {
 }
 
 impl PrivateHttp {
+    /// Symbol-scoped setup, only called before opening a new paired maker.
+    pub async fn configure_isolated(
+        &self,
+        order: &perp_arb_private_events::orders::Order,
+        leverage: u32,
+    ) -> Result<()> {
+        order.validate()?;
+        if order.request()?.scope != self.scope()
+            || order.venue != "aster"
+            || !(1..=125).contains(&leverage)
+        {
+            return Err(Error::Configuration);
+        }
+        timeout(self.0.policy.total_timeout, async {
+            let _gate = self.0.gate.lock().await;
+            self.reserve(1).await?;
+            match self
+                .send(
+                    Method::POST,
+                    "/fapi/v3/marginType",
+                    vec![
+                        ("symbol".into(), order.symbol.clone()),
+                        ("marginType".into(), "ISOLATED".into()),
+                    ],
+                    65536,
+                )
+                .await
+            {
+                Ok(raw) => {
+                    let v: Value = serde_json::from_str(&raw).map_err(|_| Error::InvalidPayload)?;
+                    if v["code"] != 200 {
+                        return Err(Error::InvalidPayload);
+                    }
+                }
+                Err(Error::Exchange(-4046)) => (),
+                Err(e) => return Err(e),
+            }
+            self.reserve(1).await?;
+            let raw = self
+                .send(
+                    Method::POST,
+                    "/fapi/v3/leverage",
+                    vec![
+                        ("symbol".into(), order.symbol.clone()),
+                        ("leverage".into(), leverage.to_string()),
+                    ],
+                    65536,
+                )
+                .await?;
+            let v: Value = serde_json::from_str(&raw).map_err(|_| Error::InvalidPayload)?;
+            if v["symbol"] != order.symbol || v["leverage"].as_u64() != Some(leverage as u64) {
+                return Err(Error::InvalidPayload);
+            }
+            Ok(())
+        })
+        .await
+        .map_err(|_| Error::Timeout)?
+    }
     /// Explicit trade entry; caller must persist an unknown submission before awaiting.
     /// Exactly one request; errors never cause an automatic order retry.
     pub async fn submit_limit(
+        &self,
+        order: &perp_arb_private_events::orders::Order,
+    ) -> Result<perp_arb_private_events::orders::Accepted> {
+        if order.tif == perp_arb_private_events::orders::TimeInForce::Market {
+            return Err(Error::Configuration);
+        }
+        self.submit_order(order).await
+    }
+    pub async fn submit_market(
+        &self,
+        order: &perp_arb_private_events::orders::Order,
+    ) -> Result<perp_arb_private_events::orders::Accepted> {
+        if order.tif != perp_arb_private_events::orders::TimeInForce::Market {
+            return Err(Error::Configuration);
+        }
+        self.submit_order(order).await
+    }
+    async fn submit_order(
         &self,
         order: &perp_arb_private_events::orders::Order,
     ) -> Result<perp_arb_private_events::orders::Accepted> {
@@ -78,25 +154,36 @@ impl PrivateHttp {
         let raw = timeout(self.0.policy.total_timeout, async {
             let _gate = self.0.gate.lock().await;
             self.reserve(1).await?;
-            let params = vec![
+            let mut params = vec![
                 ("symbol".into(), order.symbol.clone()),
                 ("side".into(), order.side.clone()),
-                ("type".into(), "LIMIT".into()),
-                ("positionSide".into(), "BOTH".into()),
                 (
-                    "timeInForce".into(),
-                    match order.tif {
-                        TimeInForce::PostOnly => "GTX",
-                        TimeInForce::Ioc => "IOC",
+                    "type".into(),
+                    if order.tif == TimeInForce::Market {
+                        "MARKET"
+                    } else {
+                        "LIMIT"
                     }
                     .into(),
                 ),
+                ("positionSide".into(), "BOTH".into()),
                 ("quantity".into(), order.quantity()?.normalize().to_string()),
-                ("price".into(), order.price()?.normalize().to_string()),
                 ("reduceOnly".into(), order.reduce_only.to_string()),
                 ("newClientOrderId".into(), order.client_id.clone()),
                 ("newOrderRespType".into(), "ACK".into()),
             ];
+            if order.tif != TimeInForce::Market {
+                params.push(("price".into(), order.price()?.normalize().to_string()));
+                params.push((
+                    "timeInForce".into(),
+                    if order.tif == TimeInForce::PostOnly {
+                        "GTX"
+                    } else {
+                        "IOC"
+                    }
+                    .into(),
+                ));
+            }
             self.send(Method::POST, "/fapi/v3/order", params, 65_536)
                 .await
         })
@@ -299,6 +386,7 @@ impl PrivateHttp {
         max_body_bytes: usize,
     ) -> Result<String> {
         let order_lookup = method == Method::GET && path == "/fapi/v3/order";
+        let margin_setup = method == Method::POST && path == "/fapi/v3/marginType";
         let encoded = self.0.credentials.sign(params)?;
         let request = if method == Method::GET || method == Method::DELETE {
             self.0
@@ -331,7 +419,7 @@ impl PrivateHttp {
             )
             .await;
         }
-        if status != 200 && !(status == 400 && order_lookup) {
+        if status != 200 && !(status == 400 && (order_lookup || margin_setup)) {
             return Err(Error::Http(status));
         }
         if response
@@ -363,6 +451,10 @@ impl PrivateHttp {
             return Err(
                 if value.get("code").and_then(Value::as_i64) == Some(-2013) {
                     Error::Exchange(-2013)
+                } else if path == "/fapi/v3/marginType"
+                    && value.get("code").and_then(Value::as_i64) == Some(-4046)
+                {
+                    Error::Exchange(-4046)
                 } else {
                     Error::Http(400)
                 },
@@ -464,6 +556,48 @@ impl PrivateHttp {
         )?)
     }
     /// Account queries share the listen-key/order-query weighted budget.
+    pub async fn check_position(&self, c: &Coordinator, symbol: &str) -> Result<account::Report> {
+        if c.scope() != &self.scope() {
+            return Err(Error::Configuration);
+        }
+        let (ticket, snapshot) = timeout(self.0.policy.total_timeout, async {
+            let _gate = self.0.gate.lock().await;
+            let ticket = c.begin_account_query().await?;
+            let started_at = std::time::Instant::now();
+            self.reserve(5).await?;
+            let raw = self
+                .send(
+                    Method::GET,
+                    "/fapi/v3/positionRisk",
+                    vec![("symbol".into(), symbol.into())],
+                    2 * 1024 * 1024,
+                )
+                .await?;
+            let rows: Value = serde_json::from_str(&raw).map_err(|_| Error::InvalidPayload)?;
+            let selected = rows
+                .as_array()
+                .ok_or(Error::InvalidPayload)?
+                .iter()
+                .filter(|p| p["symbol"].as_str() == Some(symbol))
+                .cloned()
+                .collect::<Vec<_>>();
+            let inventory = account::aster(&Value::Array(selected), &serde_json::json!([]))?
+                .for_position(symbol)?;
+            Ok::<_, Error>((
+                ticket,
+                account::Snapshot {
+                    scope: self.scope(),
+                    inventory,
+                    started_at,
+                    completed_at: std::time::Instant::now(),
+                    exchange_time_ms: None,
+                },
+            ))
+        })
+        .await
+        .map_err(|_| Error::Timeout)??;
+        Ok(c.apply_position_snapshot(ticket, snapshot, symbol).await?)
+    }
     pub async fn audit_account(
         &self,
         c: &Coordinator,

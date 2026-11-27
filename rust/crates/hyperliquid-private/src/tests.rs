@@ -18,6 +18,33 @@ use tokio::{
 };
 use tokio_tungstenite::{accept_async, tungstenite::Message};
 const USER: &str = "0x0000000000000000000000000000000000000001";
+#[tokio::test]
+async fn isolated_setup_is_signed_and_rejects_wrong_scope_or_network_before_http() {
+    let server = Mock::new(Behavior {
+        trading: true,
+        ..Behavior::default()
+    })
+    .await;
+    let trade = server
+        .client()
+        .trading(crate::signing::Credentials::new(&format!("{:064x}", 1)).unwrap())
+        .await
+        .unwrap();
+    let mut o = trade_order();
+    trade.configure_isolated(&o, 3).await.unwrap();
+    assert!(trade.configure_isolated(&o, 0).await.is_err());
+    o.account = format!("0x{:040x}", 2);
+    assert!(trade.configure_isolated(&o, 3).await.is_err());
+    o.account = USER.into();
+    o.network = perp_arb_private_events::orders::Network::Testnet;
+    assert!(trade.configure_isolated(&o, 3).await.is_err());
+    let req = server.requests.lock().unwrap();
+    assert_eq!(req.len(), 2);
+    assert_eq!(
+        req[1]["action"],
+        json!({"type":"updateLeverage","asset":4,"isCross":false,"leverage":3})
+    );
+}
 fn trade_order() -> perp_arb_private_events::orders::Order {
     use perp_arb_private_events::orders::*;
     Order {
@@ -287,7 +314,9 @@ impl Mock {
                         let status=if b.http_status==0{200}else{b.http_status};
                         let body=b.body.unwrap_or_else(||if b.trading {match v["type"].as_str(){
                             Some("userRole")=>json!({"role":"agent","data":{"user":if b.wrong_agent {"0x0000000000000000000000000000000000000002"}else{USER}}}).to_string(),
-                            _=>{assert!(v["signature"]["r"].as_str().unwrap().starts_with("0x"));match v["action"]["type"].as_str(){Some("order")=>{let status=if let Some(q)=b.trade_fill{json!({"filled":{"oid":7,"totalSz":q,"avgPx":"2000"}})}else{json!({"resting":{"oid":7}})};json!({"status":"ok","response":{"type":"order","data":{"statuses":[status]}}}).to_string()},Some("cancelByCloid")=>json!({"status":"ok","response":{"type":"cancel","data":{"statuses":["success"]}}}).to_string(),_=>panic!("unexpected trade action")}}
+                            _=>{assert!(v["signature"]["r"].as_str().unwrap().starts_with("0x"));match v["action"]["type"].as_str(){
+                                Some("updateLeverage")=>json!({"status":"ok","response":{"type":"default"}}).to_string(),
+                                Some("order")=>{let status=if let Some(q)=b.trade_fill{json!({"filled":{"oid":7,"totalSz":q,"avgPx":"2000"}})}else{json!({"resting":{"oid":7}})};json!({"status":"ok","response":{"type":"order","data":{"statuses":[status]}}}).to_string()},Some("cancelByCloid")=>json!({"status":"ok","response":{"type":"cancel","data":{"statuses":["success"]}}}).to_string(),_=>panic!("unexpected trade action")}}
                         }}else{match v["type"].as_str().unwrap(){
                             "clearinghouseState"=>json!({"time":1000,"assetPositions":[],"marginSummary":{"totalRawUsd":if b.account_drift && index>=3 {"101"}else{"100"}}}).to_string(),
                             "openOrders"=>"[]".into(),"spotClearinghouseState"=>json!({"balances":[]}).to_string(),

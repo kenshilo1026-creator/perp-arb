@@ -45,8 +45,13 @@ fn save_new(path: &Path, value: &impl serde::Serialize) -> Result<()> {
 }
 pub async fn preview(plan: &Plan) -> Result<Value> {
     let r = plan.resolve().await?;
+    let price_role = if r.order.tif == perp_arb_private_events::orders::TimeInForce::Market {
+        "valuation_reference_only_not_a_slippage_limit"
+    } else {
+        "ioc_limit"
+    };
     Ok(
-        json!({"mode":"preview","maker":plan.maker,"instrument":plan.instrument,"hedge":r.order,"max_entry_gap":plan.max_entry_gap,"maker_fill_mode":plan.maker_fill_mode,"can_submit_orders":false}),
+        json!({"mode":"preview","maker":plan.maker,"instrument":plan.instrument,"hedge":r.order,"hedge_price_role":price_role,"max_entry_gap":plan.max_entry_gap,"maker_fill_mode":plan.maker_fill_mode,"hedge_leverage":plan.hedge_leverage,"leverage_scope":"native_hedge_only_on_open_submit","can_submit_orders":false}),
     )
 }
 pub async fn inspect(run: &Path) -> Result<Value> {
@@ -78,16 +83,23 @@ pub async fn inspect(run: &Path) -> Result<Value> {
 /// recovery. The queues are bounded by the underlying transports and owner.
 pub async fn execute(
     action: Action,
-    plan: Plan,
+    mut plan: Plan,
     run: PathBuf,
     baseline: Option<Baseline>,
     parent_control: bool,
 ) -> Result<Value> {
-    if action == Action::Submit {
-        baseline
-            .as_ref()
-            .ok_or("reviewed baseline required")?
-            .validate(&plan)?;
+    let leverage = if action == Action::Submit {
+        plan.leverage_for_submit()?
+    } else {
+        None
+    };
+    if let Some(b) = &baseline {
+        if b.maker_account != plan.maker.account
+            || b.hedge_account != plan.hedge.account
+            || b.hedge_venue != plan.hedge.venue
+        {
+            return Err("baseline identity differs from plan".into());
+        }
     }
     if action == Action::Audit && run.exists() {
         return Err("baseline output already exists".into());
@@ -97,11 +109,12 @@ pub async fn execute(
     let _maker_lock = AccountLock::for_scope("variational", Network::Mainnet, &plan.maker.account)?;
     let _hedge_lock = AccountLock::acquire(&resolved.order)?;
     let venue = Arc::new(LiveVenue::connect(&resolved.order).await?);
-    let (hedge, worker) = actor::channel(
-        resolved.order.request().map_err(|e| e.to_string())?.scope,
-        1024,
-        4096,
-    )
+    let scope = resolved.order.request().map_err(|e| e.to_string())?.scope;
+    let (hedge, worker) = if action == Action::Audit {
+        actor::channel(scope, 1024, 4096)
+    } else {
+        actor::position_channel(scope, &resolved.order.symbol, 1024, 4096)
+    }
     .map_err(|e| e.to_string())?;
     let worker = worker.spawn();
     let (stop, stop_rx) = watch::channel(false);
@@ -136,7 +149,8 @@ pub async fn execute(
     });
     let outcome=async {
         monitor=Some(venue.monitor(hedge.clone()).await?);
-        let mut feed=Feed::start(&plan.maker.account)?;
+        let mut feed=if action==Action::Audit {Feed::start_positions_only(&plan.maker.account)?}
+            else {Feed::start_symbol(&plan.maker.account,&plan.maker.symbol)?};
         let maker=feed.coordinator();
         let (b,mut events)=Bridge::bind(Config::new(plan.extension_id.clone())).await?;
         let timing=Arc::new(crate::latency::Trace::new(b.clock_start()));
@@ -230,13 +244,21 @@ pub async fn execute(
         let subscription=hub.subscribe(resolved.metadata.key.clone()).await?;
         // A bounded metadata lifetime; this runner never submits a replacement
         // maker. Every new invocation resolves current native specifications.
-        let started=Instant::now();
-        let (m_report,h_report)=if action==Action::Submit {
-            let b=baseline.as_ref().ok_or("reviewed baseline required")?;
-            let (m,h)=audit(bridge,&maker,&hedge,&venue,Some(b)).await?;
-            if !m.matches_expected()||!h.matches_expected(){return Err("inventory differs from reviewed baseline; no maker submitted".into());}
-            (Some(m),Some(h))
-        }else{(None,None)};
+        let (m_report,h_report,position_baseline)=if action==Action::Submit {
+            if let Some(x)=leverage {
+                venue.configure_isolated(&resolved.order,x).await?;
+            }
+            let (m,h)=check_positions(bridge,&maker,&hedge,&venue,&plan).await?;
+            let initial=crate::position_checks::Baseline::read_positions(m.inventory(),&plan.maker.symbol,h.inventory(),&plan.hedge.symbol)?;
+            initial.before_order(decimal(&plan.maker.quantity).map_err(|e|e.to_string())?,&plan.maker.side,&plan.hedge.side,plan.maker.reduce_only)?;
+            (Some(m),Some(h),Some(initial))
+        }else{(None,None,None)};
+        if action==Action::Submit {
+            let price=bridge.prepare_maker_ui(&plan.maker,&plan.instrument).await?;
+            let cap=decimal(&plan.maker.quantity).map_err(|e|e.to_string())?
+                .checked_mul(decimal(&price).map_err(|e|e.to_string())?).ok_or("UI notional overflow")?;
+            plan.maker.limit_price=price;plan.maker.max_notional=cap.to_string();
+        }
         let execution_plan=plan.execution_plan(&resolved)?;
         let mp=run.join("maker.wal");let pp=run.join("paired.wal");
         let o=if action==Action::Submit {
@@ -244,7 +266,7 @@ pub async fn execute(
             std::fs::create_dir(&run).map_err(|_|"run directory must be new")?;
             save_new(&run.join("plan.json"),&plan)?;
             save_new(&run.join("execution-policy.json"),&json!({"step":execution_plan.step.to_string(),"minimum":execution_plan.minimum.to_string()}))?;
-            save_new(&run.join("baseline.json"),baseline.as_ref().ok_or("baseline missing")?)?;
+            save_new(&run.join("position-baseline.json"),position_baseline.as_ref().ok_or("position baseline missing")?)?;
             let command=plan.maker.clone();let mr=m_report.clone().ok_or("report missing")?;let hr=h_report.clone().ok_or("report missing")?;
             let mh=maker.health();let hh=hedge.health();
             Owner::start(128,move||{
@@ -264,13 +286,31 @@ pub async fn execute(
             };
             fast_worker=Some(tokio::spawn(fast.run()));
         }
+        let started=Instant::now();
         if action==Action::Submit {
             let check=MakerRiskCheck{maker:m_report.ok_or("report missing")?,hedge:h_report.ok_or("report missing")?,maker_health:maker.health(),hedge_health:hedge.health(),price_ok:entry_ok(&plan,&subscription)?,max_age:Duration::from_secs(30)};
             if *interrupt_rx.borrow(){return Err("interrupted before dispatch".into());}
-            if let Err(e)=execution_io::submit_maker(&o,bridge,check,plan.instrument.clone()).await{eprintln!("{e}");}
+            if let Err(e)=execution_io::submit_maker(&o,bridge,check,plan.instrument.clone()).await {
+                // Missing identity is not a resting maker. Keep the WAL, report the
+                // actual failure promptly, and never repeat the UI click.
+                let recovery=execution_io::recover_maker_identity(&o,bridge).await;
+                if recovery.as_ref().is_err() || o.progress().await?.maker.order_id.is_none(){return Err(e);}
+                eprintln!("[maker-recovered] persisted RFQ recovered; checking fills");
+            }
             fast_wake.notify_one();
         }
-        trade_loop(&plan,&resolved,&o,bridge,venue.as_ref(),&||entry_ok(&plan,&subscription),&validation,&wake,&fault,interrupt_rx,action==Action::Recover,started,&hedge_lane,Some(&timing)).await
+        let result=trade_loop(&plan,&resolved,&o,bridge,venue.as_ref(),&||entry_ok(&plan,&subscription),&validation,&wake,&fault,interrupt_rx,action==Action::Recover,started,&hedge_lane,Some(&timing)).await?;
+        let position_path=run.join("position-baseline.json");
+        if position_path.exists(){
+            let initial:crate::position_checks::Baseline=serde_json::from_slice(&std::fs::read(&position_path).map_err(|e|e.to_string())?).map_err(|e|e.to_string())?;
+            let filled=decimal(result["maker_filled"].as_str().ok_or("maker fill missing")?).map_err(|e|e.to_string())?;
+            initial.verify(&plan.maker.side,filled,filled,||async {
+                let (m,h)=check_positions(bridge,&maker,&hedge,&venue,&plan).await?;
+                crate::position_checks::Baseline::read_positions(m.inventory(),&plan.maker.symbol,h.inventory(),&plan.hedge.symbol)
+            }).await?;
+            eprintln!("[complete] {} 已成交及對沖數量={filled}，持倉增量已核對",plan.maker.symbol);
+        }
+        Ok(result)
     }.await;
     let _ = stop.send(true);
     signal.abort();
@@ -332,7 +372,7 @@ pub async fn execute(
     if action != Action::Audit && run.is_dir() {
         if let Some(t) = trace {
             match t.save(&run) {
-                Ok(path) => eprintln!("[latency] {}", path.display()),
+                Ok(_) => (),
                 Err(e) => cleanup_error = Some(e),
             }
         }
@@ -360,7 +400,7 @@ async fn wait_ready(
             if let Some(e)=f.borrow().clone(){return Err(e);}
             let bh=b.health().borrow().clone();
             if bh.private_connected&&bh.command_connected&&bh.native_protocol&&bh.fault.is_none()&&m.health().connected&&h.health().connected {
-                if trading&&!bh.native_trading_enabled{return Err("extension native trading is disabled; enable it in popup and restart forwarding".into());}
+                if trading&&!bh.native_trading_enabled{return Err("UI trading unavailable; reload the updated extension, enable Rust UI trading in popup and press Start".into());}
                 return Ok(());
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
@@ -378,8 +418,14 @@ async fn audit(
         let mt = m.begin_account_query().await.map_err(|e| e.to_string())?;
         let mi = expected.map(|e| e.maker.inventory()).transpose()?;
         let hi = expected.map(|e| e.hedge.inventory()).transpose()?;
-        let (mq, hr) = tokio::join!(b.inventory(m.scope().account.clone()), v.audit(h, hi));
-        let mr = mq?.reconcile(m, mt, mi).await;
+        let (mr, hr) = reconcile_audits(
+            b.inventory(m.scope().account.clone()),
+            v.audit(h, hi),
+            m,
+            mt,
+            mi,
+        )
+        .await;
         if attempt == 0
             && (mr.as_ref().is_err_and(|e| account_revision_race(e))
                 || hr.as_ref().is_err_and(|e| account_revision_race(e)))
@@ -390,6 +436,46 @@ async fn audit(
         return Ok((mr?, hr?));
     }
     Err("account changed during both audit attempts".into())
+}
+async fn check_positions(
+    b: &Bridge,
+    m: &Coordinator,
+    h: &Coordinator,
+    v: &LiveVenue,
+    p: &Plan,
+) -> Result<(Report, Report)> {
+    let maker = async {
+        let ticket = m.begin_account_query().await.map_err(|e| e.to_string())?;
+        b.inventory(m.scope().account.clone())
+            .await?
+            .reconcile_symbol(m, ticket, &p.maker.symbol)
+            .await
+    };
+    let (mr, hr) = tokio::join!(maker, v.check_position(h, &p.hedge.symbol));
+    Ok((mr?, hr?))
+}
+/// Consume each query in its own future. Waiting for the native venue before
+/// reconciling the browser result can exhaust its five-second freshness window.
+pub(crate) async fn reconcile_audits<M, H>(
+    maker: M,
+    hedge: H,
+    coordinator: &Coordinator,
+    ticket: perp_arb_private_events::account::Ticket,
+    expected: Option<perp_arb_private_events::account::Inventory>,
+) -> (Result<Report>, Result<Report>)
+where
+    M: std::future::Future<Output = Result<crate::inventory::Query>>,
+    H: std::future::Future<Output = Result<Report>>,
+{
+    tokio::join!(
+        async {
+            maker
+                .await?
+                .reconcile_positions(coordinator, ticket, expected)
+                .await
+        },
+        hedge
+    )
 }
 pub(crate) fn account_revision_race(error: &str) -> bool {
     // Native adapters wrap coordinator errors; the browser feed exposes them
@@ -424,6 +510,7 @@ pub(crate) async fn trade_loop<V: perp_arb_order_test::venue::Venue>(
     let mut cancelling = recover;
     let mut last_error = None;
     let mut next_lookup = Instant::now();
+    let mut last_progress = None;
     let deadline = Instant::now()
         + Duration::from_secs(if recover {
             p.recovery_seconds
@@ -448,6 +535,18 @@ pub(crate) async fn trade_loop<V: perp_arb_order_test::venue::Venue>(
             || fault.borrow().is_some()
             || !entry().unwrap_or(false)
         {
+            if !cancelling {
+                let reason = if *stop.borrow() {
+                    "user_stop"
+                } else if fault.borrow().is_some() {
+                    "private_feed_error"
+                } else if started.elapsed() > Duration::from_secs(p.maker_wait_seconds) {
+                    "maker_timeout"
+                } else {
+                    "entry_gap_or_quote"
+                };
+                eprintln!("[cancel-reason] {reason}");
+            }
             cancelling = true;
         }
         let current = o.progress().await?;
@@ -530,7 +629,7 @@ pub(crate) async fn trade_loop<V: perp_arb_order_test::venue::Venue>(
                             v,
                             intent.id,
                             order,
-                            &r.metadata.limit,
+                            r.hedge_limits()?,
                             decimal(&p.hedge.max_notional_usd).map_err(|e| e.to_string())?,
                             trace,
                             None,
@@ -558,9 +657,25 @@ pub(crate) async fn trade_loop<V: perp_arb_order_test::venue::Venue>(
             && progress.recovery_pending.is_empty()
             && !progress.faulted
         {
+            eprintln!(
+                "[maker-terminal] 累計成交={}；對沖已確認",
+                progress.maker.cumulative
+            );
             return Ok(
                 json!({"completed":true,"maker_filled":progress.maker.cumulative,"unhedged":progress.exposure,"in_flight":progress.in_flight,"hedge_attempts":progress.intents.len()}),
             );
+        }
+        let state = (
+            progress.maker.cumulative.clone(),
+            progress.exposure.clone(),
+            progress.in_flight.clone(),
+        );
+        if last_progress.as_ref() != Some(&state) {
+            eprintln!(
+                "[progress] maker_filled={} unhedged={} in_flight={}",
+                state.0, state.1, state.2
+            );
+            last_progress = Some(state);
         }
         if Instant::now() >= deadline {
             return Err(format!("paired order incomplete; recover the SAME run directory: maker_filled={} unhedged={} in_flight={} maker_terminal={} last_error={}",progress.maker.cumulative,progress.exposure,progress.in_flight,progress.maker.terminal_confirmed,last_error.unwrap_or_else(||"terminal proof pending".into())));

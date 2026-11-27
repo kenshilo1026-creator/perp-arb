@@ -31,6 +31,7 @@
     "wait_seconds": 20
   },
   "max_entry_gap": "0.0025",
+  "hedge_leverage": 1,
   "maker_wait_seconds": 30,
   "recovery_seconds": 60,
   "maker_fill_mode": "rest_verified"

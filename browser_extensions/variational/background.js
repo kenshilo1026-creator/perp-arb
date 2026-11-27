@@ -1,4 +1,5 @@
 import { executeNativeOrderRequest, reserveNativeDispatch, saveNativeReceipt, readNativeReceipt } from "./native_orders.js";
+import { runNativeUiMutation } from "./ui_orders.js";
 
 const DEBUGGER_VERSION = "1.3";
 const ORDER_AUTOMATION_VERSION = "variational-order-automation-2026-08-17-12";
@@ -198,7 +199,7 @@ class CommandSocket {
         }
         this.status = "connected";
         socket.send(JSON.stringify({ "type": "REGISTER", "role": "extension",
-          nativeProtocol: "variational-native-v1", nativeTradingEnabled: state.config.nativeTradingEnabled === true }));
+          nativeProtocol: "variational-native-v1", nativeMutationTransport: "ui", nativeTradingEnabled: state.config.nativeTradingEnabled === true }));
         notifyStatus();
       };
 
@@ -644,11 +645,64 @@ async function handleNativeOrderCommand(payload) {
         current: identity.result, dispatchRequestId: payload.dispatchRequestId, stored });
       return;
     }
+    if (payload.action === 'prepare_ui') {
+      const p = payload.order;
+      const [identity] = await chrome.scripting.executeScript({ target: { tabId: state.attachedTabId }, world: 'ISOLATED',
+        func: executeNativeOrderRequest, args: [{ ...payload, action: 'identity' }] });
+      if (!identity?.result?.ok) throw new Error('native_identity_unavailable');
+      const [prepared] = await chrome.scripting.executeScript({ target: { tabId: state.attachedTabId }, world: 'MAIN',
+        func: executeVariationalOrder, args: [{ symbol: p.instrument.underlying, side: p.side.toUpperCase(),
+          amount: p.qty, orderType: 'LIMIT', reduceOnly: p.is_reduce_only, prepareOnly: true,
+          nativePrepareId: payload.dispatchRequestId, automationVersion: ORDER_AUTOMATION_VERSION }] });
+      const [after] = await chrome.scripting.executeScript({ target: { tabId: state.attachedTabId }, world: 'ISOLATED',
+        func: executeNativeOrderRequest, args: [{ ...payload, action: 'identity' }] });
+      if (!after?.result?.ok) throw new Error('native_identity_unavailable');
+      commandClient.send({ type: 'NATIVE_ORDER_RESULT', requestId: payload.requestId, ok: prepared?.result?.ok === true,
+        receipt: { ...after.result, price: prepared?.result?.price, prepare_id: payload.dispatchRequestId,
+          ok: prepared?.result?.ok === true, error: prepared?.result?.ok ? null : 'native_ui_prepare_failed' } });
+      return;
+    }
     if (mutation) await reserveNativeDispatch(chrome.storage.local, payload.requestId);
-    const [injection] = await chrome.scripting.executeScript({
-      target: { tabId: state.attachedTabId }, world: "ISOLATED",
-      func: executeNativeOrderRequest, args: [payload]
-    });
+    let injection;
+    if (mutation) {
+      if (payload.transport !== 'ui') throw new Error('native_ui_required');
+      const tabId = state.attachedTabId;
+      const p = payload.order;
+      injection = { result: await runNativeUiMutation(payload, {
+        tabId,
+        send: (method, params) => sendDebuggerCommand(tabId, method, params),
+        listen: listener => {
+          chrome.debugger.onEvent.addListener(listener);
+          return () => chrome.debugger.onEvent.removeListener(listener);
+        },
+        identity: async () => {
+          const [result] = await chrome.scripting.executeScript({ target: { tabId }, world: 'ISOLATED',
+            func: executeNativeOrderRequest, args: [{ ...payload, action: 'identity' }] });
+          return result?.result || {};
+        },
+        operate: async () => {
+          // Same page automation as Python, but never retry an ambiguous click.
+          const command = payload.action === 'submit'
+            ? { symbol: p.instrument.underlying, side: p.side.toUpperCase(), amount: p.qty,
+                orderType: 'LIMIT', price: p.limit_price, reduceOnly: p.is_reduce_only,
+                nativeCommitId: payload.requestId, strictLimitPrice: true }
+            : { orderId: payload.order_id, symbol: p.instrument.underlying, side: p.side, amount: p.qty };
+          const [result] = await chrome.scripting.executeScript({ target: { tabId }, world: 'MAIN',
+            func: payload.action === 'submit' ? executeVariationalOrder : executeVariationalCancelOrder,
+            args: [{ ...command, automationVersion: ORDER_AUTOMATION_VERSION }] });
+          const ui = result?.result;
+          if (payload.action === 'submit' && ui?.ok && ui.details?.needsCdpSubmitClick) {
+            await runVariationalSubmitFollowupInjection(command);
+          }
+          return ui;
+        }
+      }) };
+    } else {
+      [injection] = await chrome.scripting.executeScript({
+        target: { tabId: state.attachedTabId }, world: "ISOLATED",
+        func: executeNativeOrderRequest, args: [payload]
+      });
+    }
     if (!injection?.result) throw new Error("native_injection_unknown");
     if (mutation) await saveNativeReceipt(chrome.storage.local, payload, injection.result);
     commandClient.send({ type: "NATIVE_ORDER_RESULT", requestId: payload.requestId,
@@ -1963,6 +2017,12 @@ function executeVariationalSubmitFollowup(command) {
 }
 
 function executeVariationalOrder(command) {
+  if (command.nativeCommitId) {
+    const ticket = window.__perpArbPreparedUi;
+    delete window.__perpArbPreparedUi;
+    if (!ticket || ticket.id !== command.nativeCommitId) return { ok: false, error: 'native_ui_prepared_missing' };
+    return ticket.commit(command);
+  }
   const automationVersion = command.automationVersion || "unknown";
   const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   const clickableSelector = "button,[role='button'],a,[tabindex],div[class*='cursor-pointer'],div[class*='hover:bg']";
@@ -2756,7 +2816,33 @@ function executeVariationalOrder(command) {
         details: { automationVersion, diagnostics: collectOrderDomDiagnostics() }
       };
     }
+    if (command.prepareOnly && orderType === 'LIMIT') {
+      const priceInput = excludedAmountInput || findLimitPriceInput();
+      const price = readLimitPriceValue(priceInput);
+      if (!price || !command.nativePrepareId) return { ok: false, error: 'native_ui_prepare_price_missing' };
+      const normalize = value => String(value || '').replace(/,/g, '').replace(/\.0*$/, '').replace(/(\.[0-9]*?)0+$/, '$1');
+      const preparedUrl = window.location.href;
+      window.__perpArbPreparedUi = { id: command.nativePrepareId, commit: next => {
+        if (window.location.href !== preparedUrl || !finalSubmitButton.isConnected || !amountInput.isConnected ||
+            finalSubmitButton.disabled || finalSubmitButton.getAttribute('aria-disabled') === 'true' ||
+            next.symbol !== command.symbol || next.side !== side || next.reduceOnly !== reduceOnly ||
+            normalize(next.amount) !== normalize(amountInput.value) || normalize(next.amount) !== normalize(amount) ||
+            normalize(next.price) !== normalize(readLimitPriceValue(priceInput)) || normalize(next.price) !== normalize(price)) {
+          return { ok: false, error: 'native_ui_prepared_changed' };
+        }
+        click(finalSubmitButton);
+        return { ok: true, details: { needsCdpSubmitClick: true, usedLimitPrice: price, side, amount, orderType } };
+      } };
+      return { ok: true, prepared: true, price };
+    }
     const submitClickPoint = cdpClickPoint(finalSubmitButton);
+    if (command.strictLimitPrice) {
+      const normalize = value => String(value || '').replace(/,/g, '').replace(/\.0*$/, '').replace(/(\.[0-9]*?)0+$/, '$1');
+      const actual = readLimitPriceValue(excludedAmountInput || findLimitPriceInput());
+      if (normalize(actual) !== normalize(explicitLimitPrice)) {
+        return { ok: false, error: 'native_ui_mid_changed', details: { usedLimitPrice: actual } };
+      }
+    }
     click(finalSubmitButton);
 
     const usedLimitPrice = orderType === "LIMIT"

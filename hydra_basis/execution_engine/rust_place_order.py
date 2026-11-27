@@ -8,7 +8,7 @@ from pathlib import Path
 
 def build_native_command(args, *, project_root: Path) -> list[str]:
     from hydra_basis.execution_engine.rust_plan_prepare import PREPARE_OPTIONS
-    if any(getattr(args, key, None) for key in PREPARE_OPTIONS):
+    if any(getattr(args, key, None) is not None for key in PREPARE_OPTIONS):
         raise RuntimeError("settings/quantity/price/fill-mode options require --rust-action prepare; existing plans/runs cannot be overridden")
     if not getattr(args, "rust_preflight", False):
         return build_paired_command(args, project_root=project_root)
@@ -55,18 +55,19 @@ def build_paired_command(args, *, project_root: Path) -> list[str]:
     if live != (action in ("submit", "recover")):
         raise RuntimeError("submit/recover require --live; preview/audit/inspect reject --live")
     required = {"preview": {"rust_plan"}, "audit": {"rust_plan", "rust_baseline_output"},
-                "submit": {"rust_plan", "rust_baseline", "rust_run_dir"},
+                "submit": {"rust_plan", "rust_run_dir"},
                 "recover": {"rust_run_dir"}, "inspect": {"rust_run_dir"}}[action]
     options = {"rust_plan": "--plan", "rust_baseline": "--baseline", "rust_run_dir": "--run-dir", "rust_baseline_output": "--baseline-output"}
     supplied = {k for k in options if getattr(args, k, None)}
-    if supplied != required:
+    allowed = required | ({"rust_baseline"} if action == "submit" else set())
+    if not required <= supplied or not supplied <= allowed:
         raise RuntimeError(f"{action} requires exactly: " + ", ".join("--" + k.replace("_", "-") for k in sorted(required)))
     binary = project_root / "rust/target/release/paired-order.exe"
     if not binary.is_file():
         raise RuntimeError("Build first: cargo build --manifest-path rust/Cargo.toml -p perp-arb-variational-bridge --bin paired-order --release --locked")
     command = [str(binary), action]
     for k, flag in options.items():
-        if k in required:
+        if k in supplied:
             command += [flag, str(getattr(args, k))]
     if live:
         command += ["--live", "--parent-control"]
@@ -77,7 +78,14 @@ async def run_native_preflight(args) -> None:
     root = Path(__file__).resolve().parents[2]
     command = build_native_command(args, project_root=root)
     live = bool(getattr(args, "live", False))
-    process = await asyncio.create_subprocess_exec(*command, cwd=root, stdin=asyncio.subprocess.PIPE if live else None)
+    quiet = bool(getattr(args, 'rust_quiet', False))
+    process = await asyncio.create_subprocess_exec(*command, cwd=root,
+        stdin=asyncio.subprocess.PIPE if live else None,
+        stdout=asyncio.subprocess.PIPE if quiet else None,
+        stderr=asyncio.subprocess.PIPE if quiet and not live else None)
+    # Drain without communicate(): closing live stdin requests cancellation.
+    readers = [asyncio.create_task(stream.read()) for stream in
+               (process.stdout, process.stderr) if stream is not None] if quiet else []
     try:
         code = await asyncio.shield(process.wait())
     except asyncio.CancelledError:
@@ -98,5 +106,11 @@ async def run_native_preflight(args) -> None:
             except ProcessLookupError:
                 pass
             await process.wait()
+        if readers:
+            await asyncio.gather(*readers)
+    output = await asyncio.gather(*readers)
     if code != 0:
+        for data in output:
+            if data:
+                print(data.decode('utf-8', errors='replace').rstrip(), flush=True)
         raise RuntimeError(f"Rust command incomplete/failed (exit {code}); inspect/recover the saved run if submitted. Python execution was not started")

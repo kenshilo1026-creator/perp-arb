@@ -120,7 +120,7 @@ pub(crate) async fn process<V: Venue>(
             venue,
             intent.id,
             order,
-            &r.metadata.limit,
+            r.hedge_limits()?,
             decimal(&p.hedge.max_notional_usd).map_err(|e| e.to_string())?,
             Some(trace),
             applied.first().map(String::as_str),

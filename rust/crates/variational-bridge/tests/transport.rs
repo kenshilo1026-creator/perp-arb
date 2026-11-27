@@ -109,7 +109,7 @@ async fn registered_native(
     enabled: bool,
 ) -> Socket {
     let mut socket = connect(bridge.command_address).await;
-    send(&mut socket,json!({"type":"REGISTER","role":"extension","nativeProtocol":"variational-native-v1","nativeTradingEnabled":enabled})).await;
+    send(&mut socket,json!({"type":"REGISTER","role":"extension","nativeProtocol":"variational-native-v1","nativeMutationTransport":"ui","nativeTradingEnabled":enabled})).await;
     assert_eq!(read(&mut socket).await["type"], "REGISTER_ACK");
     event(rx).await;
     socket
@@ -151,12 +151,47 @@ fn native_instrument() -> perp_arb_variational_bridge::native::Instrument {
     }
 }
 #[tokio::test]
+async fn ui_prepare_keeps_dynamic_mid_and_dispatch_identity_without_sending_order() {
+    let (bridge, mut rx) = Bridge::bind(config(32)).await.unwrap();
+    let mut socket = registered_native(&bridge, &mut rx, false).await;
+    let (path, ledger) = native_ledger();
+    let command = ledger.view().command;
+    let instrument = native_instrument();
+    let venue = async {
+        let request = read(&mut socket).await;
+        assert_eq!(request["action"], "prepare_ui");
+        assert_eq!(request["transport"], "ui");
+        assert_eq!(request["order"]["qty"], "2");
+        let now = perp_arb_variational_bridge::wire::now_ms().unwrap();
+        send(&mut socket,json!({"type":"NATIVE_ORDER_RESULT","requestId":request["requestId"],"ok":true,
+            "receipt":{"protocol":"variational-native-v1","started_ms":now,"finished_ms":now,"account":request["account"],
+            "session_continuity":true,"ok":true,"dispatched":false,"price":"101.2","prepare_id":request["dispatchRequestId"],"source":"https://omni.variational.io/api/me"}})).await;
+    };
+    let (result, ()) = tokio::join!(bridge.prepare_maker_ui(&command, &instrument), venue);
+    assert_eq!(result.unwrap(), "101.2");
+    assert!(!ledger.view().dispatched);
+    drop(ledger);
+    std::fs::remove_file(path).unwrap();
+    bridge.shutdown().await;
+}
+#[tokio::test]
+async fn old_http_extension_is_never_authorized_for_mutations() {
+    let (bridge, mut rx) = Bridge::bind(config(32)).await.unwrap();
+    let mut socket = connect(bridge.command_address).await;
+    send(&mut socket,json!({"type":"REGISTER","role":"extension","nativeProtocol":"variational-native-v1","nativeTradingEnabled":true})).await;
+    read(&mut socket).await;
+    event(&mut rx).await;
+    assert!(!bridge.health().borrow().native_trading_enabled);
+    bridge.shutdown().await;
+}
+#[tokio::test]
 async fn native_submit_binds_only_correlated_real_rfq_ack_without_counting_a_fill() {
     let (bridge, mut rx) = Bridge::bind(config(32)).await.unwrap();
     let mut socket = registered_native(&bridge, &mut rx, true).await;
     let (path, mut ledger) = native_ledger();
     let venue = async {
         let request = read(&mut socket).await;
+        assert_eq!(request["transport"], "ui");
         assert_eq!(request["action"], "submit");
         assert_eq!(request["order"]["is_reduce_only"], true);
         assert_eq!(request["order"]["slippage_limit"], "0");

@@ -95,6 +95,44 @@ pub struct Credentials {
     nonce: Arc<Mutex<u64>>,
 }
 impl Credentials {
+    pub(crate) fn isolated_leverage(
+        &self,
+        asset: u32,
+        leverage: u32,
+        network: Network,
+    ) -> Result<String> {
+        self.isolated_leverage_at(asset, leverage, network, self.nonce()?)
+    }
+    fn isolated_leverage_at(
+        &self,
+        asset: u32,
+        leverage: u32,
+        network: Network,
+        nonce: u64,
+    ) -> Result<String> {
+        #[derive(Serialize)]
+        struct Action {
+            #[serde(rename = "type")]
+            kind: &'static str,
+            asset: u32,
+            #[serde(rename = "isCross")]
+            is_cross: bool,
+            leverage: u32,
+        }
+        if asset >= 10000 || !(1..=125).contains(&leverage) {
+            return Err(Error::Configuration);
+        }
+        self.encode(
+            Action {
+                kind: "updateLeverage",
+                asset,
+                is_cross: false,
+                leverage,
+            },
+            nonce,
+            network,
+        )
+    }
     pub fn new(secret: &str) -> Result<Self> {
         let s = secret.strip_prefix("0x").unwrap_or(secret);
         if s.len() != 64 {
@@ -186,6 +224,7 @@ impl Credentials {
                             tif: match o.tif {
                                 TimeInForce::PostOnly => "Alo",
                                 TimeInForce::Ioc => "Ioc",
+                                TimeInForce::Market => return Err(Error::Configuration),
                             },
                         },
                     },
@@ -219,6 +258,25 @@ impl Credentials {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn isolated_leverage_matches_python_adapter_signature() {
+        let signer = Credentials::new(&format!("{:064x}", 1)).unwrap();
+        let raw = signer
+            .isolated_leverage_at(4, 3, Network::Mainnet, 1700000000000)
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(
+            v["action"],
+            serde_json::json!({"type":"updateLeverage","asset":4,"isCross":false,"leverage":3})
+        );
+        assert_eq!(
+            v["signature"],
+            serde_json::json!({"r":format!("0x{:0>64}","57b41ef2458f65bc54c8603ade31c3169efcaaa3bca7ddce8f02eed8ce3337c"),"s":format!("0x{:0>64}","7edf1756744d40a276f43eadb3308242219bd5aa5dfb17749a06e766f16b3335"),"v":28})
+        );
+        assert!(signer
+            .isolated_leverage_at(4, 0, Network::Mainnet, 1)
+            .is_err());
+    }
     #[test]
     fn fixed_python_signing_vectors() {
         let rows: serde_json::Value =

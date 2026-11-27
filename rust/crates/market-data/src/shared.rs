@@ -37,6 +37,7 @@ impl MarketKey {
                 format!("wss://fstream.asterdex.com/stream?streams={symbol}@depth10@100ms/{symbol}@bookTicker")
             }
             Venue::Hyperliquid => "wss://api.hyperliquid.xyz/ws".into(),
+            Venue::Lighter => crate::lighter::WS.into(),
         }
     }
     pub fn subscriptions(&self) -> Vec<serde_json::Value> {
@@ -48,6 +49,7 @@ impl MarketKey {
                     .expect("HL subscription"),
                 json!({"method":"subscribe", "subscription":{"type":"bbo", "coin":self.symbol}}),
             ],
+            _ => vec![],
         }
     }
 }
@@ -81,12 +83,14 @@ fn parse_market_value(
     let bbo = match key.venue {
         Venue::Aster => data["e"] == "bookTicker",
         Venue::Hyperliquid => payload["channel"] == "bbo",
+        Venue::Lighter => return Err("Lighter requires stateful book".into()),
     };
     if !bbo {
         return parse_depth_value(key.venue, &key.symbol, payload, received)
             .map(|s| s.map(|s| (Channel::Depth, s)));
     }
     let (source, sequence, bids, asks) = match key.venue {
+        Venue::Lighter => return Err("Lighter requires stateful book".into()),
         Venue::Aster => {
             if let Some(stream) = payload.get("stream") {
                 let expected = format!("{}@bookTicker", key.symbol.to_ascii_lowercase());
@@ -164,6 +168,16 @@ pub struct View {
     depth_invalidated: bool,
 }
 impl View {
+    pub(crate) fn from_snapshot(snapshot: Snapshot, revision: u64) -> Self {
+        Self {
+            generation: 1,
+            revision,
+            connected: true,
+            accepted_depth: revision,
+            depth: Some(Arc::new(snapshot)),
+            ..Self::default()
+        }
+    }
     /// Recompute age at use time. A watch value does not stay fresh just because
     /// no new revision arrived. Unchanged BBO never retimestamps deeper levels.
     pub fn selected(&self, now: i64) -> Option<&Snapshot> {

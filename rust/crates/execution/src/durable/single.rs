@@ -63,6 +63,10 @@ pub fn new_client_id(venue: &str) -> JResult<String> {
         .map(|b| format!("{b:02x}"))
         .collect::<String>();
     match venue {
+        "lighter" => Ok((u64::from_str_radix(&id[..12], 16)
+            .map_err(|_| JournalError::Identity)?
+            .max(1))
+        .to_string()),
         "aster" => Ok(format!("pa{id}")),
         "hyperliquid" => Ok(format!("0x{id}")),
         _ => Err(JournalError::Identity),

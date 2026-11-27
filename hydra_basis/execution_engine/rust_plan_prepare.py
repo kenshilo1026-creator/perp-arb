@@ -3,21 +3,20 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import datetime as dt
 import json
 import re
 import uuid
-from decimal import Decimal, InvalidOperation, localcontext
+from decimal import Decimal, InvalidOperation, localcontext, ROUND_CEILING, ROUND_FLOOR
 from pathlib import Path
 
 import aiohttp
 
 from hydra_basis.adapters.base import fetch_json
 from hydra_basis.adapters.variational import VARIATIONAL_BASE_URL
-from hydra_basis.config import MONITOR_SIGNALS_PATH
+from hydra_basis.execution_engine.rust_selection import select_pair_for_args, select_legs_for_pair, print_selection
 
 
-PREPARE_OPTIONS = ("rust_settings", "rust_quantity", "rust_maker_price", "rust_hedge_price", "rust_fill_mode")
+PREPARE_OPTIONS = ("rust_settings", "rust_quantity", "rust_clip_quantity", "rust_leverage", "rust_maker_price", "rust_hedge_price", "rust_fill_mode")
 
 
 def positive(value: object, label: str) -> Decimal:
@@ -30,49 +29,24 @@ def positive(value: object, label: str) -> Decimal:
     return result
 
 
-def select_signal(path: Path, symbol: str, *, short: str | None = None,
-                  long: str | None = None, now: dt.datetime | None = None) -> dict:
-    payload = json.loads(path.read_text(encoding="utf-8-sig"))
-    updated = dt.datetime.fromisoformat(payload["updated_at"])
-    now = now or dt.datetime.now(dt.timezone.utc)
-    if updated.tzinfo is None or not dt.timedelta(0) <= now - updated <= dt.timedelta(hours=24):
-        raise RuntimeError("monitor_signals timestamp invalid or older than 24 hours; run funding monitor first")
-    candidates = []
-    for row in payload.get("cross_exchange_signals", []):
-        s, l = str(row.get("short_venue", "")).lower(), str(row.get("long_venue", "")).lower()
-        if str(row.get("symbol", "")).upper() != symbol.upper():
-            continue
-        if {s, l} not in ({"variational", "aster"}, {"variational", "hyperliquid"}):
-            continue
-        if (short and s != short.lower()) or (long and l != long.lower()):
-            continue
-        # Only an affirmative funding signal may select an automatic trade direction.
-        if row.get("signal") is not True:
-            continue
-        try:
-            annualized = Decimal(str(row["annualized_avg"]))
-        except (KeyError, InvalidOperation):
-            continue
-        if not annualized.is_finite():
-            continue
-        candidates.append((annualized, {**row, "symbol": symbol.upper(), "short_venue": s,
-                                       "long_venue": l, "updated_at": payload["updated_at"]}))
-    if not candidates:
-        raise RuntimeError(f"no eligible Variational + Aster/Hyperliquid signal for {symbol}; no plan/order created")
-    return max(candidates, key=lambda pair: pair[0])[1]
-
-
 def build_plan(*, signal: dict, settings: dict, mode: str, quantity: str,
-               maker_price: str, hedge_price: str, native_symbol: str,
-               funding_interval_s: int, fill_mode: str | None = None) -> dict:
+               maker_price: str, hedge_price: str | None, native_symbol: str,
+               funding_interval_s: int, fill_mode: str | None = None,
+               leverage: int | None = None) -> dict:
     if mode not in {"open", "close"}:
         raise RuntimeError("mode must be open or close")
+    if leverage is not None:
+        validate_leverage(leverage)
     venue = signal["long_venue"] if signal["short_venue"] == "variational" else signal["short_venue"]
-    if venue not in {"aster", "hyperliquid"} or "variational" not in {signal["short_venue"], signal["long_venue"]}:
+    if venue not in {"aster", "hyperliquid", "lighter"} or "variational" not in {signal["short_venue"], signal["long_venue"]}:
         raise RuntimeError("unsupported paired venues")
     accounts = settings.get("accounts", {})
     for key in ("variational", venue):
-        if not re.fullmatch(r"0x[0-9a-f]{40}", accounts.get(key, "")):
+        if key == 'lighter':
+            value = str(accounts.get(key, ''))
+            if not value.isascii() or not value.isdecimal() or str(int(value)) != value or not 0 <= int(value) < 2**48:
+                raise RuntimeError('settings accounts.lighter must be the canonical LIGHTER_ACCOUNT_INDEX')
+        elif not re.fullmatch(r"0x[0-9a-f]{40}", accounts.get(key, "")):
             raise RuntimeError(f"settings need canonical account address for {key}")
     if not re.fullmatch(r"[a-p]{32}", settings.get("extension_id", "")):
         raise RuntimeError("settings need Chrome extension_id")
@@ -83,7 +57,12 @@ def build_plan(*, signal: dict, settings: dict, mode: str, quantity: str,
         raise RuntimeError("invalid Variational funding interval")
     q = positive(quantity, "quantity")
     mp = positive(maker_price, "maker limit")
-    hp = positive(hedge_price, "hedge IOC limit")
+    market = venue == 'aster' and hedge_price is None
+    if hedge_price is None and not market:
+        raise RuntimeError('hedge IOC limit required')
+    # MARKET keeps a valuation reference for preflight/lot/notional checks.
+    # It is not a slippage limit and is never transmitted as price/timeInForce.
+    hp = mp if market else positive(hedge_price, "hedge IOC limit")
     maker_side = "SELL" if signal["short_venue"] == "variational" else "BUY"
     if mode == "close":
         maker_side = "BUY" if maker_side == "SELL" else "SELL"
@@ -98,12 +77,13 @@ def build_plan(*, signal: dict, settings: dict, mode: str, quantity: str,
                   "limit_price": format(mp, "f"), "reduce_only": mode == "close", "max_notional": maker_cap},
         "instrument": {"underlying": signal["symbol"], "instrument_type": "perpetual_future",
                        "settlement_asset": "USDC", "funding_interval_s": funding_interval_s},
-        "hedge": {"venue": venue, "network": "mainnet", "account": accounts[venue],
+        "hedge": {"venue": venue, "network": "mainnet", "account": str(accounts[venue]),
                   "symbol": native_symbol, "side": "BUY" if maker_side == "SELL" else "SELL",
-                  "quantity": format(q, "f"), "limit_price": format(hp, "f"), "tif": "ioc",
+                  "quantity": format(q, "f"), "limit_price": format(hp, "f"), "tif": "market" if market else "ioc",
                   "reduce_only": mode == "close", "max_notional_usd": hedge_cap, "wait_seconds": 20},
         "max_entry_gap": "0.0025", "maker_wait_seconds": 30, "recovery_seconds": 60,
         "maker_fill_mode": selected_mode,
+        "hedge_leverage": leverage if mode == "open" else None,
     }
 
 
@@ -123,12 +103,41 @@ async def instrument_metadata(symbol: str, venue: str) -> tuple[str, int]:
             if symbol not in metadata:
                 raise RuntimeError(f"Aster instrument not found: {symbol}")
             native_symbol = metadata[symbol]["raw_symbol"]
+        elif venue == 'lighter':
+            data = await fetch_json(session, 'GET', 'https://mainnet.zklighter.elliot.ai/api/v1/orderBookDetails')
+            rows = [r for r in data.get('order_book_details', []) if r.get('symbol') == symbol and r.get('market_type') == 'perp' and r.get('status') == 'active']
+            if len(rows) != 1:
+                raise RuntimeError(f'Lighter instrument missing or ambiguous: {symbol}')
+            native_symbol = symbol
         else:
             universe = await fetch_hyperliquid_universe(session)
             if symbol not in universe:
                 raise RuntimeError(f"Hyperliquid instrument not found: {symbol}")
             native_symbol = hyperliquid_coin_name(symbol)
     return native_symbol, interval
+
+
+async def lighter_ioc_price(symbol: str, side: str, reference: str, slippage_bps: str = '50') -> str:
+    """Preparation only: bound Lighter IOC at executable bid/ask plus the existing taker tolerance."""
+    try:
+        slip = Decimal(str(slippage_bps))
+    except InvalidOperation as exc:
+        raise RuntimeError('invalid Lighter IOC policy') from exc
+    if not slip.is_finite() or not 0 <= slip <= 1000 or side not in ('BUY', 'SELL'):
+        raise RuntimeError('invalid Lighter IOC policy')
+    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15)) as session:
+        data = await fetch_json(session, 'GET', 'https://mainnet.zklighter.elliot.ai/api/v1/orderBookDetails')
+    rows = [r for r in data.get('order_book_details', []) if r.get('symbol') == symbol and r.get('market_type') == 'perp' and r.get('status') == 'active']
+    if len(rows) != 1:
+        raise RuntimeError('Lighter IOC instrument unavailable')
+    places = rows[0].get('supported_price_decimals')
+    if type(places) is not int or not 0 <= places <= 12:
+        raise RuntimeError('invalid Lighter price precision')
+    tick = Decimal(1).scaleb(-places)
+    with localcontext() as ctx:
+        ctx.prec = 80
+        price = positive(reference, 'Lighter executable reference') * (Decimal(1) + (slip if side == 'BUY' else -slip) / 10000)
+        return format(price.quantize(tick, rounding=ROUND_CEILING if side == 'BUY' else ROUND_FLOOR), 'f')
 
 
 def prompt(label: str) -> str:
@@ -139,6 +148,25 @@ def prompt(label: str) -> str:
     if not value:
         raise RuntimeError(f"{label} cannot be empty")
     return value
+
+
+def validate_leverage(value: object) -> int:
+    if type(value) is not int or not 1 <= value <= 125:
+        raise RuntimeError("leverage_x must be an integer in 1..125; venue/instrument limits also apply")
+    return value
+
+
+def prepare_leverage(args, mode: str) -> int | None:
+    """Explicit CLI or interactive input; closing never changes margin settings."""
+    if mode == "close":
+        return None
+    value = getattr(args, "rust_leverage", None)
+    if value is None:
+        raw = prompt("leverage_x")
+        if not re.fullmatch(r"[0-9]+", raw):
+            raise RuntimeError("leverage_x must be an integer in 1..125")
+        value = int(raw)
+    return validate_leverage(value)
 
 
 async def preview_mid_price(*, project_root: Path, symbol: str, extension_id: str) -> str:
@@ -185,32 +213,63 @@ async def prepare_signal_plan(args, *, project_root: Path) -> Path:
             "rust_account", "rust_order_id", "rust_output", "extension_id", "rust_baseline",
             "rust_baseline_output", "rust_run_dir")):
         raise RuntimeError("prepare is read-only; omit live/preflight/baseline/run options")
+    if getattr(args, 'rust_action', None) == 'select' and any(
+            getattr(args, key, None) for key in ('rust_settings', 'rust_clip_quantity', 'rust_leverage', 'rust_maker_price', 'rust_hedge_price', 'rust_fill_mode')):
+        raise RuntimeError('select uses public books and execution priorities; omit settings/price/fill-mode execution options')
     symbol = (getattr(args, "ticker", None) or prompt("ticker")).strip().upper()
     mode = getattr(args, "mode", None) or "open"
     # A new funding signal cannot identify which historical position should be closed.
     if mode == "close" and not (getattr(args, "short_venue", None) and getattr(args, "long_venue", None)):
         raise RuntimeError("close requires --short_venue and --long_venue for existing positions; do not infer holdings from today's signal")
-    short, long = getattr(args, "short_venue", None), getattr(args, "long_venue", None)
-    if short and long:
-        signal = {"symbol": symbol, "short_venue": short.lower(), "long_venue": long.lower(),
-                  "updated_at": "explicit", "annualized_avg": None}
-        if {signal["short_venue"], signal["long_venue"]} not in ({"variational", "aster"}, {"variational", "hyperliquid"}):
-            raise RuntimeError("explicit pair must be Variational + Aster/Hyperliquid")
-    else:
-        signal = select_signal(project_root / MONITOR_SIGNALS_PATH, symbol, short=short, long=long)
-    venue = signal["long_venue"] if signal["short_venue"] == "variational" else signal["short_venue"]
-    if getattr(args, "maker_venue", None) not in (None, "variational") or getattr(args, "taker_venue", None) not in (None, venue):
-        raise RuntimeError("Rust paired executor requires Variational maker and selected native venue taker")
+    signal = await select_pair_for_args(args, symbol=symbol, project_root=project_root)
+    quantity = getattr(args, "rust_quantity", None) or prompt("quantity_token（本筆兩腿相同數量）")
+    positive(quantity, 'quantity')
+    report = await select_legs_for_pair(args, signal=signal, quantity=quantity, project_root=project_root)
+    quiet = bool(getattr(args, 'rust_quiet', False))
+    if not quiet:
+        print_selection(report)
+    selection = report['selection']
+    if getattr(args, 'rust_action', None) == 'select' or not selection['paired_execution_supported']:
+        path = Path(getattr(args, 'rust_plan', None) or project_root / f'rust/artifacts/selection-{uuid.uuid4().hex}.json')
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open('x', encoding='utf-8') as stream:
+            json.dump(report, stream, indent=2, ensure_ascii=False)
+            stream.write('\n')
+        print(f'唯讀選擇報告已保存：{path}；不是送單計劃。')
+        if getattr(args, 'rust_action', None) != 'select':
+            raise RuntimeError(f"selected pair has no Rust paired executor; selection report={path}; no executable plan/order created")
+        return path
+    venue = selection['taker_venue']
     settings_path = Path(getattr(args, "rust_settings", None) or project_root / "rust/artifacts/paired-settings.json")
     settings = json.loads(settings_path.read_text(encoding="utf-8-sig"))
+    leverage = prepare_leverage(args, mode)
+    args.rust_leverage = leverage
+    if leverage is not None and not quiet:
+        scope = venue if selection['maker_venue'] == 'variational' else '兩腿'
+        print(f"leverage_x: {leverage}；送單前設定 {scope} 逐倉槓桿；數量不乘槓桿倍數。")
+        if selection['maker_venue'] == 'variational':
+            print("Variational 沿用帳戶保證金機制；此倍數只套用到對沖交易所。")
+    if selection['maker_venue'] != 'variational':
+        from hydra_basis.execution_engine.rust_native_pair_prepare import prepare_native_pair
+        return await prepare_native_pair(args, report=report, settings=settings, project_root=project_root)
+    if getattr(args, 'rust_clip_quantity', None) is not None:
+        raise RuntimeError('rust-clip-quantity applies to native Aster/Hyperliquid/Lighter pairs only')
     annualized = "explicit" if signal['annualized_avg'] is None else f"{float(signal['annualized_avg']):.2%}"
-    print(f"訊號 {signal['updated_at']}: {symbol} SHORT {signal['short_venue']} / LONG {signal['long_venue']}; 年化 {annualized}")
-    print(f"模式 {mode}; Variational Maker / {venue} IOC 對沖；本次只準備一筆計劃，不送單。")
-    quantity = getattr(args, "rust_quantity", None) or prompt("quantity_token（本筆兩腿相同數量）")
+    if not quiet:
+        print(f"訊號 {signal['updated_at']}: {symbol} SHORT {signal['short_venue']} / LONG {signal['long_venue']}; 年化 {annualized}")
+    market_hedge = venue == 'aster' and getattr(args, 'rust_hedge_price', None) is None
+    if not quiet:
+        print(f"模式 {mode}; Variational Maker / {venue} {'MARKET 市價' if market_hedge else 'IOC'} 對沖；本次只準備一筆計劃，不送單。")
     maker_price = getattr(args, "rust_maker_price", None)
-    hedge_price = getattr(args, "rust_hedge_price", None) or prompt(f"{venue} IOC 限價（BUY 最高買價／SELL 最低賣價）")
-    for value, name in ((quantity, "quantity"), (hedge_price, "hedge price")):
-        positive(value, name)
+    hedge_price = getattr(args, "rust_hedge_price", None)
+    if hedge_price is None and venue == 'lighter':
+        hedge_price = await lighter_ioc_price(symbol, selection['taker_side'], selection['taker_reference_price'],
+                                            str(settings.get('native_pair', {}).get('hedge_slippage_bps', '50')))
+        print(f'[lighter-ioc] 自動按 Taker 報價及商品精度建立 IOC 限價={hedge_price}')
+    elif hedge_price is None and venue != 'aster':
+        hedge_price = prompt(f"{venue} IOC 限價（BUY 最高買價／SELL 最低賣價）")
+    if hedge_price is not None:
+        positive(hedge_price, 'hedge price')
     if maker_price is not None:
         positive(maker_price, 'maker price')
     native_symbol, interval = await instrument_metadata(symbol, venue)
@@ -219,13 +278,14 @@ async def prepare_signal_plan(args, *, project_root: Path) -> Path:
                                               extension_id=settings.get('extension_id'))
     plan = build_plan(signal=signal, settings=settings, mode=mode, quantity=quantity,
                       maker_price=maker_price, hedge_price=hedge_price, native_symbol=native_symbol,
-                      funding_interval_s=interval, fill_mode=getattr(args, "rust_fill_mode", None))
+                      funding_interval_s=interval, fill_mode=getattr(args, "rust_fill_mode", None), leverage=leverage)
     path = Path(getattr(args, "rust_plan", None) or project_root / f"rust/artifacts/{plan['run_id']}.json")
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("x", encoding="utf-8") as stream:
         json.dump(plan, stream, indent=2)
         stream.write("\n")
-    print(f"計劃已保存：{path}; maker_fill_mode={plan['maker_fill_mode']}; 接著執行 Rust 唯讀 preview。")
+    if not quiet:
+        print(f"計劃已保存：{path}; maker_fill_mode={plan['maker_fill_mode']}; 接著執行 Rust 唯讀 preview。")
     from hydra_basis.execution_engine.rust_place_order import run_native_preflight
-    await run_native_preflight(argparse.Namespace(rust_action="preview", rust_plan=str(path)))
+    await run_native_preflight(argparse.Namespace(rust_action="preview", rust_plan=str(path), rust_quiet=quiet))
     return path

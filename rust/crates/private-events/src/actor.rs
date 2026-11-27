@@ -45,6 +45,7 @@ enum Command {
         Option<account::Inventory>,
     ),
     AccountView,
+    PositionApply(account::Ticket, account::Snapshot, String),
     ExternalPending,
     Shutdown,
 }
@@ -70,6 +71,7 @@ struct Envelope {
 
 #[derive(Clone)]
 pub struct Coordinator {
+    position_symbol: Option<String>,
     transport: Arc<AtomicBool>,
     scope: Scope,
     tx: mpsc::Sender<Envelope>,
@@ -84,6 +86,7 @@ impl Drop for TransportLease {
 }
 
 pub struct Worker {
+    position_symbol: Option<String>,
     ledger: Ledger,
     rx: mpsc::Receiver<Envelope>,
     health: watch::Sender<Health>,
@@ -115,12 +118,14 @@ pub fn channel(scope: Scope, orders: usize, ingress: usize) -> Result<(Coordinat
     let (health, health_rx) = watch::channel(ledger.health());
     Ok((
         Coordinator {
+            position_symbol: None,
             transport: Arc::new(AtomicBool::new(false)),
             scope,
             tx,
             health: health_rx,
         },
         Worker {
+            position_symbol: None,
             ledger,
             rx,
             health,
@@ -133,6 +138,22 @@ pub fn channel(scope: Scope, orders: usize, ingress: usize) -> Result<(Coordinat
             account_report: None,
         },
     ))
+}
+
+/// Dedicated per-trade coordinator; unrelated account orders stay out of its ledger.
+pub fn position_channel(
+    scope: Scope,
+    symbol: &str,
+    orders: usize,
+    ingress: usize,
+) -> Result<(Coordinator, Worker)> {
+    if symbol.is_empty() || symbol.len() > 128 || symbol.chars().any(char::is_control) {
+        return Err(Error::InvalidInput);
+    }
+    let (mut c, mut w) = channel(scope, orders, ingress)?;
+    c.position_symbol = Some(symbol.into());
+    w.position_symbol = Some(symbol.into());
+    Ok((c, w))
 }
 
 impl Worker {
@@ -170,6 +191,13 @@ impl Worker {
         match event {
             hyperliquid::Event::Orders(orders) => {
                 for update in orders {
+                    if self
+                        .position_symbol
+                        .as_ref()
+                        .is_some_and(|s| s != &update.key.symbol)
+                    {
+                        continue;
+                    }
                     let key = update.key.clone();
                     let snapshot =
                         self.ledger
@@ -196,6 +224,13 @@ impl Worker {
             hyperliquid::Event::Fills { snapshot, fills } => {
                 report.snapshot = snapshot;
                 for fill in fills {
+                    if self
+                        .position_symbol
+                        .as_ref()
+                        .is_some_and(|s| s != &fill.key.symbol)
+                    {
+                        continue;
+                    }
                     let key = fill.key.clone();
                     if self.fills.insert(fill)? {
                         report.new_fills += 1;
@@ -421,6 +456,22 @@ impl Worker {
                     account_wide = false;
                     Ok(Reply::AccountReport(self.account_report.clone()))
                 }
+                Command::PositionApply(ticket, snapshot, symbol) => {
+                    let health = self.ledger.health();
+                    account::position_report(
+                        ticket,
+                        snapshot,
+                        symbol,
+                        self.ledger.scope(),
+                        health.instance,
+                        health.generation,
+                        self.account_revision,
+                    )
+                    .map(|report| {
+                        self.account_report = Some(report.clone());
+                        Reply::AccountReport(Some(report))
+                    })
+                }
                 Command::ExternalPending => {
                     account_wide = false;
                     Ok(Reply::Keys(self.external_pending.iter().cloned().collect()))
@@ -491,6 +542,23 @@ impl Coordinator {
     pub async fn account_report(&self) -> Result<Option<account::Report>> {
         match self.call(Command::AccountView).await? {
             Reply::AccountReport(r) => Ok(r),
+            _ => unreachable!(),
+        }
+    }
+    pub async fn apply_position_snapshot(
+        &self,
+        ticket: account::Ticket,
+        snapshot: account::Snapshot,
+        symbol: &str,
+    ) -> Result<account::Report> {
+        if self.position_symbol.as_deref() != Some(symbol) || snapshot.scope != self.scope {
+            return Err(Error::WrongSession);
+        }
+        match self
+            .call(Command::PositionApply(ticket, snapshot, symbol.into()))
+            .await?
+        {
+            Reply::AccountReport(Some(r)) => Ok(r),
             _ => unreachable!(),
         }
     }
@@ -688,6 +756,14 @@ impl Coordinator {
             return Err(Error::WrongSession);
         }
         match aster::decode_ws(raw) {
+            Ok(Some(update))
+                if self
+                    .position_symbol
+                    .as_ref()
+                    .is_some_and(|s| s != &update.key.symbol) =>
+            {
+                Ok(None)
+            }
             Ok(Some(update)) => self
                 .observe(update, Evidence::Ws(session), received_at)
                 .await

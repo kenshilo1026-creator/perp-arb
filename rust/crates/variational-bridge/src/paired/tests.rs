@@ -5,6 +5,31 @@ use perp_arb_core::{
 };
 use serde_json::json;
 #[test]
+fn leverage_policy_requires_explicit_open_and_preserves_legacy_recovery() {
+    for venue in ["aster", "hyperliquid", "lighter"] {
+        let mut p = plan(venue);
+        assert_eq!(p.leverage_for_submit().unwrap(), None); // Close.
+        p.maker.reduce_only = false;
+        p.hedge.reduce_only = false;
+        p.validate().unwrap(); // Legacy remains readable for recovery/audit.
+        assert!(p
+            .leverage_for_submit()
+            .unwrap_err()
+            .contains("prepare a new plan"));
+        p.hedge_leverage = Some(5);
+        assert_eq!(p.leverage_for_submit().unwrap(), Some(5));
+        let roundtrip: Plan = serde_json::from_value(serde_json::to_value(&p).unwrap()).unwrap();
+        assert_eq!(roundtrip.hedge_leverage, Some(5));
+        p.maker.reduce_only = true;
+        p.hedge.reduce_only = true;
+        assert_eq!(p.leverage_for_submit().unwrap(), None);
+        for invalid in [0, 126, u32::MAX] {
+            p.hedge_leverage = Some(invalid);
+            assert!(p.validate().is_err());
+        }
+    }
+}
+#[test]
 fn only_account_revision_errors_allow_a_bounded_audit_retry() {
     for e in ["WrongSession", "Coordination(WrongSession)"] {
         assert!(runtime::account_revision_race(e));
@@ -18,7 +43,7 @@ pub(crate) fn plan(venue: &str) -> Plan {
         "run_id":"request-1","extension_id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         "maker":{"request_id":"request-1","account":"0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","symbol":"ETH","side":"BUY","quantity":"2","limit_price":"100","reduce_only":true,"max_notional":"200"},
         "instrument":{"underlying":"ETH","instrument_type":"perpetual_future","settlement_asset":"USDC","funding_interval_s":3600},
-        "hedge":{"venue":venue,"network":"mainnet","account":"0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","symbol":if venue=="aster"{"ETHUSDT"}else{"ETH"},"side":"SELL","quantity":"2","limit_price":"99","tif":"ioc","reduce_only":true,"max_notional_usd":"200","wait_seconds":20},
+        "hedge":{"venue":venue,"network":"mainnet","account":if venue=="lighter"{"100"}else{"0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},"symbol":if venue=="aster"{"ETHUSDT"}else{"ETH"},"side":"SELL","quantity":"2","limit_price":"99","tif":"ioc","reduce_only":true,"max_notional_usd":"200","wait_seconds":20},
         "max_entry_gap":"0.0025","maker_wait_seconds":60,"recovery_seconds":15
     })).unwrap()
 }
@@ -27,6 +52,8 @@ pub(crate) fn resolved(venue: &str) -> Resolved {
     let maps = SymbolMappings::default();
     let metadata = if venue == "aster" {
         catalog::resolve_aster(&json!({"symbols":[{"symbol":"ETHUSDT","baseAsset":"ETH","quoteAsset":"USDT","marginAsset":"USDT","status":"TRADING","contractType":"PERPETUAL","filters":[{"filterType":"PRICE_FILTER","tickSize":"0.1","minPrice":"0","maxPrice":"100000"},{"filterType":"LOT_SIZE","minQty":"0.1","maxQty":"10000","stepSize":"0.1"},{"filterType":"MIN_NOTIONAL","notional":"10"}]}]}),"ETHUSDT",&maps).unwrap()
+    } else if venue == "lighter" {
+        perp_arb_market_data::lighter::parse_metadata(&json!({"code":200,"order_book_details":[{"symbol":"ETH","market_id":0,"market_type":"perp","status":"active","min_base_amount":"0.1","min_quote_amount":"10","supported_size_decimals":1,"supported_price_decimals":2}]}),"ETH").unwrap()
     } else {
         catalog::resolve_hyperliquid(
             &json!({"universe":[{"name":"ETH","szDecimals":1}]}),
@@ -48,6 +75,8 @@ pub(crate) fn resolved(venue: &str) -> Resolved {
             reduce_only: true,
             client_id: if venue == "aster" {
                 "pa-fixture"
+            } else if venue == "lighter" {
+                "123"
             } else {
                 "0x11111111111111111111111111111111"
             }
@@ -59,7 +88,7 @@ pub(crate) fn resolved(venue: &str) -> Resolved {
 }
 #[test]
 fn plan_rejects_wrong_side_size_reduce_only_network_and_duplicate_identity() {
-    for venue in ["aster", "hyperliquid"] {
+    for venue in ["aster", "hyperliquid", "lighter"] {
         plan(venue).validate().unwrap();
         assert_eq!(
             plan(venue).maker_fill_mode,
@@ -96,6 +125,34 @@ fn quote(bid: &str, size: &str) -> Quote {
         }]),
     )
     .unwrap()
+}
+#[test]
+fn aster_market_still_guards_maker_gap_but_reference_is_not_a_limit() {
+    use perp_arb_private_events::orders::TimeInForce;
+    let mut p = plan("aster");
+    p.hedge.tif = TimeInForce::Market;
+    p.hedge.limit_price = "100".into();
+    p.validate().unwrap();
+    assert!(p.entry_ok(&quote("99.9", "2")).unwrap());
+    assert!(!p.entry_ok(&quote("99.7", "2")).unwrap());
+    assert!(!p.entry_ok(&quote("100", "1")).unwrap());
+    let mut r = resolved("aster");
+    r.order.tif = TimeInForce::Market;
+    assert!(r.hedge_limits().is_err()); // No guessed market lot rule.
+    r.metadata.market = Some(
+        perp_arb_core::instruments::Instrument::new(
+            perp_arb_core::instruments::PriceRule::Tick(decimal("0.1").unwrap()),
+            decimal("0.5").unwrap(),
+            decimal("0.5").unwrap(),
+            None,
+            None,
+        )
+        .unwrap(),
+    );
+    assert_eq!(p.execution_plan(&r).unwrap().step, decimal("0.5").unwrap());
+    let mut other = plan("hyperliquid");
+    other.hedge.tif = TimeInForce::Market;
+    assert!(other.validate().is_err());
 }
 #[test]
 fn exact_gap_boundary_depth_and_ioc_limit_are_checked_before_maker() {

@@ -353,7 +353,7 @@ impl Bridge {
                 response,
             })
             .map_err(|_| "extension command busy")?;
-        tokio::time::timeout(Duration::from_secs(22), reply)
+        tokio::time::timeout(Duration::from_secs(67), reply)
             .await
             .map_err(|_| "read request timeout")?
             .map_err(|_| "extension disconnected during read")?
@@ -389,6 +389,32 @@ impl Bridge {
             .await?;
         let receipt = crate::native::Receipt::parse(&value, Some(&account), wire::now_ms()?)?;
         crate::inventory::Query::new(receipt, started)
+    }
+    /// Populate the same Limit/Mid/quantity UI as Python, without clicking Submit.
+    pub async fn prepare_maker_ui(
+        &self,
+        command: &perp_arb_execution::durable::browser::Command,
+        instrument: &crate::native::Instrument,
+    ) -> Result<String> {
+        instrument.validate(&command.symbol)?;
+        let message = json!({"type":"NATIVE_ORDER_REQUEST","protocol":crate::native::PROTOCOL,
+            "requestId":format!("{}-prepare",command.request_id),"dispatchRequestId":command.request_id,
+            "action":"prepare_ui","transport":"ui","account":command.account,
+            "order":{"instrument":instrument,"side":command.side.to_ascii_lowercase(),
+                "qty":command.quantity,"is_reduce_only":command.reduce_only}});
+        let value = self.exchange(message, "NATIVE_ORDER_RESULT").await?;
+        let receipt =
+            crate::native::Receipt::parse(&value, Some(&command.account), wire::now_ms()?)?;
+        if receipt.dispatched || value["prepare_id"] != command.request_id {
+            return Err("UI prepare identity mismatch".into());
+        }
+        let price = value["price"].as_str().ok_or("UI prepared price missing")?;
+        if perp_arb_core::decimal(price).map_err(|_| "invalid UI price")?
+            <= perp_arb_core::Decimal::ZERO
+        {
+            return Err("invalid UI price".into());
+        }
+        Ok(price.into())
     }
     pub async fn recover_native(
         &self,
@@ -432,7 +458,7 @@ impl Bridge {
             }
         }
         let message = json!({"type":"NATIVE_ORDER_REQUEST","protocol":crate::native::PROTOCOL,
-            "requestId":command.request_id,"action":"submit","account":account,
+            "requestId":command.request_id,"action":"submit","transport":"ui","account":account,
             "order":{"instrument":instrument,"order_type":"limit","qty":command.quantity,
                 "side":command.side.to_ascii_lowercase(),"limit_price":command.limit_price,
                 "is_reduce_only":command.reduce_only,"is_auto_resize":false,"use_mark_price":false,"slippage_limit":"0"}});
@@ -463,7 +489,8 @@ impl Bridge {
             .map_err(|_| "request sequence exhausted")?;
         let message = json!({"type":"NATIVE_ORDER_REQUEST","protocol":crate::native::PROTOCOL,
             "requestId":format!("rust-cancel-{}-{sequence}",self.instance),"action":"cancel",
-            "account":account,"order_id":permit.order_id()});
+            "account":account,"order_id":permit.order_id(),"transport":"ui",
+            "order":{"instrument":{"underlying":permit.command().symbol},"side":permit.command().side.to_ascii_lowercase(),"qty":permit.command().quantity}});
         let value = self.exchange(message, "NATIVE_ORDER_RESULT").await?;
         let receipt = crate::native::Receipt::parse(&value, Some(&account), wire::now_ms()?)?;
         if !receipt.dispatched
@@ -642,7 +669,9 @@ async fn command_connection(
     }
     shared.health.send_modify(|h| {
         h.native_protocol = value["nativeProtocol"] == crate::native::PROTOCOL;
-        h.native_trading_enabled = h.native_protocol && value["nativeTradingEnabled"] == true;
+        h.native_trading_enabled = h.native_protocol
+            && value["nativeTradingEnabled"] == true
+            && value["nativeMutationTransport"] == "ui";
     });
     socket
         .send(Message::Text(
@@ -664,7 +693,7 @@ async fn command_connection(
             command=commands.recv()=>{
                 let Some(command) = command else { return Ok(()); };
                 if command.response.is_closed() { continue; }
-                let result = tokio::time::timeout(Duration::from_secs(20), exchange_read(&mut socket, &command)).await
+                let result = tokio::time::timeout(Duration::from_secs(if command.message["transport"] == "ui" { 65 } else { 20 }), exchange_read(&mut socket, &command)).await
                     .map_err(|_| "extension read timeout".to_owned()).and_then(|r| r);
                 let failed = result.is_err();
                 let _ = command.response.send(result);
@@ -725,7 +754,14 @@ async fn exchange_read(
                         let http = code
                             .strip_prefix("native_http_")
                             .is_some_and(|s| s.len() == 3 && s.bytes().all(|b| b.is_ascii_digit()));
-                        if known.contains(&code) || http {
+                        if known.contains(&code)
+                            || http
+                            || (code.starts_with("native_ui_")
+                                && code.len() <= 80
+                                && code.bytes().all(|b| {
+                                    b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_'
+                                }))
+                        {
                             return Err(format!(
                                 "native command failed: {code}; no automatic retry"
                             ));

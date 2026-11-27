@@ -51,3 +51,25 @@ pub async fn run(config: Config, symbol: &str) -> Result<Value> {
     let _ = drain.await;
     result
 }
+
+/// Read-only acceptance probe: populate the ticket, never send a dispatch permit.
+pub async fn prepare_ticket(plan: &crate::paired::Plan) -> Result<Value> {
+    let _lock = perp_arb_order_test::AccountLock::global_execution()?;
+    let (bridge, mut events) = Bridge::bind(Config::new(plan.extension_id.clone())).await?;
+    let drain = tokio::spawn(async move { while events.recv().await.is_some() {} });
+    let result = async {
+        request(&bridge, &plan.maker.symbol, Duration::from_secs(30)).await?;
+        let price = bridge
+            .prepare_maker_ui(&plan.maker, &plan.instrument)
+            .await?;
+        Ok(
+            json!({"mode":"ui-prepare","symbol":plan.maker.symbol,"side":plan.maker.side,
+            "quantity":plan.maker.quantity,"price":price,"can_submit_orders":false}),
+        )
+    }
+    .await;
+    bridge.shutdown().await;
+    drain.abort();
+    let _ = drain.await;
+    result
+}

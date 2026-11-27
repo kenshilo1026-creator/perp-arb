@@ -74,7 +74,7 @@ test('exact RFQ lookup never falls back to matching symbol', async () => {
 });
 test('wrong account stops before querying or submitting', async () => {
   const calls = mock(normal);
-  const r = await run({ protocol, action: 'submit', account: other, order: {} });
+  const r = await run({ protocol, action: 'lookup', account: other, order_id: 'rfq-1' });
   assert.equal(r.error, 'native_account_mismatch'); assert.equal(r.dispatched, false); assert.equal(calls.length, 1);
 });
 test('session change rejects evidence after the query', async () => {
@@ -132,27 +132,15 @@ test('inventory rejects ignored pending filter and duplicate order pages', async
   mock(path => path.startsWith('/api/orders') ? [{...order,status:'pending'},{...order,status:'pending'}] : inventoryResponse(path));
   assert.equal((await run({protocol,action:'inventory',account})).error,'native_inventory_incomplete');
 });
-test('a single POST keeps reduce-only and real RFQ ack separate from fills', async () => {
-  const calls = mock(path => path === '/api/orders/new/limit' ? { rfq_id: 'real-rfq', token: 'NEVER_EXPORT' } : normal(path));
-  const r = await run({ protocol, action: 'submit', account, order: payload });
-  assert.equal(r.ok, true); assert.equal(r.rfq_id, 'real-rfq'); assert.equal(r.dispatched, true);
-  const posts = calls.filter(c => c.options.method === 'POST'); assert.equal(posts.length, 1);
-  assert.equal(JSON.parse(posts[0].options.body).is_reduce_only, true);
-  assert.equal(r.trades, undefined); assert.ok(!JSON.stringify(r).includes('NEVER_EXPORT'));
-});
-test('network uncertainty after POST is never retried', async () => {
-  const calls = mock(path => { if (path === '/api/orders/new/limit') throw new Error('SECRET'); return normal(path); });
-  const r = await run({ protocol, action: 'submit', account, order: payload });
-  assert.equal(r.ok, false); assert.equal(r.dispatched, true); assert.equal(r.error, 'native_request_failed');
-  assert.equal(calls.filter(c => c.options.method === 'POST').length, 1);
-});
-test('unknown instrument, numeric quantity and resize are rejected before POST', async () => {
-  for (const change of [{ qty: 1 }, { is_auto_resize: true }, { instrument: { ...instrument, instrument_type: 'swap' } }]) {
-    const calls = mock(normal);
-    const r = await run({ protocol, action: 'submit', account, order: { ...payload, ...change } });
-    assert.equal(r.ok, false); assert.equal(r.dispatched, false); assert.equal(calls.length, 1);
+test('direct HTTP submit and cancel are disabled even with valid order parameters', async () => {
+  for (const action of ['submit','cancel']) {
+    const calls=mock(normal);
+    const result=await run({protocol,action,account,order:payload,order_id:'rfq-1'});
+    assert.equal(result.ok,false); assert.equal(result.error,'native_ui_required');
+    assert.equal(result.dispatched,false); assert.equal(calls.length,0);
   }
 });
+
 test('persistent duplicate barrier survives new owner, storage failure blocks dispatch', async () => {
   let data = {};
   const storage = { get: async () => data, set: async value => { data = value; } };
@@ -172,13 +160,6 @@ test('lost reply recovers the exact saved RFQ receipt without another HTTP call'
   await assert.rejects(reserve(storage, 'request-saved'), /duplicate/);
   await assert.rejects(save(storage, command, {}), /already_saved/);
 });
-test('cancel ack only carries exact RFQ and cannot prove terminal', async () => {
-  const calls = mock(path => path === '/api/orders/cancel' ? {} : normal(path));
-  const r = await run({ protocol, action: 'cancel', account, order_id: 'rfq-1' });
-  assert.equal(r.ok, true); assert.equal(r.terminal_proven, false);
-  assert.deepEqual(JSON.parse(calls.find(c => c.options.method === 'POST').options.body), { rfq_id: 'rfq-1' });
-});
-
 const background = await readFile(new URL('../browser_extensions/variational/background.js', import.meta.url), 'utf8');
 function ownerHarness(inject) {
   const updates = new Set(); const sent = []; let reloads = 0;
@@ -194,7 +175,7 @@ function ownerHarness(inject) {
         reload: (_id, _options, cb) => { reloads++; cb(); } }
     }
   });
-  vm.runInContext(background.replace(/^import[^\n]+\n/, '') + `
+  vm.runInContext(background.replace(/^import[^\n]+\n/gm, '') + `
     state.active = true; state.attachedTabId = 1;
     commandClient.send = value => globalThis.sent.push(value);
     globalThis.api = { command: handleCommandMessage, reload: autoReloadAttachedTab };

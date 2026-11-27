@@ -60,6 +60,7 @@ struct Worker {
 /// processes or independently constructed hubs. Max 32 native markets/venue.
 #[derive(Default)]
 pub struct MarketHub {
+    lighter_workers: Vec<JoinHandle<()>>,
     entries: HashMap<MarketKey, Entry>,
     workers: HashMap<Venue, Worker>,
     next_id: u64,
@@ -83,9 +84,42 @@ impl MarketHub {
         Ok(())
     }
     pub async fn subscribe(&mut self, key: MarketKey) -> Result<Subscription, String> {
+        if key.venue() == Venue::Lighter {
+            self.entries.retain(|_, e| e.tx.receiver_count() > 0);
+            if let Some(entry) = self.entries.get(&key) {
+                return Ok(Subscription {
+                    key,
+                    rx: entry.tx.subscribe(),
+                });
+            }
+            if self
+                .entries
+                .keys()
+                .filter(|k| k.venue() == Venue::Lighter)
+                .count()
+                >= 32
+            {
+                return Err("32 markets per venue limit reached".into());
+            }
+            let spec = crate::lighter::resolve(key.symbol()).await?;
+            let (tx, rx) = watch::channel(Arc::new(View::default()));
+            self.lighter_workers.retain(|t| !t.is_finished());
+            self.lighter_workers
+                .push(tokio::spawn(crate::lighter::stream(spec, tx.clone())));
+            self.next_id += 1;
+            self.entries.insert(
+                key.clone(),
+                Entry {
+                    id: self.next_id,
+                    tx,
+                },
+            );
+            return Ok(Subscription { key, rx });
+        }
         let url = match key.venue() {
             Venue::Aster => "wss://fstream.asterdex.com/ws",
             Venue::Hyperliquid => "wss://api.hyperliquid.xyz/ws",
+            _ => unreachable!(),
         };
         self.subscribe_at(key, url.into(), Timing::default()).await
     }
@@ -178,6 +212,10 @@ impl MarketHub {
             .unwrap_or_default()
     }
     pub async fn shutdown(mut self) -> Result<(), String> {
+        for task in self.lighter_workers.drain(..) {
+            task.abort();
+            let _ = task.await;
+        }
         for worker in self.workers.values() {
             let _ = worker.stop.send(true);
         }
@@ -188,6 +226,17 @@ impl MarketHub {
             }
         }
         error.map_or(Ok(()), Err)
+    }
+}
+
+impl Drop for MarketHub {
+    fn drop(&mut self) {
+        for task in &self.lighter_workers {
+            task.abort();
+        }
+        for worker in self.workers.values() {
+            let _ = worker.stop.send(true);
+        }
     }
 }
 

@@ -517,6 +517,7 @@ impl MetadataCache {
     ) -> Result<(u64, ResolvedInstrument)> {
         let snapshot = self.current()?;
         let instrument = match self.0.source.venue() {
+            Venue::Lighter => crate::lighter::parse_metadata(&snapshot.payload, symbol),
             Venue::Aster => resolve_aster(&snapshot.payload, symbol, maps),
             Venue::Hyperliquid => resolve_hyperliquid(&snapshot.payload, symbol, maps),
         }

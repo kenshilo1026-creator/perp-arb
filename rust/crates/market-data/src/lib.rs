@@ -3,6 +3,7 @@
 
 pub mod catalog;
 pub mod hub;
+pub mod lighter;
 pub mod metadata;
 pub mod recorder;
 pub mod shared;
@@ -22,10 +23,30 @@ use serde_json::{json, Value};
 pub enum Venue {
     Aster,
     Hyperliquid,
+    Lighter,
 }
 
 impl Venue {
+    pub fn from_name(name: &str) -> Result<Self, String> {
+        match name {
+            "aster" => Ok(Self::Aster),
+            "hyperliquid" => Ok(Self::Hyperliquid),
+            "lighter" => Ok(Self::Lighter),
+            _ => Err("unsupported execution venue".into()),
+        }
+    }
     pub fn endpoint(self, symbol: &str) -> Result<String, String> {
+        if self == Self::Lighter {
+            if symbol.is_empty()
+                || symbol.len() > 80
+                || !symbol
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b"_.-".contains(&b))
+            {
+                return Err("invalid native symbol".into());
+            }
+            return Ok(lighter::WS.into());
+        }
         if symbol.is_empty()
             || symbol.len() > 80
             || !symbol
@@ -40,6 +61,7 @@ impl Venue {
                 aster_stream_symbol(symbol)
             ),
             Self::Hyperliquid => "wss://api.hyperliquid.xyz/ws".into(),
+            _ => unreachable!(),
         })
     }
     pub fn subscription(self, symbol: &str) -> Option<Value> {
@@ -165,6 +187,7 @@ fn parse_depth_value(
     received_ms: i64,
 ) -> Result<Option<Snapshot>, String> {
     let (symbol, source, sequence, bids, asks) = match venue {
+        Venue::Lighter => return Err("Lighter requires its stateful nonce-checked book".into()),
         Venue::Aster => {
             let data = if let Some(stream) = payload.get("stream") {
                 let expected_stream = format!("{}@depth10@100ms", expected.to_ascii_lowercase());

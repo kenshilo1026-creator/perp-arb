@@ -35,6 +35,18 @@ pub struct Inventory {
     pub open_orders: BTreeMap<OrderKey, OpenOrder>,
 }
 impl Inventory {
+    /// Python-compatible trade scope: selected perpetual position only.
+    pub fn for_position(mut self, symbol: &str) -> Result<Self> {
+        id(symbol)?;
+        self.positions.retain(|k, _| k.symbol == symbol);
+        self.wallets.clear();
+        self.balances.clear();
+        self.open_orders.clear();
+        self.includes_wallets = false;
+        self.includes_spot = false;
+        self.validate()?;
+        Ok(self)
+    }
     pub fn validate(&self) -> Result<()> {
         if self.perp_dexes.is_empty()
             || self.perp_dexes.len() > 32
@@ -120,6 +132,8 @@ pub struct Ticket {
 }
 #[derive(Debug, Clone)]
 pub struct Report {
+    /// A position read is not a full-account reconciliation against a ledger.
+    pub position_only: Option<String>,
     pub instance: u64,
     pub scope: Scope,
     pub generation: u64,
@@ -155,11 +169,11 @@ impl Report {
         max_age: Duration,
     ) -> bool {
         health.ready_for_new_risk()
-            && self.matches_expected()
+            && (self.position_only.is_some() || self.matches_expected())
             && &self.scope == scope
             && self.instance == health.instance
             && self.generation == health.generation
-            && self.revision == health.account_revision
+            && (self.position_only.is_some() || self.revision == health.account_revision)
             && now
                 .checked_duration_since(self.observed_at)
                 .is_some_and(|age| age <= max_age)
@@ -197,6 +211,7 @@ pub(crate) fn reconcile(
         return Err(Error::WrongSession);
     }
     let mut report = Report {
+        position_only: None,
         scope: scope.clone(),
         instance,
         generation,
@@ -223,6 +238,26 @@ pub(crate) fn reconcile(
         report.order_differences =
             differences(&expected.open_orders, &report.inventory.open_orders);
     }
+    Ok(report)
+}
+
+/// Position snapshots use the transport generation/freshness fence. Other
+/// symbols' trades/funding do not invalidate a read of this position.
+pub(crate) fn position_report(
+    mut ticket: Ticket,
+    mut snapshot: Snapshot,
+    symbol: String,
+    scope: &Scope,
+    instance: u64,
+    generation: u64,
+    revision: u64,
+) -> Result<Report> {
+    snapshot.inventory = snapshot.inventory.for_position(&symbol)?;
+    ticket.revision = revision;
+    let mut report = reconcile(
+        ticket, snapshot, None, scope, instance, generation, revision,
+    )?;
+    report.position_only = Some(symbol);
     Ok(report)
 }
 fn id(s: &str) -> Result<()> {
@@ -338,6 +373,29 @@ pub fn aster_with_balances(
     }
     inv.validate()?;
     Ok(inv)
+}
+pub fn hyperliquid_position(state: &Value, symbol: &str) -> Result<Inventory> {
+    let mut inv = Inventory {
+        perp_dexes: BTreeSet::from([String::new()]),
+        ..Inventory::default()
+    };
+    let mut seen = BTreeSet::new();
+    for item in array(state.get("assetPositions").ok_or(Error::InvalidInput)?)? {
+        let p = item.get("position").ok_or(Error::InvalidInput)?;
+        if text(p, "coin")? != symbol {
+            continue;
+        }
+        insert_position(
+            &mut inv,
+            &mut seen,
+            PositionKey {
+                symbol: symbol.into(),
+                side: "BOTH".into(),
+            },
+            qty(p, "szi")?,
+        )?;
+    }
+    inv.for_position(symbol)
 }
 /// Caller fetches every explicitly requested dex; missing coverage is an error.
 pub fn hyperliquid(perps: &[(String, Value, Value)], spot: Option<&Value>) -> Result<Inventory> {

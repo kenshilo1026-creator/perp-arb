@@ -99,6 +99,25 @@ pub struct ResolvedInstrument {
     units: Option<Units>,
 }
 impl ResolvedInstrument {
+    pub fn external(
+        key: MarketKey,
+        base: String,
+        quote: String,
+        asset_id: Option<usize>,
+        limit: Instrument,
+    ) -> Self {
+        Self {
+            key,
+            native_base: base.clone(),
+            canonical_base: base,
+            quote: quote.clone(),
+            settlement: quote,
+            asset_id,
+            market: Some(limit.clone()),
+            limit,
+            units: Some(Units::new(Decimal::ONE).expect("one unit")),
+        }
+    }
     pub fn units(&self) -> Option<Units> {
         self.units
     }

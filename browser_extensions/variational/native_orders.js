@@ -18,12 +18,11 @@ export async function executeNativeOrderRequest(command) {
     await new Promise((resolve) => setTimeout(resolve, Math.max(0, 500 - (Date.now() - lastRequest))));
     if (controller.signal.aborted) throw new Error("native_deadline");
     lastRequest = Date.now();
-    if (body !== undefined) dispatched = true;
+    if (body !== undefined) throw new Error("native_ui_required");
     const response = await fetch(`/api${path}`, {
-      method: body === undefined ? "GET" : "POST", credentials: "include",
+      method: "GET", credentials: "include",
       cache: "no-store", redirect: "error", signal: controller.signal,
-      headers: { "content-type": "application/json", ...(account ? { "vr-connected-address": account } : {}) },
-      ...(body === undefined ? {} : { body: JSON.stringify(body) })
+      headers: { "content-type": "application/json", ...(account ? { "vr-connected-address": account } : {}) }
     });
     if (!response.ok) throw new Error(`native_http_${response.status}`);
     if (!(response.headers.get("content-type") || "").includes("application/json")) throw new Error("native_non_json");
@@ -125,7 +124,8 @@ export async function executeNativeOrderRequest(command) {
   try {
     if (location.origin !== "https://omni.variational.io" || command.protocol !== protocol) throw new Error("native_origin_or_protocol");
     if (command.account !== undefined && !address(command.account)) throw new Error("native_invalid_account");
-    if (!["identity", "inventory", "preflight", "lookup", "submit", "cancel"].includes(command.action)) throw new Error("native_invalid_action");
+    if (["submit", "cancel"].includes(command.action)) throw new Error("native_ui_required");
+    if (!["identity", "inventory", "preflight", "lookup"].includes(command.action)) throw new Error("native_invalid_action");
     if (command.action !== "preflight" && !address(command.account)) throw new Error("native_expected_account_required");
     if (["lookup", "cancel"].includes(command.action) && !validId(command.order_id)) throw new Error("native_exact_rfq_required");
     output.account = await accountIdentity();
@@ -135,27 +135,6 @@ export async function executeNativeOrderRequest(command) {
       output.inventory = { rounds: [await inventoryRound(), await inventoryRound()] };
     } else if (command.action === "identity") {
       output.source = "https://omni.variational.io/api/me";
-    } else if (command.action === "submit") {
-      const p = command.order;
-      if (!p || !decimal(p.qty) || !decimal(p.limit_price) || !["buy", "sell"].includes(p.side)
-          || typeof p.is_reduce_only !== "boolean" || p.order_type !== "limit" || p.use_mark_price !== false
-          || p.is_auto_resize !== false || p.slippage_limit !== "0"
-          || !/^[A-Z0-9]{1,32}$/.test(p.instrument?.underlying)
-          || p.instrument.instrument_type !== "perpetual_future" || p.instrument.settlement_asset !== "USDC"
-          || !Number.isSafeInteger(p.instrument.funding_interval_s) || p.instrument.funding_interval_s <= 0) throw new Error("native_invalid_order");
-      // All fields projected explicitly: no trigger/bracket/resize injection.
-      const body = { order_type: "limit", instrument: Object.fromEntries(instrumentFields.map(k => [k, p.instrument[k]])),
-        qty: p.qty, side: p.side, limit_price: p.limit_price, is_reduce_only: p.is_reduce_only,
-        is_auto_resize: false, use_mark_price: false, slippage_limit: "0" };
-      const ack = await request("/orders/new/limit", body, output.account);
-      if (!validId(ack?.rfq_id)) throw new Error("native_rfq_ack_missing");
-      output.rfq_id = ack.rfq_id;
-      output.source = "https://omni.variational.io/api/orders/new/limit";
-    } else if (command.action === "cancel") {
-      await request("/orders/cancel", { rfq_id: command.order_id }, output.account);
-      output.rfq_id = command.order_id;
-      output.source = "https://omni.variational.io/api/orders/cancel";
-      output.terminal_proven = false;
     } else {
       output.orders = await pages("/orders/v2", orderFields, "rfq_id", "rfq_id");
       output.trades = await pages("/trades", tradeFields, "id", "source_rfq");

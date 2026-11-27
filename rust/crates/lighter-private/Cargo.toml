@@ -1,0 +1,17 @@
+[package]
+name = "perp-arb-lighter-private"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+[dependencies]
+perp-arb-core = { path = "../core" }
+perp-arb-market-data = { path = "../market-data" }
+perp-arb-private-events = { path = "../private-events" }
+serde_json.workspace = true
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "net"] }
+reqwest = { version = "0.12.28", default-features = false, features = ["rustls-tls", "json", "multipart"] }
+tokio-tungstenite = { version = "0.30", features = ["rustls-tls-webpki-roots"] }
+futures-util = { version = "0.3", features = ["sink"] }
+libloading = "0.8"
+sha2 = "0.10"
+zeroize = "1"

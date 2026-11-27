@@ -37,6 +37,45 @@ pub struct TradingClient {
     credentials: crate::signing::Credentials,
 }
 impl TradingClient {
+    pub async fn configure_isolated(
+        &self,
+        order: &perp_arb_private_events::orders::Order,
+        leverage: u32,
+    ) -> Result<()> {
+        order.validate()?;
+        if order.venue != "hyperliquid"
+            || order.request()?.scope != self.client.scope()
+            || order.network != self.client.network()
+            || !(1..=125).contains(&leverage)
+        {
+            return Err(Error::Configuration);
+        }
+        timeout(Duration::from_secs(30), async {
+            let _gate = self.client.0.gate.lock().await;
+            self.client.reserve(1).await;
+            let body = self.credentials.isolated_leverage(
+                order.asset.ok_or(Error::Configuration)?,
+                leverage,
+                order.network,
+            )?;
+            let url = self
+                .client
+                .0
+                .info
+                .strip_suffix("/info")
+                .ok_or(Error::Configuration)?
+                .to_owned()
+                + "/exchange";
+            let raw = self.client.response_at(&url, body, 65536).await?;
+            let v: serde_json::Value = serde_json::from_str(&raw).map_err(|_| Error::Protocol)?;
+            if v["status"] != "ok" || v["response"]["type"] != "default" {
+                return Err(Error::Protocol);
+            }
+            Ok(())
+        })
+        .await
+        .map_err(|_| Error::Timeout)?
+    }
     async fn exchange(
         &self,
         order: &perp_arb_private_events::orders::Order,
@@ -400,6 +439,41 @@ impl Client {
         Ok((account::hyperliquid(&perps, balances.as_ref())?, watermark))
     }
     /// Two equal inventories plus a WS revision fence. Not an atomic exchange snapshot.
+    pub async fn check_position(&self, c: &Coordinator, symbol: &str) -> Result<account::Report> {
+        if c.scope() != &self.scope() {
+            return Err(Error::Configuration);
+        }
+        let (ticket, snapshot) = timeout(Duration::from_secs(30), async {
+            let _gate = self.0.gate.lock().await;
+            let ticket = c.begin_account_query().await?;
+            let started_at = std::time::Instant::now();
+            self.reserve(2).await;
+            let state: serde_json::Value = serde_json::from_str(
+                &self
+                    .response(
+                        json!({"type":"clearinghouseState","user":self.0.user,"dex":""}),
+                        2 * 1024 * 1024,
+                    )
+                    .await?,
+            )
+            .map_err(|_| Error::Protocol)?;
+            let time = state["time"].as_u64().ok_or(Error::Protocol)?;
+            let inventory = account::hyperliquid_position(&state, symbol)?;
+            Ok::<_, Error>((
+                ticket,
+                account::Snapshot {
+                    scope: self.scope(),
+                    inventory,
+                    started_at,
+                    completed_at: std::time::Instant::now(),
+                    exchange_time_ms: Some(time),
+                },
+            ))
+        })
+        .await
+        .map_err(|_| Error::Timeout)??;
+        Ok(c.apply_position_snapshot(ticket, snapshot, symbol).await?)
+    }
     /// Expected inventory must come from an independent ledger, not this response.
     pub async fn audit_account(
         &self,

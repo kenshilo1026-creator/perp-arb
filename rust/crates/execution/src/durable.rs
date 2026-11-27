@@ -507,6 +507,10 @@ impl State {
             .map(|b| format!("{b:02x}"))
             .collect::<String>();
         match self.engine.plan.hedge.scope.venue.as_str() {
+            "lighter" => Ok(u64::from_str_radix(&hex[..12], 16)
+                .map_err(|_| JournalError::Identity)?
+                .max(1)
+                .to_string()),
             "aster" => Ok(format!("pa{hex}")),
             "hyperliquid" => Ok(format!("0x{hex}")),
             _ => Err(JournalError::Identity),
@@ -655,7 +659,7 @@ impl DurableEngine {
         }
         if !matches!(
             engine.plan.hedge.scope.venue.as_str(),
-            "aster" | "hyperliquid"
+            "aster" | "hyperliquid" | "lighter"
         ) {
             return Err(JournalError::Identity);
         }

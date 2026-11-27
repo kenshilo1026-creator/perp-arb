@@ -123,6 +123,9 @@ impl Instrument {
     pub fn max_size(&self) -> Option<Decimal> {
         self.max_size
     }
+    pub fn price_bounds(&self) -> (Option<Decimal>, Option<Decimal>) {
+        (self.min_price, self.max_price)
+    }
     /// May return zero for a sub-lot request. Never silently increase quantity.
     pub fn round_quantity(&self, quantity: Decimal) -> Result<Decimal> {
         if quantity < Decimal::ZERO {

@@ -584,6 +584,7 @@ fn eligible(
         return false;
     };
     let resolved = match key.venue() {
+        Venue::Lighter => crate::lighter::parse_metadata(payload, key.symbol()),
         Venue::Aster => resolve_aster(payload, key.symbol(), maps),
         Venue::Hyperliquid => resolve_hyperliquid(payload, key.symbol(), maps),
     };

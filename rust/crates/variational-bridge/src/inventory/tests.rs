@@ -13,6 +13,69 @@ fn receipt() -> Value {
 fn query(r: Value) -> Result<Query> {
     Query::new(Receipt::parse(&r, Some(ACCOUNT), 12000)?, Instant::now())
 }
+
+#[tokio::test]
+async fn selected_symbol_ignores_other_positions_wallets_and_orders_but_keeps_session_fence() {
+    let mut feed = crate::account_feed::Feed::start_symbol(ACCOUNT, "ETH").unwrap();
+    feed.ingest(&event(Observation::Connected, 1))
+        .await
+        .unwrap();
+    let c = feed.coordinator();
+    let mut r = receipt();
+    for (index, round) in r["inventory"]["rounds"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .enumerate()
+    {
+        let mut other = round["positions"][0].clone();
+        other["instrument"]["underlying"] = json!("BTC");
+        other["qty"] = json!(if index == 0 { "3" } else { "4" });
+        round["positions"].as_array_mut().unwrap().push(other);
+        round["portfolio"]["balance"] = json!(if index == 0 { "500" } else { "501" });
+        round["orders"]["rows"] = json!([{"instrument":round["positions"][1]["instrument"].clone(),"status":"pending","rfq_id":"manual"}]);
+    }
+    let ticket = c.begin_account_query().await.unwrap();
+    let report = query(r)
+        .unwrap()
+        .reconcile_symbol(&c, ticket, "ETH")
+        .await
+        .unwrap();
+    assert_eq!(report.inventory().positions.len(), 1);
+    assert!(report.inventory().wallets.is_empty());
+    assert!(report.inventory().open_orders.is_empty());
+    assert!(!report.matches_expected()); // It does not pretend to be a whole-account audit.
+    feed.ingest(&event(
+        Observation::Unclassified {
+            keys: vec!["funding".into()],
+        },
+        1,
+    ))
+    .await
+    .unwrap();
+    assert!(report.usable(
+        c.scope(),
+        &c.health(),
+        Instant::now(),
+        Duration::from_secs(30)
+    ));
+    assert!(!report.usable(
+        c.scope(),
+        &c.health(),
+        Instant::now() + Duration::from_secs(31),
+        Duration::from_secs(30)
+    ));
+    feed.ingest(&event(Observation::Disconnected, 1))
+        .await
+        .unwrap();
+    assert!(!report.usable(
+        c.scope(),
+        &c.health(),
+        Instant::now(),
+        Duration::from_secs(30)
+    ));
+    feed.shutdown().await.unwrap();
+}
 fn expected() -> Inventory {
     let mut inv = Inventory {
         perp_dexes: BTreeSet::from([String::new()]),
@@ -35,6 +98,129 @@ fn stable_inventory_includes_signed_positions_and_wallets() {
         query(receipt()).unwrap().snapshot().unwrap().inventory,
         expected()
     );
+}
+#[tokio::test]
+async fn slow_hedge_audit_does_not_age_completed_browser_query_before_reconcile() {
+    let mut feed = crate::account_feed::Feed::start_positions_only(ACCOUNT).unwrap();
+    feed.ingest(&event(Observation::Connected, 1))
+        .await
+        .unwrap();
+    let c = feed.coordinator();
+    let ticket = c.begin_account_query().await.unwrap();
+    let q = query(receipt()).unwrap();
+    let hedge = async {
+        // Longer than the browser observation's five-second consumption limit.
+        tokio::time::sleep(Duration::from_millis(5100)).await;
+        Err("hedge audit failed independently".into())
+    };
+    let (maker_result, hedge_result) = crate::paired::runtime::reconcile_audits(
+        async { Ok(q) },
+        hedge,
+        &c,
+        ticket,
+        Some(expected()),
+    )
+    .await;
+    assert!(maker_result.unwrap().matches_expected());
+    assert_eq!(
+        hedge_result.unwrap_err(),
+        "hedge audit failed independently"
+    );
+    feed.shutdown().await.unwrap();
+}
+
+#[test]
+fn genuinely_stale_inventory_is_still_rejected() {
+    let mut q = query(receipt()).unwrap();
+    q.completed = Instant::now() - Duration::from_secs(6);
+    assert_eq!(
+        q.snapshot_with_wallets(false).unwrap_err(),
+        "inventory observation stale"
+    );
+}
+#[test]
+fn execution_excludes_balance_changes_but_keeps_position_and_source_checks() {
+    let mut r = receipt();
+    r["inventory"]["rounds"][1]["portfolio"]["balance"] = json!("500.10");
+    r["inventory"]["rounds"][1]["portfolio"]["cross_balance"] = json!("500.10");
+    assert!(query(r.clone()).unwrap().snapshot().is_err());
+    let snapshot = query(r.clone())
+        .unwrap()
+        .snapshot_with_wallets(false)
+        .unwrap();
+    assert!(!snapshot.inventory.includes_wallets);
+    assert!(snapshot.inventory.wallets.is_empty());
+    assert_eq!(snapshot.inventory.positions, expected().positions);
+    for change in 0..4 {
+        let mut bad = r.clone();
+        let round = &mut bad["inventory"]["rounds"][1];
+        match change {
+            0 => round["positions"][0]["qty"] = json!("-3"),
+            1 => round["positions"][0]["avg_entry_price"] = json!("101"),
+            2 => round["orders"]["window_complete"] = json!(false),
+            _ => round["portfolio_server_ms"] = json!(0),
+        }
+        assert!(query(bad)
+            .and_then(|q| q.snapshot_with_wallets(false))
+            .is_err());
+    }
+}
+
+#[tokio::test]
+async fn execution_balance_ws_changes_do_not_invalidate_positions_report() {
+    let mut feed = crate::account_feed::Feed::start_positions_only(ACCOUNT).unwrap();
+    feed.ingest(&event(Observation::Connected, 1))
+        .await
+        .unwrap();
+    let portfolio = |qty: &str, balance: &str| Observation::Portfolio {
+        positions: vec![crate::wire::Position {
+            symbol: "ETH".into(),
+            signed_quantity: qty.into(),
+        }],
+        wallet_balance: Some(balance.into()),
+    };
+    feed.ingest(&event(portfolio("-2", "500"), 1))
+        .await
+        .unwrap();
+    let c = feed.coordinator();
+    let ticket = c.begin_account_query().await.unwrap();
+    feed.ingest(&event(portfolio("-2", "500.1"), 1))
+        .await
+        .unwrap();
+    let mut r = receipt();
+    r["inventory"]["rounds"][1]["portfolio"]["balance"] = json!("500.1");
+    r["inventory"]["rounds"][1]["portfolio"]["cross_balance"] = json!("500.1");
+    // Old baselines with wallet values also work; only positions/orders compare.
+    let report = query(r)
+        .unwrap()
+        .reconcile_positions(&c, ticket, Some(expected()))
+        .await
+        .unwrap();
+    assert!(report.usable(
+        c.scope(),
+        &c.health(),
+        Instant::now(),
+        Duration::from_secs(30)
+    ));
+    feed.ingest(&event(portfolio("-2", "501"), 1))
+        .await
+        .unwrap();
+    assert!(report.usable(
+        c.scope(),
+        &c.health(),
+        Instant::now(),
+        Duration::from_secs(30)
+    ));
+    feed.ingest(&event(portfolio("-3", "501"), 1))
+        .await
+        .unwrap();
+    assert!(!report.usable(
+        c.scope(),
+        &c.health(),
+        Instant::now(),
+        Duration::from_secs(30)
+    ));
+    feed.shutdown().await.unwrap();
 }
 #[test]
 fn changing_or_incomplete_or_wrong_account_snapshots_are_not_certified() {

@@ -24,6 +24,85 @@ fn key(symbol: &str, id: &str) -> OrderKey {
         order_id: id.into(),
     }
 }
+
+#[tokio::test]
+async fn position_reports_arm_only_the_selected_leg_and_expire_on_disconnect() {
+    let (m, mw) = actor::position_channel(scope("aster"), "ETHUSDT", 32, 8).unwrap();
+    let (h, hw) = actor::position_channel(scope("hyperliquid"), "ETH", 32, 8).unwrap();
+    let tasks = [mw.spawn(), hw.spawn()];
+    for (c, symbol) in [(&m, "ETHUSDT"), (&h, "ETH")] {
+        c.connected().await.unwrap();
+        let ticket = c.begin_account_query().await.unwrap();
+        let now = Instant::now();
+        c.apply_position_snapshot(
+            ticket,
+            Snapshot {
+                scope: c.scope().clone(),
+                inventory: Inventory {
+                    perp_dexes: BTreeSet::from([String::new()]),
+                    ..Inventory::default()
+                },
+                started_at: now,
+                completed_at: now,
+                exchange_time_ms: None,
+            },
+            symbol,
+        )
+        .await
+        .unwrap();
+    }
+    let p = Plan {
+        run_id: "scoped".into(),
+        maker: Leg {
+            scope: m.scope().clone(),
+            symbol: "ETHUSDT".into(),
+            side: Side::Buy,
+        },
+        hedge: Leg {
+            scope: h.scope().clone(),
+            symbol: "ETH".into(),
+            side: Side::Sell,
+        },
+        maker_order: key("ETHUSDT", "1"),
+        quantity: d("1"),
+        step: d("0.1"),
+        minimum: d("0.1"),
+    };
+    let mr = m.account_report().await.unwrap().unwrap();
+    let hr = h.account_report().await.unwrap().unwrap();
+    assert!(Engine::arm(
+        p.clone(),
+        (&mr, &m.health()),
+        (&hr, &h.health()),
+        true,
+        Duration::from_secs(5)
+    )
+    .is_ok());
+    let mut wrong = p.clone();
+    wrong.hedge.symbol = "BTC".into();
+    assert!(Engine::arm(
+        wrong,
+        (&mr, &m.health()),
+        (&hr, &h.health()),
+        true,
+        Duration::from_secs(5)
+    )
+    .is_err());
+    m.transport_lost().await.unwrap();
+    assert!(Engine::arm(
+        p,
+        (&mr, &m.health()),
+        (&hr, &h.health()),
+        true,
+        Duration::from_secs(5)
+    )
+    .is_err());
+    m.shutdown().await.unwrap();
+    h.shutdown().await.unwrap();
+    for t in tasks {
+        t.await.unwrap();
+    }
+}
 async fn setup() -> (
     Engine,
     Coordinator,

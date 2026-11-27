@@ -39,6 +39,9 @@ impl Request {
             return Err(Error::InvalidInput);
         }
         match (&*self.scope.venue, &self.selector) {
+            ("lighter", Selector::ClientId(s))
+                if s.parse::<u64>()
+                    .is_ok_and(|n| n > 0 && n < (1 << 48) && n.to_string() == *s) => {}
             ("aster" | "hyperliquid" | "binance_spot", Selector::OrderId(s))
                 if s.parse::<u64>().is_ok() => {}
             ("aster" | "binance_spot", Selector::ClientId(s))
